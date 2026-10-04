@@ -6,7 +6,8 @@ mamepgui 1.8.2（Qt/C++）用 Rust + egui 重写。**项目名 MvUI，已迁移�
 `wolffy1998/MvUI`（SSH 443，`gh` CLI 未装，用纯 git）。**
 Rust 工程在 `mamegui-rs/`（workspace：`mamegui-core` 纯逻辑 + `mamegui-app` UI，
 产物 `mvui.exe`）。
-`Desktop\mamepgui-rewrite\` 是**迁移前的旧副本**，别再改它。
+旧目录 `Desktop\mamepgui-rewrite\` **已于 2026-10-04 删除**（内容全部并入 MvUI，
+只剩一个空目录壳）。项目记忆现在也住在这里：`.workbuddy/memory/`。
 
 ## 最高优先级约定
 **一切行为以旧版 mamepgui 1.8.2 为准。** 参考源码在
