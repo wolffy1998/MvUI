@@ -562,6 +562,13 @@ pub fn compute_folder_cache(lib: &GameLibrary, is_mess: bool) -> FolderCache {
     let mut root_counts: Vec<usize> = vec![0; n];
 
     for g in &lib.games {
+        // The tree must agree with the list, and the list never shows device
+        // machines (the refilter skips them first): counting them here is what
+        // made 全部街机 read 46 885 while the status bar said 39 903, and what
+        // double-counted software-list devices under both 全部街机 and 游戏机.
+        if g.is_device {
+            continue;
+        }
         for i in 0..n {
             let kind = &kinds[i].0;
             let mut has_keys = false;
@@ -725,5 +732,44 @@ mod tests {
 
         assert!(in_dimension(&FolderKind::Manufacturer, g));
         assert!(in_dimension(&FolderKind::Year, g));
+    }
+
+    /// The tree counts must agree with the list, which never shows devices:
+    /// a device machine must appear in no root count and no child tally.
+    #[test]
+    fn devices_are_not_counted() {
+        let lib = lib_with(vec![
+            GameMeta {
+                name: "pacman".into(),
+                description: "Pac-Man".into(),
+                manufacturer: "Namco".into(),
+                year: "1980".into(),
+                sourcefile: "pacman.cpp".into(),
+                ..Default::default()
+            },
+            GameMeta {
+                name: "joy_card".into(),
+                description: "Joy Card".into(),
+                is_device: true,
+                sourcefile: "joy.cpp".into(),
+                ..Default::default()
+            },
+        ]);
+        let cache = compute_folder_cache(&lib, false);
+        let all_arc = cache
+            .roots
+            .iter()
+            .find(|r| r.kind == FolderKind::AllArc)
+            .expect("all-arc root");
+        assert_eq!(all_arc.count, 1, "a device must not inflate 全部街机");
+        let driver = cache
+            .roots
+            .iter()
+            .find(|r| r.kind == FolderKind::Source)
+            .expect("driver root");
+        assert!(
+            driver.children.iter().all(|c| c.key != "joy.cpp"),
+            "a device must not contribute to the driver tally"
+        );
     }
 }

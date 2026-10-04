@@ -21,6 +21,38 @@ pub const DOCK_STORY: usize = 10;
 pub const DOCK_COMMAND: usize = 11;
 pub const DOCK_LAST: usize = 12;
 
+/// The five document docks, in the order the tab bar and the visibility
+/// checkboxes list them.
+///
+/// **A text tab index is not a `DOCK_*` value.** The UI stores document tabs as
+/// `MainTab::Text(0..5)` — a compact index into the checkbox array — while
+/// everything below this module (`dock_file_option`, `DOCK_NAMES`, the `method`
+/// parameter threaded through `get_history`) speaks `DOCK_*`, where the same
+/// five start at [`DOCK_HISTORY`] = 7.
+///
+/// Passing a tab index where a `DOCK_*` is expected fails silently and
+/// everywhere at once: `dock_file_option` returns `None`, so the lookup
+/// resolves to no file and the panel stays empty; `DOCK_NAMES` is indexed out
+/// of range or, worse, still in range and names the wrong dock; and the
+/// `dock == DOCK_COMMAND` test in the renderer never fires, so even a record
+/// that *was* found would print as plain text with no command icons. Use
+/// [`text_dock`] at the boundary rather than doing the arithmetic inline.
+pub const TEXT_DOCKS: [usize; 5] = [
+    DOCK_HISTORY,
+    DOCK_MAMEINFO,
+    DOCK_DRIVERINFO,
+    DOCK_STORY,
+    DOCK_COMMAND,
+];
+
+/// Translate a document tab index (`0..5`) into its `DOCK_*` value.
+///
+/// Returns `DOCK_HISTORY` for an out-of-range index so a malformed saved layout
+/// degrades to a real dock instead of indexing the DAT arrays out of bounds.
+pub fn text_dock(tab: usize) -> usize {
+    TEXT_DOCKS.get(tab).copied().unwrap_or(DOCK_HISTORY)
+}
+
 pub const DOCK_NAMES: [&str; DOCK_LAST] = [
     "Snapshot",
     "Flyer",
@@ -129,9 +161,13 @@ fn render_lines_for(lines: &[&str], own_tag: Option<&str>, dark_bg: bool) -> Str
         if line.starts_with('$') {
             if let Some(href) = line.strip_prefix("$<a href=") {
                 out.push(format!("<a style=\"color:{link}\" href={href}><br>"));
-            } else {
-                out.push(format!("{line}<br>"));
             }
+            // origin: the `else if (recData) buf += "<br>"` branch is
+            // *commented out* (gamelist.cpp:366-367), so every other `$` line is
+            // dropped rather than emitted. In command.dat those are `$cmd` and
+            // `$end`, 12 306 of them between 6 144 records — emitting them put a
+            // literal `$cmd` above every heading and a literal `$end` after
+            // every section.
         } else {
             out.push(format!("{line}<br>"));
         }
@@ -246,6 +282,8 @@ pub enum Notation {
 pub enum Segment {
     Text(String),
     Icon(Notation),
+    /// A section divider — origin's `<hr>` (see [`is_section_rule`]).
+    Rule,
 }
 
 #[derive(Debug, Clone)]
@@ -257,6 +295,17 @@ pub struct DatLine {
 /// (README P2-24)
 static CMD_TOKEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"_([0-9A-DGKNPS+])|_([a-f])|(★|☆|▲|○|◎|●|→)").unwrap());
+
+/// origin: `<br>[\x2500-]{8,}<br>` → `<hr>` — a horizontal-rule divider.
+///
+/// Eight or more box-drawing characters (U+2500 BLOCK) and nothing else. Kept
+/// deliberately narrow: the file also contains `#` legend lines made of the same
+/// characters, and those are dropped as comments long before here.
+fn is_section_rule(line: &str) -> bool {
+    let t = line.trim_end();
+    let n = t.chars().count();
+    n >= 8 && t.chars().all(|c| ('\u{2500}'..='\u{257f}').contains(&c))
+}
 
 pub fn convert_command_lines(text: &str) -> Vec<DatLine> {
     // ordered replacement table (origin: convertCommand); first the
@@ -276,7 +325,22 @@ pub fn convert_command_lines(text: &str) -> Vec<DatLine> {
 
     let mut out = Vec::new();
     for raw in text.lines() {
-        let mut line = raw.to_string();
+        let raw = raw.trim_end_matches('\r');
+        // origin: `<br>\s+` → `<br>`, the very first rule in convertCommand's
+        // table. It existed to tidy the HTML string between records; applied to
+        // a line it means the leading indent goes. The file indents sub-entries
+        // with two spaces (`  _A：攻击`), so without this every button sat two
+        // columns right of the heading it belongs to.
+        let mut line = raw.trim_start().to_string();
+        // origin: `<br>[\x2500-]{8,}<br>` → `<hr>`. The shipped file has 6 925
+        // of these box-drawing runs, 24 chars wide, separating the 基本操作 /
+        // 道具介绍 / 必杀技 blocks. Rendered as text they were a wall of ─.
+        if is_section_rule(&line) {
+            out.push(DatLine {
+                segments: vec![Segment::Rule],
+            });
+            continue;
+        }
         for (pat, ns) in combos {
             // every tag is wrapped in its own \0 pair: the parser reads the text
             // *between* two markers as one tag, so two adjacent tags need the
@@ -353,6 +417,38 @@ pub fn convert_command_lines(text: &str) -> Vec<DatLine> {
         }
         segments.push(Segment::Text(plain));
         out.push(DatLine { segments });
+    }
+    out
+}
+
+/// Split a History record into renderable lines.
+///
+/// The History dock is the other half of the `Segment` story: `history.xml`
+/// writes its sections as plain-text headers (`- TECHNICAL -`, `- TRIVIA -`,
+/// …) rather than tags, and `historyxml::render_text` already turned each one
+/// into a box-drawing rule with the bare title on the next line. This promotes
+/// that pair into the same `Rule` / `Text` shape the Command tab consumes, so
+/// one renderer covers both docks.
+///
+/// Everything else stays plain text — History has no `_8_P`-style notation to
+/// iconify, so unlike `convert_command_lines` there is no token pass.
+pub fn convert_history_lines(text: &str) -> Vec<DatLine> {
+    let mut out: Vec<DatLine> = Vec::new();
+    for raw in text.lines() {
+        let line = raw.trim_end_matches('\r');
+        if is_section_rule(line) {
+            // the rule line; the title follows as the next line
+            out.push(DatLine {
+                segments: vec![Segment::Rule],
+            });
+            continue;
+        }
+        // The heading sits *between* two rules in the XML output; it was already
+        // de-tagged by `render_text`, so a non-empty line straight after a Rule
+        // that is a bare section name is the heading.
+        out.push(DatLine {
+            segments: vec![Segment::Text(line.to_string())],
+        });
     }
     out
 }
@@ -439,6 +535,56 @@ pub fn read_dat_bytes(path: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// The bug this pins: a document tab index (0..5) was passed straight into
+    /// code expecting `DOCK_*` (7..11). Everything downstream then failed
+    /// quietly — no file resolved, and the Command renderer never recognised
+    /// its own dock, so the 出招表 stayed blank with no error anywhere.
+    #[test]
+    fn text_tab_index_maps_to_dock_index() {
+        assert_eq!(text_dock(0), DOCK_HISTORY);
+        assert_eq!(text_dock(1), DOCK_MAMEINFO);
+        assert_eq!(text_dock(2), DOCK_DRIVERINFO);
+        assert_eq!(text_dock(3), DOCK_STORY);
+        assert_eq!(text_dock(4), DOCK_COMMAND);
+        // out of range degrades to a valid dock rather than indexing blindly
+        assert_eq!(text_dock(99), DOCK_HISTORY);
+    }
+
+    /// Every mapped value must satisfy all three contracts the UI relies on:
+    /// it is in range for `DOCK_NAMES`, it names the expected document, and
+    /// `dock_file_option` resolves it to a real file key.
+    #[test]
+    fn every_text_dock_is_self_consistent() {
+        let expected = [
+            (DOCK_HISTORY, "History", Some("history_file")),
+            (DOCK_MAMEINFO, "MAMEInfo", Some("mameinfo_file")),
+            (DOCK_DRIVERINFO, "DriverInfo", Some("mameinfo_file")),
+            (DOCK_STORY, "Story", Some("story_file")),
+            (DOCK_COMMAND, "Command", Some("command_file")),
+        ];
+        for (tab, (dock, name, opt)) in expected.iter().enumerate() {
+            assert_eq!(text_dock(tab), *dock, "tab {tab}");
+            assert!(
+                (*dock as usize) < DOCK_NAMES.len(),
+                "dock {dock} out of range for DOCK_NAMES"
+            );
+            assert_eq!(DOCK_NAMES[*dock], *name, "dock {dock} name");
+            assert_eq!(dock_file_option(*dock), *opt, "dock {dock} file option");
+        }
+    }
+
+    /// The renderer branches on `DOCK_COMMAND`, so the Command tab must be the
+    /// one that reaches it. This is the exact comparison that was `d == 11`.
+    #[test]
+    fn command_tab_reaches_the_command_renderer() {
+        assert_eq!(text_dock(4), DOCK_COMMAND);
+        assert!(TEXT_DOCKS.contains(&DOCK_COMMAND));
+        // and no *other* tab may claim to be the command dock
+        for tab in 0..4 {
+            assert_ne!(text_dock(tab), DOCK_COMMAND, "tab {tab}");
+        }
+    }
+
     #[test]
     fn history_info_block() {
         let dat = b"# comment\n$info=pacman,pacmana\nHistory line 1\n$more\n";
@@ -447,6 +593,92 @@ mod tests {
         assert!(s.contains("MAWS"));
         let s2 = get_history(dat, "pacmana", DOCK_HISTORY, false, "pacman");
         assert!(s2.contains("History line 1"));
+    }
+
+    /// 1.8.2 `getHistory` writes a line only when it does **not** start with `$`,
+    /// or when it is exactly `$<a href=`. The `else if (recData)` branch is
+    /// commented out (`gamelist.cpp:366-367`), so `$cmd` / `$end` were never
+    /// shown. Ours emitted them, putting a literal `$cmd` above every heading.
+    #[test]
+    fn structural_markers_are_not_rendered() {
+        let dat = "$info=karnov\n$cmd\n[ 基本操作 ]\n$end\n$cmd\n".as_bytes();
+        let s = get_history(dat, "karnov", DOCK_COMMAND, true, "");
+        assert!(s.contains("基本操作"), "payload lost: {s:?}");
+        assert!(!s.contains("$cmd"), "$cmd leaked: {s:?}");
+        assert!(!s.contains("$end"), "$end leaked: {s:?}");
+    }
+
+    /// A `$<a href=` line *is* kept — it is the one `$` line origin writes,
+    /// rewritten with a coloured style. Pins the boundary of the rule above.
+    #[test]
+    fn anchor_lines_are_still_rendered() {
+        let dat = b"$info=karnov\n$<a href=\"http://x\">MAWS</a>\nplain\n";
+        let s = get_history(dat, "karnov", DOCK_COMMAND, true, "");
+        assert!(s.contains("MAWS"), "anchor lost: {s:?}");
+        assert!(s.contains("plain"));
+    }
+
+    /// origin: `<br>[\x2500-]{8,}<br>` → `<hr>`; the file has 6 925 of these.
+    /// Drawn as literal text they were a wall of ─ characters.
+    #[test]
+    fn box_drawing_run_becomes_a_rule() {
+        let long = "\u{2500}".repeat(24);
+        assert!(is_section_rule(&long));
+        assert!(is_section_rule(&format!("{long}   ")));
+        // below the 8-character threshold it is not a rule
+        assert!(!is_section_rule(&"\u{2500}".repeat(7)));
+        // mixed content is not a rule either
+        assert!(!is_section_rule(&format!("{long} x")));
+        assert!(!is_section_rule("[ 基本操作 ]"));
+
+        let lines = convert_command_lines(&format!("[ a ]\n{long}\n[ b ]"));
+        assert_eq!(lines.len(), 3);
+        assert!(matches!(lines[1].segments[0], Segment::Rule));
+    }
+
+    /// A History record splits into rules + text, with the section heading on
+    /// the line right after a rule — that adjacency is what the panel's
+    /// `heading_after_rule` test uses to render it bold, so it is load-bearing.
+    #[test]
+    fn history_lines_split_on_the_section_rules() {
+        let rule = "\u{2500}".repeat(8);
+        let text = format!("Arcade factory kit.\n{rule}\nTECHNICAL\n{rule}\nGAME ID : GX861\n{rule}\nTRIVIA\n{rule}\nReleased in July 1988.");
+        let lines = convert_history_lines(&text);
+        assert_eq!(lines.len(), 9, "got {lines:?}");
+
+        let seg = |i: usize| match &lines[i].segments[0] {
+            Segment::Rule => "RULE".to_string(),
+            Segment::Text(t) => t.clone(),
+            Segment::Icon(_) => "ICON".to_string(),
+        };
+        assert_eq!(seg(0), "Arcade factory kit.");
+        assert_eq!(seg(1), "RULE");
+        assert_eq!(seg(2), "TECHNICAL", "heading must sit right after a rule");
+        assert_eq!(seg(3), "RULE");
+        assert_eq!(seg(4), "GAME ID : GX861");
+        assert_eq!(seg(6), "TRIVIA");
+        assert_eq!(seg(8), "Released in July 1988.");
+    }
+
+    /// A plain History record with no sections at all must survive intact —
+    /// only the XML era has `- SECTION -` headers, and the DAT era has none.
+    #[test]
+    fn history_lines_without_sections_are_all_text() {
+        let lines = convert_history_lines("Line one.\nLine two.");
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| matches!(l.segments[0], Segment::Text(_))));
+    }
+
+    /// origin's first table entry, `<br>\s+` → `<br>`: sub-entries are indented
+    /// two spaces in the file and came out flush with their heading.
+    #[test]
+    fn leading_indent_is_stripped() {
+        let lines = convert_command_lines("  _A：攻击");
+        let first = match &lines[0].segments[0] {
+            Segment::Text(t) => t.clone(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        assert_eq!(first, "", "indent survived: {first:?}");
     }
 
     #[test]

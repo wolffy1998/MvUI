@@ -1,7 +1,14 @@
-//! QSettings-equivalent GUI settings store (origin: pGuiSettings, IniFormat).
-//! Path: CFG_PREFIX + "mamepgui.ini"; CFG_PREFIX default ".mamepgui/" under the
-//! exe dir (portable), overridable by the `-configpath <dir>` argument.
+//! GUI 设置存储，等价旧版的 QSettings（origin: pGuiSettings, IniFormat）。
+//!
+//! 路径：CFG_PREFIX + `mvui.ini`；CFG_PREFIX 默认取 exe 目录下的
+//! `.mvui/`（便携安装），可用 `-configpath <dir>` 命令行参数覆盖。
+//!
+//! 改名说明：目录与文件名随程序名从 `.mamepgui/` + `mamepgui.ini`
+//! 换成 `.mvui/` + `mvui.ini`，**不做迁移**——旧配置不再生效，
+//! 用户需要重新配置一次。旧的 `.mamepgui` 目录不会被自动删除，
+//! 残留在磁盘上，可手动清理。
 
+use crate::dlog;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -11,14 +18,14 @@ pub struct GuiSettings {
 }
 
 impl GuiSettings {
-    /// Directory holding `mvui.exe`.
+    /// 存放 `mvui.exe` 的目录。
     ///
-    /// Since the layout flattening this is the anchor for every *content*
-    /// directory: `snap/`, `flyers/`, `dats/`, `folders/`, `bkground/` and
-    /// `mame_cn.lst` all live next to the program unless the user points them
-    /// elsewhere. That is deliberately **not** the mame directory any more —
-    /// romsets and artwork are separate concerns, and a portable install should
-    /// not need write access to the MAME tree.
+    /// 工程拍平之后，这里成了所有**内容目录**的锚点：`snap/`、
+    /// `flyers/`、`dats/`、`folders/`、`bkground/` 和 `mame_cn.lst`
+    /// 默认都住在程序旁边，除非用户另行指定。
+    ///
+    /// 这**故意不是** mame 目录了——rom 集和 artwork 是两回事，
+    /// 便携安装不该要求对 MAME 目录树的写权限。
     pub fn exe_dir() -> PathBuf {
         std::env::current_exe()
             .ok()
@@ -26,7 +33,10 @@ impl GuiSettings {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    /// main(): CFG_PREFIX resolution + `-configpath` handling
+    /// 配置根目录。对应旧版 main() 里的 CFG_PREFIX 解析 +
+    /// `-configpath` 处理。
+    ///
+    /// 优先级：`-configpath <dir>` 参数 > exe 目录下的 `.mvui/`。
     pub fn cfg_prefix() -> PathBuf {
         let mut prefix: Option<String> = None;
         let args: Vec<String> = std::env::args().collect();
@@ -37,27 +47,32 @@ impl GuiSettings {
             }
         }
         let base = match prefix {
+            // 显式指定：原样用，不再拼子目录
             Some(p) => PathBuf::from(p),
+            // 默认：exe 目录下的 .mvui/
             None => {
                 let exe = std::env::current_exe()
                     .ok()
                     .and_then(|e| e.parent().map(|d| d.to_path_buf()))
                     .unwrap_or_default();
-                exe.join(".mamepgui")
+                exe.join(".mvui")
             }
         };
         let _ = std::fs::create_dir_all(&base);
+        dlog!("设置: 配置目录 = {}", base.display());
         base
     }
 
+    /// 载入设置。文件不存在或损坏时返回空表（不报错）。
     pub fn load() -> Self {
         let dir = Self::cfg_prefix();
-        let path = dir.join("mamepgui.ini");
+        let path = dir.join("mvui.ini");
         let map = crate::core::options::read_text_file(&path)
             .map(|text| {
                 let mut m = BTreeMap::new();
                 for line in text.lines() {
                     let line = line.trim();
+                    // 跳过空行、节名 `[General]`、注释 `;...`
                     if line.is_empty() || line.starts_with('[') || line.starts_with(';') {
                         continue;
                     }
@@ -68,11 +83,16 @@ impl GuiSettings {
                 m
             })
             .unwrap_or_default();
+        dlog!(
+            "设置: 从 {} 载入 {} 条",
+            path.display(),
+            map.len()
+        );
         Self { path, map }
     }
 
-    /// Returns the write error instead of swallowing it: a failed save used to
-    /// lose every setting silently (README P3).
+    /// 把写错误返回给调用方，而不是吞掉：保存失败曾经会静默丢掉
+    /// 全部设置（README P3）。
     pub fn save(&self) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -81,7 +101,13 @@ impl GuiSettings {
         for (k, v) in &self.map {
             out.push_str(&format!("{k}={v}\n"));
         }
-        std::fs::write(&self.path, out)
+        std::fs::write(&self.path, out)?;
+        dlog!(
+            "设置: 保存 {} 条到 {}",
+            self.map.len(),
+            self.path.display()
+        );
+        Ok(())
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -109,8 +135,9 @@ impl GuiSettings {
     }
 }
 
-/// old toml app settings retained for the cache dir helper
+/// 缓存目录助手，挂在配置根目录下。
 impl GuiSettings {
+    /// `<配置根>/cache`。清单缓存、审计缓存、boot.log 都住这里。
     pub fn cache_dir() -> PathBuf {
         let p = GuiSettings::cfg_prefix().join("cache");
         let _ = std::fs::create_dir_all(&p);

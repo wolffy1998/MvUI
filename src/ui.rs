@@ -31,6 +31,17 @@ const FOLDER_DOCK_FRACTION: f32 = 0.17;
 /// `gamelist.cpp:2830` puts on every tree entry)
 const FOLDER_ICON: f32 = 16.0;
 
+/// Floor for the width of the View popups.
+///
+/// egui sizes a menu to its widest entry (`Style::spacing.menu_width`, 400 px, is
+/// only the *maximum* — `menu_popup` passes it as the Area's `default_width`, and
+/// the Area then shrinks to `content_ui.min_size()`). Four two-character CJK
+/// labels plus a radio circle come to well under 100 px, which produced a popup
+/// so narrow that longer entries wrapped one character per line. The background
+/// list is worse still: it holds file names. Pinning a minimum makes the popups
+/// look deliberate and gives file names somewhere to go.
+const MENU_MIN_WIDTH: f32 = 200.0;
+
 use egui_dock::Split;
 
 fn split_right(state: &mut DockState<MainTab>, parent: NodeIndex, fraction: f32, tabs: Vec<MainTab>) -> [NodeIndex; 2] {
@@ -167,8 +178,12 @@ impl egui_dock::TabViewer for DockTabs<'_> {
             MainTab::List => self.app.tr("Game List"),
             MainTab::Folders => self.app.tr("Folders"),
             MainTab::Image(d) => self.app.tr(crate::core::dat::DOCK_NAMES[*d]),
+            // index `DOCK_NAMES` through `text_dock` instead of a private
+            // five-element array: same names, but a malformed saved layout
+            // yields a valid dock instead of an out-of-bounds panic
             MainTab::Text(d) => {
-                self.app.tr(["History", "MAMEInfo", "DriverInfo", "Story", "Command"][*d])
+                let dock = crate::core::dat::text_dock(*d);
+                self.app.tr(crate::core::dat::DOCK_NAMES[dock])
             }
         };
         egui::WidgetText::from(name)
@@ -204,6 +219,9 @@ impl eframe::App for MameApp {
                 }
             }
             crate::app::apply_theme_with_bg(ctx, self.dark_bg, has_bg);
+            // the zoom lives in egui's options, not in `Style`, so it is not
+            // restored by applying the theme — it has to be set once per session
+            ctx.set_zoom_factor(self.font_zoom);
         }
         // stamp a selection change once, wherever it came from (click, refilter,
         // restore) — the debounce in `selection_settling` reads it
@@ -289,6 +307,16 @@ impl MameApp {
 
     fn save_settings_periodic(&mut self) {
         self.frame_count += 1;
+        // Never write while the MAME binary is still unresolved. The picker can
+        // sit open for minutes, and this save runs every 200 frames: back when
+        // `save_settings` could not restore a missing `mame_binary`, this timer
+        // is what actually rewrote the ini without it, turning a one-off bad
+        // read into a permanent "the program forgot my MAME path" bug. The
+        // write-side guard in `save_settings` now covers the loss itself; this
+        // keeps the timer from saving a half-initialised state at all.
+        if self.need_mame_pick || self.mame.is_none() {
+            return;
+        }
         if self.frame_count % 200 == 0 {
             self.save_settings();
         }
@@ -389,6 +417,9 @@ impl MameApp {
                 });
                 self.settings_menu(ui);
                 ui.menu_button(self.tr("View"), |ui| {
+                    self.font_submenu(ui);
+                    self.background_submenu(ui);
+                    ui.separator();
                     ui.menu_button(self.tr("Customize Fields"), |ui| {
                         for i in 1..COL_LAST {
                             let mut v = self.col_visible[i];
@@ -398,9 +429,6 @@ impl MameApp {
                         }
                     });
                     self.info_panels_submenu(ui);
-                    ui.separator();
-                    self.gui_style_submenu(ui);
-                    self.background_submenu(ui);
                     ui.separator();
                     for (mode, key) in
                         [(ListMode::Grouped, "Grouped"), (ListMode::Details, "Details")]
@@ -619,40 +647,82 @@ impl MameApp {
         });
     }
 
-    /// Light / dark theme. Was "Options ▸ GUI Style"; both entries now really
-    /// apply the palette (`dark_bg` used to be a flag nothing read).
-    fn gui_style_submenu(&mut self, ui: &mut egui::Ui) {
+    /// View ▸ Icon Font — the interface scale, as one exclusive radio group.
+    ///
+    /// egui has no per-widget font size, only `TextStyle`s and a global
+    /// `Context::set_zoom_factor`. The zoom is the honest choice for a "font"
+    /// menu: it scales text, spacing and hit targets together, so enlarged
+    /// labels do not end up clipped by unscaled rows.
+    fn font_submenu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let has_bg = self.background_file.is_some();
-        ui.menu_button(self.tr("GUI Style"), |ui| {
-            let dark = self.tr("Dark");
-            if ui.radio(self.dark_bg, dark).clicked() {
-                self.dark_bg = true;
-                crate::app::apply_theme_with_bg(&ctx, true, has_bg);
-                ui.close_menu();
-            }
-            let light = self.tr("Light");
-            if ui.radio(!self.dark_bg, light).clicked() {
-                self.dark_bg = false;
-                crate::app::apply_theme_with_bg(&ctx, false, has_bg);
-                ui.close_menu();
+        ui.menu_button(self.tr("Font"), |ui| {
+            // A menu is sized to its widest entry, and four short CJK labels
+            // make a very narrow popup. Pin a floor so it lines up with the
+            // other submenus instead of hugging the radio circles.
+            ui.set_min_width(MENU_MIN_WIDTH);
+            // (label key, scale). The steps are the ones that stay legible at
+            // both ends on a 1080p screen: 0.8 is still readable CJK, 1.4 is
+            // about where rows start needing more room than the labels do.
+            for (key, scale) in [
+                ("Smaller", 0.8f32),
+                ("Default Size", 1.0),
+                ("Larger", 1.15),
+                ("Largest", 1.4),
+            ] {
+                let label = self.tr(key);
+                let picked = (self.font_zoom - scale).abs() < 0.01;
+                if ui.radio(picked, label).clicked() {
+                    self.font_zoom = scale;
+                    // takes effect at the start of the next pass; the request
+                    // makes that happen without waiting for another input event
+                    ctx.set_zoom_factor(scale);
+                    ctx.request_repaint();
+                    self.save_settings();
+                    ui.close_menu();
+                }
             }
         });
     }
 
-    /// Window background: the images in `assets/backgrounds` as one exclusive
-    /// radio group (origin: 1.8.2's `bgActions`), plus the stretch/tile pair
-    /// (origin: `bgStretchActions`). Stretch fills the window, tiling repeats
-    /// the picture at its natural size.
+    /// View ▸ Window Background — the light/dark palette pair first, then every
+    /// image found in the configured background directory (`.\bkground` by
+    /// default) as one exclusive radio group.
+    ///
+    /// Origin: 1.8.2 kept the palette in its own "Options ▸ GUI Style" group
+    /// and the pictures in a separate background group. They answer the same
+    /// question — what is behind the panels — so they are one list now, and the
+    /// palette leads it because it is the choice that is always available.
+    ///
+    /// Stretch / Tile are unchanged: they are how a picture is drawn, not which
+    /// picture, so they stay pinned below the list.
     fn background_submenu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ui.menu_button(self.tr("Background"), |ui| {
+        ui.menu_button(self.tr("Window Background"), |ui| {
             // rescan on open: the directory is next to mame.exe, so pictures
             // dropped in after start-up show up without a restart
             let fresh = crate::app::scan_backgrounds(&self.bg_dir);
             if fresh != self.bg_choices {
                 self.bg_choices = fresh;
             }
+            // see `font_submenu` — a background list is mostly file names, and
+            // without a floor the popup collapses to the width of "None"
+            ui.set_min_width(MENU_MIN_WIDTH);
+            // palette first — Light / Dark
+            let has_bg = self.background_file.is_some();
+            let light = self.tr("Light");
+            if ui.radio(!self.dark_bg, light).clicked() {
+                self.dark_bg = false;
+                crate::app::apply_theme_with_bg(&ctx, false, has_bg);
+                ui.close_menu();
+            }
+            let dark = self.tr("Dark");
+            if ui.radio(self.dark_bg, dark).clicked() {
+                self.dark_bg = true;
+                crate::app::apply_theme_with_bg(&ctx, true, has_bg);
+                ui.close_menu();
+            }
+            ui.separator();
+            // then one entry per image in the directory
             let none = self.tr("None");
             let mut picked = self.background_file.clone();
             if ui.radio(picked.is_none(), none).clicked() {
@@ -685,17 +755,6 @@ impl MameApp {
                 }
                 ctx.request_repaint();
             }
-            if self.bg_dir.is_dir() {
-                ui.separator();
-                ui.weak(self.bg_dir.display().to_string());
-            } else {
-                ui.separator();
-                ui.weak(format!(
-                    "{}: {}",
-                    self.tr("Background"),
-                    self.bg_dir.display()
-                ));
-            }
             ui.separator();
             let s = self.tr("Stretch");
             if ui.radio(self.bg_stretch, s).clicked() {
@@ -721,12 +780,10 @@ impl MameApp {
 
             let d = self.tr("Directories");
             if ui.button(d).clicked() {
-                self.dirs_buf = self
-                    .opts
-                    .as_ref()
-                    .and_then(|o| o.try_lock().ok())
-                    .and_then(|o| o.opts.get("rompath").map(|p| p.currvalue.clone()))
-                    .unwrap_or_default();
+                // no pre-seed needed: the dialog reads every field straight out
+                // of the GUI settings, and an empty field already means "use the
+                // default". It used to be seeded from `rompath`, which is not a
+                // path this dialog edits any more.
                 self.show_dirs_win = true;
                 ui.close_menu();
             }
@@ -1184,18 +1241,26 @@ impl MameApp {
                 });
             }
             None => {
+                // 没有素材（或还在加载）时显示内嵌的 mame.png 占位图，
+                // 而不是画一个写着"No snapshot"的空框。
                 let (rect, resp) =
                     ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
-                ui.painter()
-                    .rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, egui::Color32::GRAY));
-                let none = self.tr("No snapshot");
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    none,
-                    egui::FontId::proportional(15.0),
-                    egui::Color32::GRAY,
-                );
+                if !crate::icons::draw_placeholder(ui, rect) {
+                    // 占位图都解码不出来才退回原来的灰框 + 文字
+                    ui.painter().rect_stroke(
+                        rect,
+                        4.0,
+                        egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
+                    );
+                    let none = self.tr("No snapshot");
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        none,
+                        egui::FontId::proportional(15.0),
+                        egui::Color32::GRAY,
+                    );
+                }
                 if resp.clicked() {
                     let tabs: Vec<usize> =
                         (0..7).filter(|&i| self.image_dock_visible[i]).collect();
@@ -1209,7 +1274,41 @@ impl MameApp {
         });
     }
 
-    pub fn documents_content(&mut self, ui: &mut egui::Ui, dock: usize) {
+    /// Memoize the Command/History tab parse (see `documents_content`).
+    ///
+    /// Keyed by (dock, game) — the same key the text cache one level up uses,
+    /// so the two caches stay in lockstep. Bounded to a handful of games
+    /// (each entry can be several MB of segments) by evicting one non-current
+    /// entry per insert: steady state, and no cliff when rotating A→B→A.
+    fn cached_lines(
+        map: &mut std::collections::HashMap<
+            (usize, String),
+            std::sync::Arc<Vec<crate::core::dat::DatLine>>,
+        >,
+        dock: usize,
+        game: &str,
+        text: &str,
+        parse: impl Fn(&str) -> Vec<crate::core::dat::DatLine>,
+    ) -> std::sync::Arc<Vec<crate::core::dat::DatLine>> {
+        const PARSED_CAP: usize = 8;
+        if let Some(hit) = map.get(&(dock, game.to_string())) {
+            return hit.clone();
+        }
+        let parsed = std::sync::Arc::new(parse(text));
+        if map.len() >= PARSED_CAP {
+            if let Some(k) = map.keys().find(|(_, g)| g != game).cloned() {
+                map.remove(&k);
+            }
+        }
+        map.insert((dock, game.to_string()), parsed.clone());
+        parsed
+    }
+
+    pub fn documents_content(&mut self, ui: &mut egui::Ui, tab: usize) {
+        // `tab` is a document-tab index (0..5); everything below speaks `DOCK_*`,
+        // where these five live at 7..11. Converting once here keeps the lookup
+        // key, the cache key and the renderer all in the same index space.
+        let dock = crate::core::dat::text_dock(tab);
         let game = self.current_game.clone();
         let text = self
             .dat_texts
@@ -1219,12 +1318,51 @@ impl MameApp {
         if text.is_none() {
             self.request_dat(dock);
         }
+        // The Command and History tabs render a parsed `Vec<DatLine>`: the
+        // parse is regex work over up to 4000 lines, and egui runs this
+        // renderer at display refresh rate — so memoize it per (dock, game)
+        // instead of reparsing every frame (see `cached_lines`).
+        let mut parsed: std::sync::Arc<Vec<crate::core::dat::DatLine>> = Default::default();
+        match dock {
+            crate::core::dat::DOCK_COMMAND => {
+                if let Some(t) = text.as_deref() {
+                    parsed = Self::cached_lines(
+                        &mut self.doc_parsed,
+                        dock,
+                        &game,
+                        t,
+                        crate::core::dat::convert_command_lines,
+                    );
+                }
+            }
+            crate::core::dat::DOCK_HISTORY => {
+                if let Some(t) = text.as_deref() {
+                    parsed = Self::cached_lines(
+                        &mut self.doc_parsed,
+                        dock,
+                        &game,
+                        t,
+                        crate::core::dat::convert_history_lines,
+                    );
+                }
+            }
+            _ => {}
+        }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            match (dock, text) {
-                (d, Some(text)) if d == 11 => {
-                    for line in
-                        crate::core::dat::convert_command_lines(&text).iter().take(3000)
+            match text {
+                Some(_) if dock == crate::core::dat::DOCK_COMMAND => {
+                    for line in parsed.iter().take(3000)
                     {
+                        // a divider is a whole row, not a segment: origin's
+                        // `<br>[\x2500-]{8,}<br>` → `<hr>` broke the line
+                        if line.segments.len() == 1
+                            && matches!(line.segments[0], crate::core::dat::Segment::Rule)
+                        {
+                            ui.add_space(3.0);
+                            ui.separator();
+                            ui.add_space(3.0);
+                            continue;
+                        }
                         ui.horizontal_wrapped(|ui| {
                             for seg in &line.segments {
                                 match seg {
@@ -1244,15 +1382,56 @@ impl MameApp {
                                                 .color(color));
                                         }
                                     }
+                                    crate::core::dat::Segment::Rule => {
+                                        ui.separator();
+                                    }
                                 }
                             }
                         });
                     }
                 }
-                (_, Some(text)) => {
+                Some(_) if dock == crate::core::dat::DOCK_HISTORY => {
+                    // History shares the Command tab's `Segment` shape: the XML
+                    // writes sections as `- TECHNICAL -` headers, which
+                    // `historyxml::render_text` already turned into a rule with
+                    // the title on the following line. Rendering that title as a
+                    // heading (rather than body text) is what makes the sections
+                    // legible — otherwise the records read as an undifferentiated
+                    // wall of prose.
+                    let lines = &*parsed;
+                    // index of the heading line = the line right after a Rule
+                    let heading_after_rule = |i: usize| {
+                        i > 0
+                            && lines[i - 1].segments.len() == 1
+                            && matches!(
+                                lines[i - 1].segments[0],
+                                crate::core::dat::Segment::Rule
+                            )
+                    };
+                    for (i, line) in lines.iter().enumerate().take(4000) {
+                        if line.segments.len() == 1
+                            && matches!(line.segments[0], crate::core::dat::Segment::Rule)
+                        {
+                            ui.add_space(4.0);
+                            ui.separator();
+                            continue;
+                        }
+                        let crate::core::dat::Segment::Text(s) = &line.segments[0] else {
+                            continue;
+                        };
+                        if heading_after_rule(i) {
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new(s).strong());
+                            ui.add_space(2.0);
+                        } else {
+                            ui.monospace(s);
+                        }
+                    }
+                }
+                Some(text) => {
                     ui.monospace(&text);
                 }
-                _ => {
+                None => {
                     ui.weak("-");
                 }
             }
@@ -1315,37 +1494,38 @@ impl MameApp {
                     if !self.running.is_empty() {
                         ui.colored_label(icons::GREEN, "▶ MAME");
                     }
-                    let (done, total, cur) = if let Some(h) = &self.audit_handle {
+                    let (done, total, _cur) = if let Some(h) = &self.audit_handle {
                         h.snapshot()
                     } else if self.boot_auditing {
                         self.audit_stage.clone()
                     } else {
                         (0, 0, String::new())
                     };
+                    // Audit progress: text only. The bar that used to sit here
+                    // was redundant — `{pct:.0}%` already says the same thing in
+                    // the same amount of space. The counts are shown as well:
+                    // on a cold first scan the percentage crawls (a 44 k-set
+                    // collection spends minutes inside its first single-digit
+                    // percents) and an integer percent alone reads as "stuck
+                    // at 0%" — the raw counter is what shows it is moving.
                     if total > 0 {
                         let pct = (done as f32 / total as f32).clamp(0.0, 1.0);
-                        ui.add_sized(
-                            [170.0, 14.0],
-                            egui::ProgressBar::new(pct).show_percentage(),
-                        );
-                        ui.weak(format!("{} {cur} {pct:.0}%", self.tr("Auditing")));
+                        ui.weak(format!(
+                            "{} {pct:.0}% ({done}/{total})",
+                            self.tr("Auditing")
+                        ));
                     } else if self.boot_auditing || self.audit_handle.is_some() {
                         ui.weak(self.tr("Auditing"));
                     }
-                    // cancel affordance for the running audit (boot or manual)
-                    if let Some(h) = &self.audit_handle {
-                        if !h.cancelled() && ui.small_button(self.tr("Cancel")).clicked() {
-                            h.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                            self.log("audit cancel requested".to_string());
-                        }
-                    }
+                    // No cancel affordance: the audit runs in the background and
+                    // is not something the user should have to babysit. It is
+                    // also not safe to abandon halfway — `AuditDone` is what
+                    // persists `audit_cache.bin`, so cancelling meant repeating
+                    // the whole first scan next boot. `AuditHandle::cancel` is
+                    // kept for the headless examples, which do want a stop.
                     if self.lib_status == crate::app::LibStatus::Loading {
                         let (done, _, stage) = &self.lib_progress;
                         let pct = ((*done as f32 / EST_MACHINES) * 100.0).min(99.0);
-                        ui.add_sized(
-                            [170.0, 14.0],
-                            egui::ProgressBar::new(pct / 100.0).show_percentage(),
-                        );
                         ui.weak(format!(
                             "{} {pct:.0}% ({done}) {stage}",
                             self.tr("Parsing XML")
@@ -1374,15 +1554,16 @@ impl MameApp {
     fn draw_startup_panel(&mut self, ui: &mut egui::Ui) {
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
+                // The logo is drawn through the texture-loading path, not
+                // `egui::Image` — the widget showed a red ⚠ here instead of the
+                // mark (it paints before the byte loader has resolved the
+                // embedded bytes). See `windows::draw_app_logo`.
                 ui.add_space(40.0);
-                ui.add(
-                    egui::Image::new(egui::include_image!("../assets/images/logo.png"))
-                        .max_size(egui::vec2(120.0, 120.0)),
-                );
+                crate::windows::draw_app_logo(ui, 120.0);
                 ui.add_space(8.0);
                 ui.heading("MvUI");
                 ui.add_space(8.0);
-                ui.label(self.tr("MAME/MESS executable not configured."));
+                ui.label(self.tr("MAME executable not configured."));
                 ui.add_space(12.0);
                 let sel = self.tr("Select mame.exe...");
                 if ui.button(sel).clicked() {
@@ -1412,5 +1593,38 @@ impl MameApp {
                     }
                 });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(t: &str) -> crate::core::dat::DatLine {
+        crate::core::dat::DatLine {
+            segments: vec![crate::core::dat::Segment::Text(t.to_string())],
+        }
+    }
+
+    /// The memo must serve the same parse for repeat frames and stay bounded:
+    /// a per-frame reparse here is exactly the cost this cache exists to stop.
+    #[test]
+    fn cached_lines_memoizes_and_stays_bounded() {
+        let mut map = std::collections::HashMap::new();
+        let first = MameApp::cached_lines(&mut map, 11, "game", "x", |t| vec![line(t)]);
+        let again = MameApp::cached_lines(&mut map, 11, "game", "y", |t| vec![line(t)]);
+        // second frame: same Arc — the parse is memoized per (dock, game), a
+        // changed text only ever arrives through a new game
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+
+        // a different dock is a different entry
+        let other = MameApp::cached_lines(&mut map, 7, "game", "y", |_| vec![]);
+        assert!(!std::sync::Arc::ptr_eq(&again, &other));
+
+        // eviction keeps the map bounded no matter how many games rotate through
+        for i in 0..20 {
+            MameApp::cached_lines(&mut map, 11, &format!("g{i}"), "x", |_| vec![]);
+        }
+        assert!(map.len() <= 8, "map grew to {}", map.len());
     }
 }

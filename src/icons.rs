@@ -1,6 +1,11 @@
 //! Icon registry over the PNG set inherited from mamepgui 1.8.2
 //! (design doc §9.2). Files under `assets/icons/` are embedded by build.rs;
 //! the procedural squares below stay as the fallback when a file is missing.
+//!
+//! 两个资源树的分工（2026-10-05 整理过一次）：
+//! - `assets/icons/`   → build.rs 扫进 `ICONS` 表，按相对路径取图（本文件）
+//! - `assets/images/`  → 内容图，单独 `include_bytes!` 引入（占位图 mame.png、
+//!   关于框的 logo.png、程序/exe 图标 app.ico）
 
 use egui::{Color32, Vec2};
 use std::collections::HashMap;
@@ -55,6 +60,56 @@ pub fn texture(ctx: &egui::Context, name: &str) -> Option<egui::TextureHandle> {
     );
     let mut m = TEXTURES.get_or_init(Default::default).lock().ok()?;
     Some(m.entry(key).or_insert(tex).clone())
+}
+
+/// 图片框的占位图（`assets/images/mame.png`，240×180）。
+///
+/// 游戏没有对应的截图/标题图/机台图等素材时，就显示这一张，而不是画一个空框。
+/// 自己解码上传、不走 egui 的 `include_image!` 字节源：那条路要等 egui 的字节
+/// loader 就绪，未就绪时 `egui::Image` 会画出自带的 ⚠ 兜底字形
+/// （`windows.rs::draw_app_logo` 里踩过同一个坑）。
+fn placeholder_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    static TEX: OnceLock<Mutex<Option<egui::TextureHandle>>> = OnceLock::new();
+    let mut slot = TEX.get_or_init(|| Mutex::new(None)).lock().ok()?;
+    if let Some(t) = slot.clone() {
+        return Some(t);
+    }
+    // 编译期内嵌：mame.png 不在 assets/icons 下，build.rs 的图标表扫不到它
+    const RAW: &[u8] = include_bytes!("../assets/images/mame.png");
+    let rgba = image::load_from_memory(RAW).ok()?.to_rgba8();
+    let tex = ctx.load_texture(
+        "placeholder-mame",
+        egui::ColorImage::from_rgba_unmultiplied(
+            [rgba.width() as usize, rgba.height() as usize],
+            rgba.as_flat_samples().as_slice(),
+        ),
+        egui::TextureOptions::LINEAR,
+    );
+    *slot = Some(tex.clone());
+    Some(tex)
+}
+
+/// 在 `rect` 内居中画占位图，保持原比例；画不出来返回 false。
+///
+/// 不无限放大：240×180 的图铺满一个大 dock 会糊成一片，最多放大 2 倍。
+pub fn draw_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> bool {
+    let ctx = ui.ctx().clone();
+    let Some(tex) = placeholder_texture(&ctx) else {
+        return false;
+    };
+    let size = tex.size_vec2();
+    if size.x <= 0.0 || size.y <= 0.0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return false;
+    }
+    let scale = (rect.width() / size.x).min(rect.height() / size.y).min(2.0);
+    let drawn = egui::Rect::from_center_size(rect.center(), size * scale);
+    ui.painter().image(
+        tex.id(),
+        drawn,
+        egui::Rect::from_min_size(egui::Pos2::ZERO, size),
+        Color32::WHITE,
+    );
+    true
 }
 
 /// draw an icon scaled to `size`; returns None when the name is unknown

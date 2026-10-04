@@ -152,7 +152,7 @@ puckman\t食人花
                 bytes.extend_from_slice(&cow);
             }
         }
-        let tmp = std::env::temp_dir().join("mamepgui-lst-encoding-test");
+        let tmp = std::env::temp_dir().join("mvui-lst-encoding-test");
         std::fs::write(&tmp, &bytes).unwrap();
         let m = load(&tmp);
         assert_eq!(m.get("pacman").map(|x| x.0.as_str()), Some("吃豆人"));

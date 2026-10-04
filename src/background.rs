@@ -245,8 +245,9 @@ fn finish_boot(
 
     let extra = extra_software_for(&library);
     let handle = Arc::new(AuditHandle::new());
-    // hand the handle to the UI before the (slow) audit starts, otherwise the
-    // cold-start audit cannot be cancelled at all
+    // hand the handle to the UI before the (slow) audit starts, so the status
+    // bar can show "Auditing nn%" from the first tick instead of waiting for
+    // the audit to report anything itself
     let _ = tx.send(AppEvent::AuditStarted(handle.clone()));
     {
         // forward audit progress to the status bar
@@ -422,10 +423,94 @@ pub fn run_audit(
     });
 }
 
+/// Cache of parsed artwork archives, keyed by path and invalidated by mtime+size.
+///
+/// Walking a 48 585-entry central directory costs ~35 ms; doing that per game
+/// selection while the user clicks through the list would be visible, and the
+/// old code paid far worse than that. One entry per archive, rebuilt only when
+/// the file changes, is the whole optimisation.
+static PACKED_CACHE: std::sync::Mutex<
+    Vec<(std::path::PathBuf, crate::core::datindex::FileStamp, Arc<crate::core::zip64::CentralDirectory>)>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// How many archives to remember. One per image dock is 7; 16 leaves room for
+/// the extra artwork sets users point at without unbounded growth.
+const PACKED_CACHE_SLOTS: usize = 16;
+
+/// One packed artwork archive's central directory, cached until the file moves.
+fn packed_directory(
+    path: &std::path::Path,
+) -> Option<Arc<crate::core::zip64::CentralDirectory>> {
+    let stamp = crate::core::datindex::FileStamp::of(path)?;
+    // Resolve under the lock, then release it: the build below is a ~35 ms read
+    // and must not serialise every other dock's preview request behind it.
+    let hit = {
+        let cache = PACKED_CACHE.lock().ok()?;
+        cache
+            .iter()
+            .find(|(p, s, _)| p == path && *s == stamp)
+            .map(|(_, _, d)| Arc::clone(d))
+    };
+    if let Some(d) = hit {
+        return Some(d);
+    }
+    let dir = Arc::new(crate::core::zip64::read_directory(path)?);
+    if let Ok(mut cache) = PACKED_CACHE.lock() {
+        match cache.iter().position(|(p, _, _)| p == path) {
+            Some(slot) => cache[slot] = (path.to_path_buf(), stamp, Arc::clone(&dir)),
+            None => {
+                if cache.len() >= PACKED_CACHE_SLOTS {
+                    cache.remove(0);
+                }
+                cache.push((path.to_path_buf(), stamp, Arc::clone(&dir)));
+            }
+        }
+    }
+    Some(dir)
+}
+
+/// Fetch a preview from a packed artwork archive (`<dir>/<arch>.zip`).
+///
+/// Loose files still win: a user who extracted `snap/` expects the loose PNG to
+/// be used, and this returns `None` without touching any archive in that case
+/// unless the archive is actually present and holds the name.
+fn packed_preview_bytes(dirs: &str, arch_names: &str, file_filters: &[String]) -> Option<Vec<u8>> {
+    for dp in dirs.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let base = std::path::Path::new(dp);
+        for arch in arch_names.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            // `arch` may be "." meaning "the directory itself is the artwork dir"
+            let zip_path = if arch == "." {
+                continue;
+            } else {
+                base.join(format!("{arch}.zip"))
+            };
+            if !zip_path.is_file() {
+                continue;
+            }
+            // A loose file of the same name takes precedence, matching the
+            // scan order in `iterate_mame_file` (loose before archive).
+            let loose_wins = file_filters.iter().any(|f| {
+                base.join(arch)
+                    .join(f)
+                    .is_file()
+            });
+            if loose_wins {
+                return None;
+            }
+            let dir = packed_directory(&zip_path)?;
+            for f in file_filters {
+                if let Some(bytes) = crate::core::zip64::read_entry(&zip_path, &dir, f) {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// per-dock preview loading (origin: UpdateSelectionThread getScreenshot)
 #[allow(clippy::too_many_arguments)]
-pub fn load_preview(
-    dock: usize,
+pub fn load_preview(    dock: usize,
     dirs: String,
     game: String,
     // parent sets to try, in order, when the game has no picture of its own —
@@ -450,13 +535,17 @@ pub fn load_preview(
             }
         }
         let filters = filter_list.join(";");
-        let mut data = dat::load_preview_bytes(&dirs, &arch, &filters);
+        // Try the packed-archive reader first: `zip::ZipArchive` cannot open
+        // the 6 GB MAME Plus! snap pack (see `core::zip64`), and a failed
+        // attempt there costs minutes of blocked I/O before it gives up.
+        let mut data = packed_preview_bytes(&dirs, &arch, &filter_list)
+            .or_else(|| dat::load_preview_bytes(&dirs, &arch, &filters));
         for parent in &fallbacks {
             if data.is_some() {
                 break;
             }
-            let filters = format!("{parent}.png");
-            data = dat::load_preview_bytes(&dirs, &arch, &filters);
+            data = packed_preview_bytes(&dirs, &arch, &[format!("{parent}.png")])
+                .or_else(|| dat::load_preview_bytes(&dirs, &arch, &format!("{parent}.png")));
         }
         let ready = data
             .and_then(|bytes| image::load_from_memory(&bytes).ok())
@@ -583,16 +672,36 @@ pub fn load_dat(
     });
 }
 
-/// Read one record out of a DAT, by path.
+/// Read one record out of a document file, by path.
 ///
-/// The byte-range index (design §3.2) answers from `mtime`-validated memory and
-/// reads only the record's own bytes, turning a 10-20 MB linear scan per lookup
-/// into a few KB read. It only covers plain files, so anything else — a DAT
-/// inside a zip, an unreadable file, or an index the tag is absent from —
-/// falls back to the original `read_dat_bytes` + `get_history` scan. The two
-/// produce identical output; `datindex`'s tests pin that.
+/// Two formats answer to the same dock, and the loader picks by **what the file
+/// is**, not by what it is called:
+///
+/// * `history.xml` — the modern Arcade-History format (since MAME ~0.228). It is
+///   the default for the History dock, so it gets the fast path: a
+///   mtime-validated name→byte-range index (build one 64 MB pass, then seek to
+///   the record).
+/// * a `$info=` DAT — the legacy format. Still read, because users have these
+///   from older installs and the language packs under `lang/<code>/` are all
+///   DATs.
+///
+/// The dispatch is by extension, and the DAT scanner is the fallback for
+/// everything else — including a `.xml` file that turns out to be something
+/// unrelated. Both produce identical output for the History dock, so a wrong
+/// guess costs a scan, never a wrong panel.
 fn read_one_dat(path: &std::path::Path, tag: &str, method: usize, dark: bool, cloneof: &str) -> String {
     if path.is_file() {
+        if is_xml(path) {
+            // `.xml` is only meaningful for the docks that ship as XML today;
+            // anything else falls through to the DAT scanner below.
+            if method == dat::DOCK_HISTORY {
+                if let Some(hit) = crate::core::historyxml::lookup(path, tag) {
+                    if !hit.is_empty() {
+                        return dat::finish_record(hit, tag, method, dark);
+                    }
+                }
+            }
+        }
         if let Some(hit) = crate::core::datindex::history_indexed(path, tag, method, dark, cloneof) {
             if !hit.is_empty() {
                 return hit;
@@ -602,6 +711,12 @@ fn read_one_dat(path: &std::path::Path, tag: &str, method: usize, dark: bool, cl
     dat::read_dat_bytes(&path.to_string_lossy())
         .map(|b| dat::get_history(&b, tag, method, dark, cloneof))
         .unwrap_or_default()
+}
+
+/// True when the path carries an `.xml` extension, case-insensitively.
+fn is_xml(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
 }
 
 /// pump mame -verifyroms/-verifysamples output (origin: MameExeRomAuditor)

@@ -179,13 +179,12 @@ impl MameApp {
             let val = match col {
                 COL_NAME => g.name.as_str(),
                 COL_ROM => return g.available.to_string(),
-                COL_MFTR => {
-                    if local && !g.lc_mftr.is_empty() {
-                        g.lc_mftr.as_str()
-                    } else {
-                        g.manufacturer.as_str()
-                    }
-                }
+                // The localized list replaces the *description* only. Every
+                // shipped `mame_cn.lst` carries the description in both of its
+                // text columns, so honouring the second one put the Chinese game
+                // title in the Manufacturer column — which is not a translation
+                // of anything, just the same string in the wrong place.
+                COL_MFTR => g.manufacturer.as_str(),
                 COL_SRC => g.sourcefile.as_str(),
                 COL_YEAR => {
                     if g.year.is_empty() {
@@ -1159,12 +1158,9 @@ impl MameApp {
                             cell_text(ui, &v, fg_w);
                         }
                         COL_MFTR => {
-                            let v = if local && !g.lc_mftr.is_empty() {
-                                &g.lc_mftr
-                            } else {
-                                &g.manufacturer
-                            };
-                            cell_text(ui, v, fg);
+                            // MAME's own manufacturer, never localized — see the
+                            // sort key above for why.
+                            cell_text(ui, &g.manufacturer, fg);
                         }
                         COL_SRC => cell_text(ui, &g.sourcefile, fg),
                         COL_YEAR => {

@@ -1,19 +1,27 @@
-//! ROM audit, 1:1 port of audit.cpp RomAuditor (internal audit + console scan
-//! + Logiqx fixdat export with the 4 export methods).
+//! ROM 审计，1:1 移植自 audit.cpp 的 RomAuditor（内部审计 + 主机
+//! 扫描 + Logiqx fixdat 导出，含那 4 种导出方式）。
 //!
-//! Availability lives in the model (per-rom/disk `available` + game `available`),
-//! matching the original GameInfo fields.
+//! 可用性存在数据模型里（每个 rom/disk 的 `available` + 游戏的
+//! `available`），与原版 GameInfo 的字段对应。
 
 use crate::core::archive::{self, is_7z, is_zip};
 use crate::core::library::GameLibrary;
 use crate::core::model::*;
-use rayon::prelude::*;
+use crate::dlog;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// AUDIT_ONLY=0, AUDIT_EXPORT_COMPLETE, AUDIT_EXPORT_ALL, AUDIT_EXPORT_INCOMPLETE, AUDIT_EXPORT_MISSING
+/// 保留的归档清单条目上限。
+///
+/// 约 4.4 万个 romsets 序列化后大约 20 MB；取 6.4 万是为了给异常大
+/// 或者多 rompath 的收藏留出余量，同时不让病态配置把缓存无限撑大。
+/// 超上限时丢弃条目（下次扫描会重建），而不是拒绝保存。
+const AUDIT_CACHE_LIMIT: usize = 64 * 1024;
+
+/// 对应旧版 AUDIT_ONLY=0 / EXPORT_COMPLETE / EXPORT_ALL /
+/// EXPORT_INCOMPLETE / EXPORT_MISSING。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditMethod {
     Only,
@@ -26,10 +34,20 @@ pub enum AuditMethod {
 #[derive(Clone)]
 pub struct AuditHandle {
     pub cancel: Arc<AtomicBool>,
-    /// set once the run is over, so progress forwarders can exit even when
-    /// nothing was scanned (total == 0)
+    /// 一轮跑完就置上，这样即使一个都没扫（total == 0），转发进度
+    /// 的线程也能退出。
     pub finished: Arc<AtomicBool>,
-    progress: Arc<Mutex<(usize, usize, String)>>,
+    /// 已完成单元数 / 总单元数。
+    ///
+    /// 这两个曾经是一个 `Mutex<(usize, usize, String)>`，在扫描循环里
+    /// 用**循环下标**写入——但那个循环跑在 rayon 下，五个工作线程各
+    /// 存各的"已完成"，进度条于是在几个不相干的位置之间乱跳。拆成
+    /// 原子量既更便宜，而且天然单调：某个工作线程不可能在发布
+    /// "41 完成"之后再发布"37 完成"。
+    progress: Arc<(AtomicUsize, AtomicUsize)>,
+    /// 当前正在扫什么的尽力而为的标签。天生有竞态——同时有多个单元
+    /// 在飞——所以故意和计数器分开，不塞进同一把锁里。
+    current: Arc<Mutex<String>>,
 }
 
 impl AuditHandle {
@@ -37,11 +55,17 @@ impl AuditHandle {
         Self {
             cancel: Arc::new(AtomicBool::new(false)),
             finished: Arc::new(AtomicBool::new(false)),
-            progress: Arc::new(Mutex::new((0, 0, String::new()))),
+            progress: Arc::new((AtomicUsize::new(0), AtomicUsize::new(0))),
+            current: Arc::new(Mutex::new(String::new())),
         }
     }
     pub fn snapshot(&self) -> (usize, usize, String) {
-        self.progress.lock().unwrap().clone()
+        let (done, total) = &*self.progress;
+        (
+            done.load(Ordering::Relaxed),
+            total.load(Ordering::Relaxed),
+            self.current.lock().unwrap().clone(),
+        )
     }
     pub fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
@@ -52,8 +76,24 @@ impl AuditHandle {
     pub fn finish(&self) {
         self.finished.store(true, Ordering::Relaxed);
     }
+    /// Set the denominator and reset the numerator — called once the unit list
+    /// is known.
+    fn set_total(&self, total: usize) {
+        self.progress.1.store(total, Ordering::Relaxed);
+        self.progress.0.store(0, Ordering::Relaxed);
+    }
+    /// Report one unit finished. Named `_done` rather than `set_progress`
+    /// because "here is the next position" is exactly the call shape that broke
+    /// the old version.
+    fn unit_done(&self, label: &str) {
+        self.progress.0.fetch_add(1, Ordering::Relaxed);
+        *self.current.lock().unwrap() = label.to_string();
+    }
+    /// Stage-level progress for the console (MESS) pass, which is sequential.
     fn set_progress(&self, done: usize, total: usize, current: &str) {
-        *self.progress.lock().unwrap() = (done, total, current.to_string());
+        self.progress.1.store(total, Ordering::Relaxed);
+        self.progress.0.store(done, Ordering::Relaxed);
+        *self.current.lock().unwrap() = current.to_string();
     }
 }
 
@@ -66,6 +106,102 @@ impl Default for AuditHandle {
 enum Mark {
     Rom(usize, usize, bool),
     Disk(usize, usize),
+}
+
+/// Scan every audit unit, returning the marks it produced.
+///
+/// **Deliberately sequential.** The previous version used
+/// `units.par_iter()` over four rayon workers and measured *slower* than one
+/// thread (52 zips/s sequential vs 37 with four) on this machine: the units are
+/// independent files spread across a spinning disk, so four readers just make
+/// the head thrash and every unit pays an extra seek. The work is I/O-bound and
+/// the drive is the bottleneck, not the CPU.
+///
+/// Progress is reported by *incrementing a counter when a unit finishes*, never
+/// by publishing the loop index — see [`AuditHandle`]. Sequential iteration
+/// makes that ordering trivially correct, but the counter form is what the
+/// status bar needs either way, and it stays correct if parallelism is ever
+/// reintroduced for an SSD.
+fn scan_units(units: &[(PathBuf, usize)], lib: &GameLibrary, handle: &AuditHandle) -> Vec<Vec<Mark>> {
+    let mut results: Vec<Vec<Mark>> = Vec::with_capacity(units.len());
+    for (path, gi) in units {
+        if handle.cancelled() {
+            break;
+        }
+        let cur = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut marks: Vec<Mark> = Vec::new();
+        if path.is_dir() {
+            // CHD dir scan — only disk marks derived here (read-only on lib)
+            let game_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if let Some(idx) = lib.get_idx(&game_name) {
+                if let Ok(entries) = std::fs::read_dir(path) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.is_dir() {
+                            continue;
+                        }
+                        let fname = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_lowercase())
+                            .unwrap_or_default();
+                        if fname.ends_with(".chd") {
+                            let stem = archive::file_stem(&fname);
+                            if let Some(di) = lib.games[idx]
+                                .disks
+                                .iter()
+                                .position(|d| d.name.to_lowercase() == stem)
+                            {
+                                marks.push(Mark::Disk(idx, di));
+                            }
+                        } else if let Some(ri) = lib.games[idx].roms.iter().position(|r| {
+                            archive::file_stem(&r.effective_name().to_lowercase())
+                                == archive::file_stem(&fname)
+                        }) {
+                            marks.push(Mark::Rom(idx, ri, true));
+                        }
+                    }
+                }
+            }
+        } else if let Some(entries) = crate::core::audit_cache::list_cached(path) {
+            // origin: RomAuditor::run — a `<game>.zip` is matched only against
+            // that game's roms and its clone family, never the whole library.
+            // Using the global crc index here was both wrong and pathological:
+            // a crc shared by thousands of sets (bios / device roms) produced
+            // thousands of marks per entry and the audit never finished.
+            let mut table: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
+            {
+                let g = &lib.games[*gi];
+                for (ri, r) in g.roms.iter().enumerate() {
+                    if !r.is_nodump() {
+                        table.entry(r.crc).or_default().push((*gi, ri));
+                    }
+                }
+                for clone in &g.clones {
+                    let Some(ci) = lib.get_idx(clone) else { continue };
+                    for (ri, r) in lib.games[ci].roms.iter().enumerate() {
+                        if !r.is_nodump() {
+                            table.entry(r.crc).or_default().push((ci, ri));
+                        }
+                    }
+                }
+            }
+            for e in &entries {
+                let Some(crc) = e.crc else { continue };
+                for (gj, ri) in table.get(&crc).map(|v| v.as_slice()).unwrap_or(&[]) {
+                    marks.push(Mark::Rom(*gj, *ri, true));
+                }
+            }
+        }
+        handle.unit_done(&format!("{cur}/"));
+        results.push(marks);
+    }
+    results
 }
 
 /// internal audit (origin: RomAuditor::run) — mutates per-rom/disk availability
@@ -86,12 +222,22 @@ pub fn audit_all(
     extra_software: &HashMap<String, String>,
     handle: &AuditHandle,
 ) {
-    // Whatever happens from here on — normal return, early exit or a panic in
-    // rayon/utf8/etc. — the handle must end up finished, otherwise the 200 ms
-    // progress forwarder never terminates and keeps flooding the channel
-    // (README P2-19).
+    // 从这里往后的任何情况——正常返回、提前退出，还是归档层/utf8
+    // 之类的地方 panic——句柄都必须变成 finished，否则那个 200 ms
+    // 的进度转发线程永远不退出，会一直往 channel 里灌（README P2-19）。
     let _finish_guard = FinishOnDrop(handle.finished.clone());
-    // 1) reset: nodump → available
+
+    dlog!(
+        "审计: 开始（{} 台机种, {} 个 rompath）",
+        lib.len(),
+        rom_paths.len()
+    );
+
+    // 把上一轮记住的归档清单拉进来。这就是 10–20 分钟和几秒钟的
+    // 区别：成本在于打开 4.4 万个 zip，而清单只在文件变了才变。
+    crate::core::audit_cache::load();
+
+    // 1) 重置：nodump 视为 available
     for g in &mut lib.games {
         for r in &mut g.roms {
             r.available = r.is_nodump();
@@ -142,90 +288,25 @@ pub fn audit_all(
         }
     }
 
-    handle.set_progress(0, units.len(), "");
+    handle.set_total(units.len());
+    dlog!("审计: 待扫单元 {} 个", units.len());
 
-    let results: Mutex<Vec<Vec<Mark>>> = Mutex::new(Vec::new());
-    units.par_iter().enumerate().for_each(|(ui, (path, gi))| {
-        if handle.cancelled() {
-            return;
-        }
-        let cur = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        handle.set_progress(ui, units.len(), &format!("{cur}/"));
-        let mut marks: Vec<Mark> = Vec::new();
-        if path.is_dir() {
-            // CHD dir scan — only disk marks derived here (read-only on lib)
-            let game_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            if let Some(idx) = lib.get_idx(&game_name) {
-                if let Ok(entries) = std::fs::read_dir(path) {
-                    for e in entries.flatten() {
-                        let p = e.path();
-                        if p.is_dir() {
-                            continue;
-                        }
-                        let fname = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_lowercase())
-                            .unwrap_or_default();
-                        if fname.ends_with(".chd") {
-                            let stem = archive::file_stem(&fname);
-                            if let Some(di) = lib.games[idx]
-                                .disks
-                                .iter()
-                                .position(|d| d.name.to_lowercase() == stem)
-                            {
-                                marks.push(Mark::Disk(idx, di));
-                            }
-                        } else if let Some(ri) = lib.games[idx].roms.iter().position(|r| {
-                            archive::file_stem(&r.effective_name().to_lowercase())
-                                == archive::file_stem(&fname)
-                        }) {
-                            marks.push(Mark::Rom(idx, ri, true));
-                        }
-                    }
-                }
-            }
-        } else if let Ok(entries) = archive::list_archive(path) {
-            // origin: RomAuditor::run — a `<game>.zip` is matched only against
-            // that game's roms and its clone family, never the whole library.
-            // Using the global crc index here was both wrong and pathological:
-            // a crc shared by thousands of sets (bios / device roms) produced
-            // thousands of marks per entry and the audit never finished.
-            let mut table: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
-            {
-                let g = &lib.games[*gi];
-                for (ri, r) in g.roms.iter().enumerate() {
-                    if !r.is_nodump() {
-                        table.entry(r.crc).or_default().push((*gi, ri));
-                    }
-                }
-                for clone in &g.clones {
-                    let Some(ci) = lib.get_idx(clone) else { continue };
-                    for (ri, r) in lib.games[ci].roms.iter().enumerate() {
-                        if !r.is_nodump() {
-                            table.entry(r.crc).or_default().push((ci, ri));
-                        }
-                    }
-                }
-            }
-            for e in entries {
-                let Some(crc) = e.crc else { continue };
-                for (gj, ri) in table.get(&crc).map(|v| v.as_slice()).unwrap_or(&[]) {
-                    marks.push(Mark::Rom(*gj, *ri, true));
-                }
-            }
-        }
-        results.lock().unwrap().push(marks);
-    });
+    let results = scan_units(&units, lib, handle);
 
-    // apply marks; disk marks propagate to clones sharing the sha1
+    // 所有被打开过的单元的归档清单现在已经记下来了。先清掉那些文件
+    // 已经消失的条目，再把整份交给持久化缓存，这样**下一次**审计——
+    // 哪怕重启过——就退化成一次 stat 遍历。放在下面那个 parent/BIOS
+    // 回填之前是故意的：那里万一 panic，也不会把一份好好的清单缓存
+    // 一起丢掉。
+    {
+        let paths: Vec<PathBuf> = units.iter().map(|(p, _)| p.clone()).collect();
+        crate::core::audit_cache::prune(&paths, AUDIT_CACHE_LIMIT);
+        crate::core::audit_cache::save();
+    }
+
+    // 应用标记；disk 的标记会传播给共用同一 sha1 的克隆
     let mut disk_marks: Vec<(usize, usize)> = Vec::new();
-    for marks in results.into_inner().unwrap() {
+    for marks in results {
         for m in marks {
             match m {
                 Mark::Rom(gi, ri, ok) => {
@@ -235,8 +316,8 @@ pub fn audit_all(
             }
         }
     }
-    // a CHD is shared by the whole clone family — mark every game that
-    // references the same sha1 (origin: the clone loop in RomAuditor::run)
+    // 一个 CHD 由整个克隆家族共用——把所有引用同一 sha1 的游戏都标上
+    // （origin: RomAuditor::run 里的那个克隆循环）
     for (gi, di) in &disk_marks {
         let sha1 = lib.games[*gi].disks[*di].sha1.clone();
         if sha1.is_empty() {
@@ -252,7 +333,7 @@ pub fn audit_all(
         }
     }
 
-    // 3) finalize per game (origin step 6)
+    // 3) 逐游戏定级（origin 第 6 步）
     let mut parent_maps: HashMap<usize, HashMap<u32, usize>> = HashMap::new();
     for i in 0..lib.games.len() {
         if lib.games[i].is_ext_rom {
@@ -260,8 +341,8 @@ pub fn audit_all(
             continue;
         }
         let romof = lib.games[i].romof.clone();
-        // crc → rom slot of the parent set, memoized: the fallback used to
-        // linearly scan the parent's roms for every missing rom
+        // crc → 父集里的 rom 槽位，做了记忆化：这个兜底路径原本要为
+        // 每一个缺失的 rom 线性扫一遍父集的 rom 列表
         if !romof.is_empty() {
             let parent = lib.get_idx(&romof);
             let grand = parent.and_then(|p| {
@@ -299,19 +380,18 @@ pub fn audit_all(
                 }
             }
         }
-        // origin: audit.cpp:468-514 — the level has to be judged from the *final*
-        // rom / disk state. 1.8.2 read `allinParent` after the clone-set scan had
-        // already propagated the parent's ROMs into the clone, so a clone whose
-        // ROMs all come from the parent set counts as complete; recomputing here
-        // is equivalent, and it also covers the loose-file / directory path,
-        // where the scan propagates nothing and only this backfill can fill the
-        // last missing ROMs.
+        // origin: audit.cpp:468-514 —— 等级必须根据**最终**的 rom /
+        // disk 状态来判定。1.8.2 读 `allinParent` 的时候，克隆集扫描
+        // 已经把父集的 ROM 传播进克隆了，所以一个 ROM 全部来自父集
+        // 的克隆算作完整；在这里重算是等价的，而且它还覆盖了散装
+        // 文件 / 目录那条路径——那条路径上扫描什么都不传播，只有
+        // 这个回填能补齐最后缺的几个 ROM。
         let complete = lib.games[i].roms.iter().all(|r| r.available)
             && lib.games[i].disks.iter().all(|d| d.available);
         lib.games[i].available = if complete { GAME_COMPLETE } else { GAME_MISSING };
     }
 
-    // 4) console (MESS) audit — creates ext roms
+    // 4) 主机（MESS）审计 —— 会创建 ext rom
     let console_names: Vec<String> = lib
         .games
         .iter()
@@ -329,10 +409,22 @@ pub fn audit_all(
         handle.set_progress(ci, total_consoles, console);
         audit_console(lib, console, dirpath);
     }
+    // 在 `finish()` **之前**清掉阶段标签并停表，这样转发线程最后观察到
+    // 的状态是"已完成"，而不是跑到一半时留下的过期百分比。UI 是靠
+    // `is_finished` 来把进度条整个撤掉的，所以在这里归零不会让它卡在
+    // 100%。
     handle.set_progress(0, 0, "");
     handle.finish();
 
     lib.complete_data();
+
+    // 统计一下结果，便于在 boot.log 里对照界面上看到的数字
+    let complete = lib.games.iter().filter(|g| g.available == GAME_COMPLETE).count();
+    dlog!(
+        "审计: 完成（{} 台中 {} 台完整）",
+        lib.len(),
+        complete
+    );
 }
 
 /// origin: RomAuditor::auditConsole — creates ext roms with "dir+file[/zip]" keys

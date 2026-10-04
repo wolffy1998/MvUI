@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// The binary reuses the library's domain layer rather than declaring its own
-// copy, so `examples/` and the binary can never drift apart.
+// 二进制直接复用库里的领域层，而不是自己再声明一份副本，这样
+// `examples/` 和主程序永远不会各走各的。
 use mvui::core;
 
 mod app;
@@ -19,6 +19,15 @@ use core::settings::GuiSettings;
 
 fn main() -> Result<(), eframe::Error> {
     let (tx, rx) = std::sync::mpsc::channel();
+
+    // 把领域层的日志落点接到 `perf_log`。
+    //
+    // core 不许反向依赖 UI，所以它不能自己调 `app::perf_log`；反过来，
+    // 不注册这个 sink，core 里那些 `dlog!` 就全是空操作，boot.log 里
+    // 只会有 UI 侧的记录。必须在启动**早期**注册，连解析和审计之前
+    // 的过程才记得到。
+    let _ = core::log::set_sink(app::perf_log);
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([900.0, 560.0])
@@ -30,16 +39,28 @@ fn main() -> Result<(), eframe::Error> {
         options,
         Box::new(move |cc| {
             fonts::install(&cc.egui_ctx);
+            // egui 0.29 默认**不带**任何图片加载器（`Loaders::default`
+            // 把 `image` 留空——只填了 bytes 和 texture 两级）。于是
+            // 任何把编码后的字节交给 egui 的东西——`egui::include_image!`
+            // 产出的正是这种——都解不出来：`Context::try_load_image`
+            // 返回 `NoImageLoaders`，控件就静静地什么都不画。这就是
+            // 启动标志、About 标志和目录对话框标题栏标志全都看不见，
+            // 而**窗口**图标却正常的原因——上面的 `app_icon` 是手工
+            // 用 `image` crate 解码的，从不走这条链。
+            //
+            // 这个调用是幂等的，而且只增加 `file`/`bytes`/`http` 的
+            // 处理能力，所以启动时调一次就能覆盖之后所有的 `Image`。
+            egui_extras::install_image_loaders(&cc.egui_ctx);
             style(&cc.egui_ctx);
             Ok(Box::new(MameApp::new(cc, tx, rx)))
         }),
     )
 }
 
-/// Global look: floating overlay scroll bars (thin, rounded, fading out when
-/// idle). Because floating bars don't allocate layout space, a scrollbar
-/// appearing can no longer shift the content width — one less source of the
-/// game-list flicker.
+/// 全局观感：浮动式叠加滚动条（细、圆角、空闲时淡出）。
+///
+/// 因为浮动滚动条不占布局空间，滚动条出现时就不会再挤动内容宽度——
+/// 游戏列表闪烁的来源又少了一个。
 fn style(ctx: &egui::Context) {
     ctx.style_mut(|style| {
         let sc = &mut style.spacing.scroll;
@@ -66,9 +87,9 @@ fn style(ctx: &egui::Context) {
     });
 }
 
-/// window icon from the embedded app.ico (same file the exe resource uses)
+/// 窗口图标，来自内嵌的 app.ico（和 exe 资源用的是同一个文件）。
 fn app_icon() -> egui::IconData {
-    const RAW: &[u8] = include_bytes!("../assets/images/app.ico");
+    const RAW: &[u8] = include_bytes!("../assets/icons/app.ico");
     let img = image::load_from_memory(RAW).expect("embedded app.ico must decode");
     let rgba = img.to_rgba8();
     egui::IconData {
@@ -78,7 +99,7 @@ fn app_icon() -> egui::IconData {
     }
 }
 
-/// CFG_PREFIX helper exposed for main-window startup (origin main())
+/// CFG_PREFIX 助手，暴露给主窗口启动流程用（origin: main()）。
 pub fn cfg_prefix() -> std::path::PathBuf {
     GuiSettings::cfg_prefix()
 }

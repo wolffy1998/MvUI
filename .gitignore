@@ -5,9 +5,15 @@
 # Cargo lock is intentionally NOT ignored: this is an application, so the
 # exact dependency versions belong in version control (reproducible builds).
 
-# Local runtime state the app creates next to the exe
+# Local runtime state the app creates next to the exe (legacy name included
+# for old checkouts)
+.mvui/
 .mamepgui/
 *.log
+
+# Not for publication: session scratch and project memory
+.tmpprobe/
+.workbuddy/
 
 # Editor / OS noise
 .vscode/
@@ -17,15 +23,3 @@
 Thumbs.db
 desktop.ini
 .DS_Store
-
-# Scratch output from the screenshot/measurement tooling in .workbuddy/tools
-.workbuddy/tools/*.png
-.workbuddy/tools/**/*.png
-.workbuddy/tools/alive*.txt
-.workbuddy/tools/probe*.txt
-
-# Icon-generation output in tools/ (the renders themselves are kept, under
-# assets/images/, because they are the reference for the current artwork)
-tools/*.png
-tools/probe*.txt
-tools/__pycache__/

@@ -24,8 +24,8 @@ pub enum AppEvent {
     MameVersionChecked { path: String, version: String },
     LibProgress { done: usize, total: usize, stage: String },
     LibraryReady(Result<ReadyPayload, String>),
-    /// the boot chain's audit handle, so the UI can offer a cancel button
-    /// (origin: RomAuditor::stop — the cold-start audit used to be unstoppable)
+    /// the boot chain's audit handle, so the UI can report "Auditing nn%" from
+    /// the first tick (the handle owns the counter the progress thread reads)
     AuditStarted(Arc<crate::core::audit::AuditHandle>),
     OptionsReady(Result<SharedOpts, String>),
     /// folder tree rebuilt after an audit changed availability

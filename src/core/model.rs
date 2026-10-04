@@ -163,8 +163,15 @@ pub struct GameMeta {
     pub clones: HashSet<String>,
     #[serde(default)]
     pub is_horz: bool,
+    /// Localized description from `mame_cn.lst`, or empty when untranslated.
     #[serde(default)]
     pub lc_desc: String,
+    /// Retained for cache compatibility only — no longer written or read.
+    ///
+    /// The list's second column is not a manufacturer translation (it repeats
+    /// the description in every shipped file), and honouring it put the Chinese
+    /// title in the Manufacturer column. Kept so an old cache still deserialises
+    /// rather than erroring on an unknown field.
     #[serde(default)]
     pub lc_mftr: String,
     #[serde(default)]

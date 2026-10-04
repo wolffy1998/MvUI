@@ -3,20 +3,9 @@ name = "mvui"
 edition = "2021"
 version = "1.0.0"
 license = "GPL-3.0-or-later"
-description = "A native Windows front-end for MAME, a rewrite of mamepgui 1.8.2 in Rust + egui"
+description = "MAME Visual User Interface — A modern and lightweight frontend for MAME."
 repository = "https://github.com/wolffy1998/MvUI"
 readme = "README.md"
-
-# Single crate: the domain layer lives in `src/core/` and the UI in the modules
-# beside it. It used to be two crates (`mamegui-core` + `mamegui-app`), which
-# bought one real guarantee — core could declare that it does not depend on egui
-# — at the cost of a nested workspace and a `mamegui-core::` prefix on ~80
-# import sites. The layering is now documented in `src/core/mod.rs` instead.
-#
-# The exe icon still needs a build script (it embeds assets/app.ico via
-# winresource), and that build script is where the icon table is generated.
-[package.metadata.notes]
-scope = "IPS/M1 deferred by design"
 
 [[bin]]
 name = "mvui"
@@ -43,9 +32,13 @@ serde_json = "1"
 bincode = "1.3"
 quick-xml = "0.41"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Artwork archives are read by `core::zip64` instead (the 6 GB MAME Plus! snap
+# pack is a Zip64 shape `zip` 2.4.2 mis-parses), and that reader needs a raw
+# deflate decoder. Already in the tree via `zip`'s own deflate feature; named
+# here because we depend on it directly.
+flate2 = "1"
 sevenz-rust = "0.6"
 regex = "1"
-rayon = "1"
 crc32fast = "1"
 thiserror = "2"
 encoding_rs = "0.8.42"

@@ -193,6 +193,11 @@ pub struct MameApp {
     pub stretch_sshot: bool,
     pub local_game_list: bool,
     pub dark_bg: bool,
+    /// View ▸ Font: the global UI scale. egui has no per-widget "font size"
+    /// beyond its text styles, but `Context::set_zoom_factor` scales text,
+    /// spacing and hit targets together, which is what a font-size menu has to
+    /// mean if the rest of the interface is to stay legible. 1.0 = unscaled.
+    pub font_zoom: f32,
     pub image_dock_visible: [bool; 7],
     pub image_dock_tab: usize,
     pub text_dock_visible: [bool; 5],
@@ -213,6 +218,11 @@ pub struct MameApp {
     pub temp_roms: Vec<(String, std::path::PathBuf)>,
     pub dat_texts: HashMap<(usize, String), Option<String>>,
     pub dat_requested: HashSet<(usize, String)>,
+    /// Parsed Command/History tab render trees, keyed by (dock, game). The
+    /// parse is regex work over up to 4000 lines and egui renders at refresh
+    /// rate, so the result is memoized (see `ui::MameApp::cached_lines`)
+    /// instead of being recomputed every frame.
+    pub doc_parsed: HashMap<(usize, String), Arc<Vec<crate::core::dat::DatLine>>>,
 
     // dialogs
     pub show_options_win: Option<usize>,
@@ -307,6 +317,14 @@ impl MameApp {
             .unwrap_or(0);
         // the saved choice, defaulting to dark as before
         let dark_bg = !gui.get("dark_bg").map(|v| v == "0").unwrap_or(false);
+        // View ▸ Font. Clamped to a sane band: egui's zoom multiplies every
+        // spacing and row height, so a stored 0.0 or 6.0 would leave an
+        // unusable window, and the value is user-editable in the settings file.
+        let font_zoom = gui
+            .get("font_zoom")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.75 && *v <= 2.0)
+            .unwrap_or(1.0);
         // `bg_tile` is gone: tile and stretch are one exclusive choice now, and
         // the old key defaulted to *stretch* (1.8.2 wrote
         // `background_stretch = actionBgTile->isChecked() ? 0 : 1`)
@@ -429,6 +447,7 @@ impl MameApp {
             stretch_sshot,
             local_game_list,
             dark_bg,
+            font_zoom,
             bg_stretch,
             background_file,
             bg_dir,
@@ -455,6 +474,7 @@ impl MameApp {
             temp_roms: Vec::new(),
             dat_texts: HashMap::new(),
             dat_requested: HashSet::new(),
+            doc_parsed: HashMap::new(),
             show_options_win: None,
             opt_level: 1,
             opt_category: "Core Video".into(),
@@ -627,6 +647,23 @@ impl MameApp {
     }
 
     pub fn save_settings(&mut self) {
+        // `save()` writes the whole map, so a key that is *absent* from it stays
+        // absent on disk for good. That is how `mame_binary` was lost: one run
+        // started without it in the map (no ini, or an unreadable one), the
+        // periodic save then rewrote the file from that map, and every later
+        // start read back an ini with no `mame_binary` — fell back to the legacy
+        // `mamep.exe`, failed validation and opened the picker again. The user
+        // sees a program that "forgets" the MAME path on every launch.
+        //
+        // `self.mame` is the authority on a *validated* binary, so write it back
+        // when the map has dropped it. Doing this here fixes the loop at the
+        // write side, which covers every caller of `save_settings`.
+        if let Some(m) = &self.mame {
+            let path = m.path.to_string_lossy().to_string();
+            if self.gui.get("mame_binary") != Some(path.as_str()) {
+                self.gui.set("mame_binary", path);
+            }
+        }
         self.gui.set("list_mode", self.list_mode.key());
         self.gui.set_bool("sort_reverse", self.sort_reverse);
         self.gui.set("sort_column", self.sort_column.to_string());
@@ -668,6 +705,7 @@ impl MameApp {
         // in the settings file — they used to be switchable but never persisted,
         // so every session started dark again
         self.gui.set_bool("dark_bg", self.dark_bg);
+        self.gui.set("font_zoom", format!("{:.2}", self.font_zoom));
         self.gui.set_bool("bg_stretch", self.bg_stretch);
         self.gui.set(
             "background_file",
@@ -766,7 +804,7 @@ impl MameApp {
         let tx = self.events_tx.clone();
         let ctx = self.ctx();
         // the dialog runs on its own thread — capture the translated title now
-        let title = self.tr("MAME/MESS executable:");
+        let title = self.tr("MAME executable:");
         let start = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -856,7 +894,7 @@ impl MameApp {
             .iter()
             .find(|(k, _)| *k == key)
             .map(|(_, f)| *f)
-            .unwrap_or("history.dat");
+            .unwrap_or("history.xml");
         match configured {
             Some(v) => crate::core::paths::resolve(Some(&v), fallback),
             None => crate::core::paths::exe_dir()
@@ -992,10 +1030,20 @@ impl MameApp {
                     // something that is not a MAME — left the "Select mame.exe…"
                     // button dead for the rest of the session (README N5).
                     self.picking = false;
-                    if self.try_accept_mame(&path, &version) {
+                    self.need_mame_pick = true;
+                    if path.is_empty() {
+                        // Cancelled, i.e. chose nothing. That is not an error and
+                        // must not raise a toast: the start-up panel already says
+                        // "未配置 MAME 主程序。" in plain sight, so a modal telling
+                        // the user the same thing — with an OK button whose only
+                        // job is to dismiss it — is pure noise. Stay on the panel
+                        // and let them pick again (or not).
+                    } else if self.try_accept_mame(&path, &version) {
+                        self.need_mame_pick = false;
                         self.boot();
                     } else {
-                        self.need_mame_pick = true;
+                        // A file *was* chosen and it is not a usable MAME: that
+                        // is a real failure worth reporting.
                         self.poplog(self.tr("Could not find valid MAME/MESS."));
                     }
                 }
@@ -1080,7 +1128,8 @@ impl MameApp {
                     self.needs_refilter = true;
                 }
                 AppEvent::AuditStarted(h) => {
-                    // boot audit: keep the handle so the status bar can cancel it
+                    // boot audit: keep the handle so the status bar can read its
+                    // counter and label the run "Auditing"
                     self.audit_handle = Some(h);
                 }
                 AppEvent::AuditDone(res) => {
@@ -1188,9 +1237,12 @@ impl MameApp {
         }
         let mut hits = 0usize;
         for g in &mut lib.games {
-            if let Some((desc, mftr)) = map.get(&g.name) {
+            if let Some((desc, _mftr)) = map.get(&g.name) {
+                // Only the description is localized. The list's second column is
+                // not a manufacturer translation — in every shipped file it
+                // repeats the description — so writing it into `lc_mftr` put the
+                // Chinese title in the Manufacturer column.
                 g.lc_desc = desc.clone();
-                g.lc_mftr = mftr.clone();
                 hits += 1;
             }
         }
@@ -1209,7 +1261,6 @@ impl MameApp {
             // clear first so a removed entry reverts to the MAME description
             for g in &mut guard.games {
                 g.lc_desc.clear();
-                g.lc_mftr.clear();
             }
             self.apply_localized_list(&mut guard);
         }
@@ -1277,7 +1328,13 @@ fn default_image_subdir(dock: usize) -> &'static str {
 /// Every usable background image, by file name, sorted. Origin: 1.8.2 built the
 /// background menu out of a `QDir` listing filtered to `*.png` / `*.jpg`, with
 /// one checkable action per file. An empty directory simply means no entries —
-/// the menu then only offers "None".
+/// the menu then only offers the light/dark pair.
+///
+/// Both PNG and JPEG are accepted, as in 1.8.2. Restricting this to PNG (as an
+/// earlier pass here did, reading the requirement too literally) silently hides
+/// every JPEG wallpaper: the files are still in `bkground`, they just never
+/// appear in the menu, and the only visible symptom is that "the directory has
+/// pictures in it but only some of them show up".
 pub fn scan_backgrounds(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
@@ -1286,8 +1343,10 @@ pub fn scan_backgrounds(dir: &Path) -> Vec<String> {
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let lower = name.to_ascii_lowercase();
-            (lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
-                .then_some(name)
+            let is_image = lower.ends_with(".png")
+                || lower.ends_with(".jpg")
+                || lower.ends_with(".jpeg");
+            (is_image && e.path().is_file()).then_some(name)
         })
         .collect();
     v.sort_by_key(|n| n.to_ascii_lowercase());

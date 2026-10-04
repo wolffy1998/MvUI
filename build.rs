@@ -4,11 +4,11 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // A build script runs with its cwd set to the *package* root
-    // (`crates/mamegui-app`), while the icon set lives at the workspace root.
-    // Resolving `assets/icons` relatively therefore scanned a directory that
-    // does not exist, silently produced an empty table and left every icon on
-    // the procedural fallback. Anchor on CARGO_MANIFEST_DIR instead.
+    // The build script's cwd is not guaranteed to be the crate root, so anchor
+    // on CARGO_MANIFEST_DIR (which is the repo root for this single-crate
+    // layout). Resolving `assets/icons` relatively once scanned a directory
+    // that did not exist, silently produced an empty table and left every icon
+    // on the procedural fallback.
     let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = crate_dir.join("assets/icons");
     let root = root
@@ -50,7 +50,9 @@ fn main() {
     // A failure here is reported but must not break the build — windres is only
     // present on a MinGW toolchain.
     if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
-        let ico = crate_dir.join("assets/images/app.ico");
+        // assets/images 只放"内容图"（mame.png 占位图、logo、旧版品牌素材）；
+        // 程序图标属于 icons 树，和 build.rs 扫描的那套图标资源同源。
+        let ico = crate_dir.join("assets/icons/app.ico");
         if ico.exists() {
             let mut res = winresource::WindowsResource::new();
             res.set_icon(&ico.to_string_lossy());

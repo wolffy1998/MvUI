@@ -43,52 +43,69 @@ pub fn is_archive(p: &Path) -> bool {
 /// GETINFO: list entries of a zip/7z container.
 pub fn list_archive(path: &Path) -> Result<Vec<EntryInfo>, ArchiveError> {
     if is_zip(path) {
-        let f = File::open(path)?;
-        let mut z = zip::ZipArchive::new(f).map_err(|e| ArchiveError::Other(e.to_string()))?;
-        let mut out = Vec::with_capacity(z.len());
-        for i in 0..z.len() {
-            let f = z.by_index(i).map_err(|e| ArchiveError::Other(e.to_string()))?;
-            if f.is_dir() {
-                continue;
-            }
-            out.push(EntryInfo {
-                name: f.name().to_string(),
-                size: f.size(),
-                crc: Some(f.crc32()),
-            });
-        }
-        Ok(out)
+        list_zip(path)
     } else if is_7z(path) {
-        let mut z = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
-            .map_err(|e| ArchiveError::Other(e.to_string()))?;
-        let mut out = Vec::new();
-        // 7z stores a per-entry CRC in the archive header — same source the
-        // original used (f->FileCRC), no decompression needed
-        z.for_each_entries(|entry, reader| {
-            // the zip branch above skips directories; without this a 7z folder
-            // entry became a "rom" of size 0 with no CRC (README P3). Nothing is
-            // read from the archive here, so the shared decode stream stays put.
-            if entry.name().ends_with('/') {
-                let _ = std::io::copy(reader, &mut std::io::sink());
-                return Ok(true);
-            }
-            let crc = if entry.has_crc {
-                Some(entry.crc as u32)
-            } else {
-                None
-            };
-            out.push(EntryInfo {
-                name: entry.name().to_string(),
-                size: entry.size(),
-                crc,
-            });
-            Ok(true)
-        })
-        .map_err(|e| ArchiveError::Other(e.to_string()))?;
-        Ok(out)
+        list_7z(path)
     } else {
         Err(ArchiveError::Unsupported(path.display().to_string()))
     }
+}
+
+fn list_zip(path: &Path) -> Result<Vec<EntryInfo>, ArchiveError> {
+    let f = File::open(path)?;
+    let mut z = zip::ZipArchive::new(f).map_err(|e| ArchiveError::Other(e.to_string()))?;
+    let mut out = Vec::with_capacity(z.len());
+    for i in 0..z.len() {
+        // `by_index_raw`, not `by_index`. Both read the central directory, but
+        // `by_index` then also parses the per-entry *local* header to resolve
+        // the data offset, which is a second seek per entry. Name, size and CRC
+        // all come from the central directory, and this function returns only
+        // those — so the local-header read is pure overhead. On a two-entry
+        // archive it is invisible; across 44 k romsets it is millions of extra
+        // seeks.
+        let f = z
+            .by_index_raw(i)
+            .map_err(|e| ArchiveError::Other(e.to_string()))?;
+        if f.is_dir() {
+            continue;
+        }
+        out.push(EntryInfo {
+            name: f.name().to_string(),
+            size: f.size(),
+            crc: Some(f.crc32()),
+        });
+    }
+    Ok(out)
+}
+
+fn list_7z(path: &Path) -> Result<Vec<EntryInfo>, ArchiveError> {
+    let mut z = sevenz_rust::SevenZReader::open(path, sevenz_rust::Password::empty())
+        .map_err(|e| ArchiveError::Other(e.to_string()))?;
+    let mut out = Vec::new();
+    // 7z stores a per-entry CRC in the archive header — same source the
+    // original used (f->FileCRC), no decompression needed
+    z.for_each_entries(|entry, reader| {
+        // the zip branch above skips directories; without this a 7z folder
+        // entry became a "rom" of size 0 with no CRC (README P3). Nothing is
+        // read from the archive here, so the shared decode stream stays put.
+        if entry.name().ends_with('/') {
+            let _ = std::io::copy(reader, &mut std::io::sink());
+            return Ok(true);
+        }
+        let crc = if entry.has_crc {
+            Some(entry.crc as u32)
+        } else {
+            None
+        };
+        out.push(EntryInfo {
+            name: entry.name().to_string(),
+            size: entry.size(),
+            crc,
+        });
+        Ok(true)
+    })
+    .map_err(|e| ArchiveError::Other(e.to_string()))?;
+    Ok(out)
 }
 
 pub fn file_stem(name: &str) -> String {
@@ -412,7 +429,7 @@ pub fn iterate_mame_file(
 /// It used to be `%TEMP%` itself: two games with a same-named rom overwrote each
 /// other there, and nothing ever cleaned up what a crash left behind (README N7).
 pub fn temp_rom_dir() -> PathBuf {
-    let d = std::env::temp_dir().join("mamepgui_tmp");
+    let d = std::env::temp_dir().join("mvui_tmp");
     let _ = std::fs::create_dir_all(&d);
     d
 }
@@ -525,7 +542,7 @@ mod tests {
     use super::*;
 
     fn base() -> PathBuf {
-        let d = std::env::temp_dir().join("mamepgui-zipslip-test");
+        let d = std::env::temp_dir().join("mvui-zipslip-test");
         let _ = std::fs::create_dir_all(&d);
         d
     }

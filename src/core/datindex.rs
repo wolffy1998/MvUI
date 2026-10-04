@@ -97,11 +97,22 @@ impl DatIndex {
         // (tag, offset just past the $info= line that opened it)
         let mut open: Vec<(String, usize)> = Vec::new();
         let mut line_start = 0usize;
-        for line in text.lines() {
-            let line_end = line_start + line.len();
+        // `split_inclusive`, **not** `lines()`.
+        //
+        // `lines()` strips the terminator, so `line_start += line.len() + 1`
+        // advances one byte too little on every CRLF line. Most MAME DATs are
+        // CRLF, and the drift compounds: in the shipped `command.dat` the
+        // record for `karnov` really starts at byte 10 607 while this loop
+        // computed 7 560 — 3 047 bytes of drift by line ~3 000, so every range
+        // read the wrong bytes and the panel rendered empty. Keeping the
+        // terminator in the chunk makes the cursor advance by the chunk's real
+        // length, whatever the line ending is.
+        for raw in text.split_inclusive('\n') {
+            let next_start = line_start + raw.len();
+            let line = raw.trim_end_matches(['\r', '\n']);
             if let Some(rest) = line.strip_prefix("$info=") {
                 let tags: Vec<&str> = rest.split(',').map(|t| t.trim()).collect();
-                let after = line_end + 1;
+                let after = next_start;
                 // this line closes every open record it does not carry
                 let mut i = 0;
                 while i < open.len() {
@@ -123,7 +134,7 @@ impl DatIndex {
                     }
                 }
             }
-            line_start = line_end + 1;
+            line_start = next_start;
         }
         // whatever is still open runs to the end of the file
         for (tag, start) in open {
@@ -465,6 +476,62 @@ trailing payload
         assert!(checked >= 3, "fixture should exercise several records");
     }
 
+    /// The same fixture with **CRLF** endings, which is what MAME Plus! and
+    /// friends actually ship.
+    ///
+    /// This is the regression test for the drift bug: the old cursor advanced
+    /// by `line.len() + 1`, but `lines()` had already removed the `\r`, so every
+    /// record range pointed one byte-per-line too early and `command.dat`
+    /// rendered blank. Building with the LF fixture cannot catch it — the two
+    /// only differ in line endings — so the CRLF variant is indexed here and
+    /// held against the scan the same way.
+    #[test]
+    fn index_agrees_with_scan_on_crlf() {
+        let crlf = FIXTURE.replace('\n', "\r\n");
+        let bytes = crlf.as_bytes();
+        let idx = DatIndex::build(bytes);
+        for tag in ["alphapac", "beta", "gamma"] {
+            let scan = dat::get_history(bytes, tag, DOCK_HISTORY, true, "");
+            let Some(r) = idx.lookup(tag) else {
+                assert!(scan.is_empty(), "index missed {tag} but scan found text");
+                continue;
+            };
+            let via_index =
+                dat::finish_record(record_text(bytes, r, tag, true), tag, DOCK_HISTORY, true);
+            assert_eq!(
+                via_index, scan,
+                "indexed CRLF output differs from the scan for tag {tag}"
+            );
+        }
+    }
+
+    /// The byte ranges themselves must land on real line boundaries, not merely
+    /// produce equal text by luck. A drifted range that happens to slice the
+    /// same characters would pass the equivalence test above on a small
+    /// fixture while still reading garbage from a 10 MB file.
+    #[test]
+    fn crlf_ranges_start_at_the_byte_after_the_opener() {
+        let crlf = FIXTURE.replace('\n', "\r\n");
+        let bytes = crlf.as_bytes();
+        let idx = DatIndex::build(bytes);
+        let r = idx.lookup("alphapac").expect("alpha is indexed");
+        let at = str_in_bytes(&crlf, "$info=alphapac\r\n");
+        assert_eq!(
+            r.start,
+            at + "$info=alphapac\r\n".len(),
+            "record must start immediately after its $info= line"
+        );
+        // and the payload must be exactly the lines the scan would collect
+        assert!(crlf[r.start..r.end].starts_with("first line of alpha"));
+        assert!(crlf[r.start..r.end].contains("beta shares the alpha tag"));
+    }
+
+    /// Byte offset of `needle` measured the way `str::lines()` would have got
+    /// it wrong, i.e. by walking lines and adding `len + 1`.
+    fn str_in_bytes(hay: &str, needle: &str) -> usize {
+        hay.find(needle).unwrap_or_else(|| panic!("{needle:?} not found"))
+    }
+
     /// A shared tag must reproduce the scan's *greedy* span: the original keeps
     /// collecting until a `$info=` line that lacks the tag, so the answer spans
     /// from the first `$info=tag` and swallows any same-tag record in between.
@@ -570,7 +637,7 @@ trailing payload
     #[test]
     fn history_indexed_matches_scan_on_disk() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join("mamepgui-datindex-e2e");
+        let dir = std::env::temp_dir().join("mvui-datindex-e2e");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("history.dat");
         let mut f = std::fs::File::create(&path).unwrap();
@@ -600,7 +667,7 @@ trailing payload
     #[test]
     fn index_rebuilds_after_the_file_changes() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join("mamepgui-datindex-mtime");
+        let dir = std::env::temp_dir().join("mvui-datindex-mtime");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("history.dat");
         let write = |p: &Path, s: &str| {

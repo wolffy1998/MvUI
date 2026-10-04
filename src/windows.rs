@@ -26,6 +26,53 @@ pub fn opaque_frame(ctx: &egui::Context) -> egui::Frame {
     f
 }
 
+/// The MvUI mark, used on the start-up panel, in About, and in the title bar of
+/// the directories dialog.
+///
+/// egui's `include_image!` expands to a fresh `include_bytes!` **at every call
+/// site**, so the three uses below would have embedded the same PNG three times
+/// and uploaded three identical textures. One accessor, one copy.
+pub fn app_logo() -> egui::ImageSource<'static> {
+    egui::include_image!("../assets/images/logo.png")
+}
+
+/// Draw the app logo at `size` px square, centred in `ui`.
+///
+/// Goes through [`egui::ImageSource::load`] instead of `egui::Image::new`, for
+/// the same reason the dirs-dialog title bar does (see its comment): the
+/// `Image` widget renders egui's ⚠ fallback glyph when its source does not
+/// resolve, and `include_image!` hands over a *bytes* source that only decodes
+/// if the byte loader is registered and ready at that moment. On the start-up
+/// panel — which paints on the very first frames, before anything else has
+/// warmed the loader — it did not resolve, and the user saw a small red ⚠
+/// where the logo belongs, with no way to tell it was a load failure.
+///
+/// `TexturePoll::Ready` is the only case that draws; `Pending` (the loader has
+/// not finished) just skips this frame and asks for another. Returning whether
+/// anything was drawn lets the caller add the spacing rather than leave a gap.
+pub fn draw_app_logo(ui: &mut egui::Ui, size: f32) -> bool {
+    let Ok(egui::load::TexturePoll::Ready { texture }) = app_logo().load(
+        ui.ctx(),
+        egui::TextureOptions::LINEAR,
+        egui::SizeHint::Scale(egui::emath::OrderedFloat(size)),
+    ) else {
+        // not decoded yet — keep animating so the next frame retries
+        ui.ctx().request_repaint();
+        return false;
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter().image(
+        texture.id,
+        rect,
+        egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(texture.size.x as f32, texture.size.y as f32),
+        ),
+        egui::Color32::WHITE,
+    );
+    true
+}
+
 pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_options(app, ctx);
     draw_dirs(app, ctx);
@@ -552,65 +599,73 @@ struct DirRow {
     key: &'static str,
     /// already translated
     label: String,
-    /// absolute default, shown greyed out while the field is empty
-    default_hint: String,
+    /// the value the field starts out holding. It used to be a greyed-out
+    /// placeholder shown only while the field was empty, which made every row
+    /// look blank on open and needed a "reset" button to get the value back;
+    /// it is now written into the field for real, so the dialog shows the paths
+    /// MvUI actually uses — `.\snap`, `.\dats\command.dat`, `.\mame_cn.lst` — and
+    /// the program directory is stated once in the header instead of on all 14
+    /// rows. Empty only for MAME itself, which has no default to offer.
+    default_value: String,
     is_dir: bool,
 }
 
 /// The dialog table: `(translated group heading, rows)`.
 fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
     use crate::core::{dat, paths};
-    let exe = paths::exe_dir();
-    let hint = |rel: &str| exe.join(rel).to_string_lossy().to_string();
     let tr = |s: &str| app.tr(s).to_string();
+    // a relative path as the user types it: the Windows-style `.\` prefix plus
+    // the segments, joined the same way the resolver will join them
+    let rel = |parts: &[&str]| format!(".\\{}", parts.join("\\"));
 
     let mut out: Vec<(String, Vec<DirRow>)> = Vec::new();
 
-    // ROMs — the one path that still belongs to MAME, so it keeps its own
-    // default and is the only row whose value MAME itself consumes
+    // The MAME executable. Not a content path — it is the one absolute location
+    // in this dialog, and the only one MvUI genuinely cannot guess, because it
+    // is chosen at first start rather than derived from anything on disk.
     out.push((
-        tr("Roms"),
+        tr("MAME"),
         vec![DirRow {
-            key: "rompath",
-            label: tr("Roms"),
-            default_hint: app
-                .opts
-                .as_ref()
-                .and_then(|o| o.try_lock().ok())
-                .and_then(|o| o.opts.get("rompath").map(|p| p.defvalue.clone()))
+            key: "mame_binary",
+            label: tr("MAME program"),
+            default_value: app
+                .gui
+                .get("mame_binary")
+                .map(|p| p.to_string())
                 .unwrap_or_default(),
-            is_dir: true,
+            is_dir: false,
         }],
     ));
 
-    // Artwork — one row per image dock, each defaulting to <exe>/<its own dir>
+    // Artwork — one row per image dock, each defaulting to `.\<its own dir>`
     let artwork: Vec<DirRow> = paths::IMAGE_DIRS
         .iter()
         .enumerate()
-        .map(|(i, (key, rel))| DirRow {
+        .map(|(i, (key, dir))| DirRow {
             key,
             label: tr(dat::DOCK_NAMES.get(i).copied().unwrap_or("Image")),
-            default_hint: hint(rel),
+            default_value: rel(&[dir]),
             is_dir: true,
         })
         .collect();
     out.push((tr("Artwork"), artwork));
 
-    // Documents — one row per .dat. `mameinfo_file` backs two docks, so it is
-    // listed once under the first of them (MAME信息).
+    // Documents — one row per .dat, each naming the concrete file it reads. The
+    // `dats\` segment is part of the default, not decoration: `paths::dat_file`
+    // resolves an unset option to `<exe>/dats/<name>`, so showing `.\command.dat`
+    // here would name a path nothing ever reads.
     let documents: Vec<DirRow> = paths::DAT_FILES
         .iter()
         .map(|(key, file)| {
             let name = dat::DOCK_NAMES
                 .iter()
-                .position(|n| dat::dock_file_option(docks_index(n)) == Some(*key))
-                .and_then(|i| dat::DOCK_NAMES.get(i))
+                .find(|n| dat::dock_file_option(docks_index(n)) == Some(*key))
                 .copied()
                 .unwrap_or("History");
             DirRow {
                 key,
                 label: tr(name),
-                default_hint: hint(&format!("{}/{}", paths::DAT_SUBDIR, file)),
+                default_value: rel(&[paths::DAT_SUBDIR, file]),
                 is_dir: false,
             }
         })
@@ -624,19 +679,19 @@ fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
             DirRow {
                 key: "localized_list_file",
                 label: tr("Localized game list"),
-                default_hint: hint(paths::LST_FILE),
+                default_value: rel(&[paths::LST_FILE]),
                 is_dir: false,
             },
             DirRow {
                 key: "background_directory",
                 label: tr("Background images"),
-                default_hint: hint(paths::BG_SUBDIR),
+                default_value: rel(&[paths::BG_SUBDIR]),
                 is_dir: true,
             },
             DirRow {
                 key: "folder_directory",
                 label: tr("Folder lists"),
-                default_hint: hint(paths::FOLDERS_SUBDIR),
+                default_value: rel(&[paths::FOLDERS_SUBDIR]),
                 is_dir: true,
             },
         ],
@@ -655,8 +710,6 @@ fn docks_index(name: &str) -> usize {
 fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
     let mut open = app.show_dirs_win;
     let mut apply = false;
-    let mut cancel = false;
-    let mut reset: Option<&'static str> = None;
     let mut browse: Option<(&'static str, bool)> = None;
 
     // snapshot: the table is static apart from translations, and the edit map
@@ -664,28 +717,100 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
     let table = dir_rows(app);
     let mut edits = std::mem::take(&mut app.dir_edits);
     for row in table.iter().flat_map(|(_, r)| r.iter()) {
-        edits
-            .entry(row.key.to_string())
-            .or_insert_with(|| app.gui.get(row.key).unwrap_or_default().to_string());
+        edits.entry(row.key.to_string()).or_insert_with(|| {
+            // the configured value if there is one, otherwise the default —
+            // filled in rather than hinted, so the field is never blank
+            let cur = app.gui.get(row.key).unwrap_or_default().trim().to_string();
+            if cur.is_empty() {
+                row.default_value.clone()
+            } else {
+                cur
+            }
+        });
     }
-    let hint_label = app.tr("Default (next to mvui.exe)").to_string();
     let note = app
-        .tr("All paths are resolved relative to the program directory when relative.")
+        .tr("Relative paths are resolved against the program directory.")
         .to_string();
+    let exe_note = crate::core::paths::exe_dir().to_string_lossy().to_string();
     let browse_label = app.tr("Browse...").to_string();
-    let reset_label = app.tr("Reset to default").to_string();
-    let ok_label = app.tr("Apply and close").to_string();
-    let cancel_label = app.tr("Cancel").to_string();
+    let ok_label = app.tr("OK").to_string();
     let title = app.tr("Directories").to_string();
-    let missing = app.tr("missing").to_string();
+    // egui 0.29's `Window` has no `title_bar(|ui| …)` hook (that arrived in
+    // 0.30), so the mark is painted into the window's own title bar by hand —
+    // see below for why the closure's own painter cannot be used directly.
+    let style = ctx.style();
+    let bar_h = ctx.fonts(|f| f.row_height(&style.text_styles[&egui::TextStyle::Heading]))
+        + style.spacing.window_margin.top
+        + style.spacing.window_margin.bottom;
 
-    egui::Window::new(title)
+    // the response is not needed: the title-bar mark is painted from inside the
+    // closure (see below), and every value it carried is read back out of
+    // `edits` / `open` afterwards
+    let _ = egui::Window::new(title)
         .open(&mut open)
         .resizable(true)
         .default_width(680.0)
+        // no collapse triangle in the title bar: this dialog has one job and a
+        // full-height list, and a minimisable frame only invites hiding it
+        .collapsible(false)
         .frame(opaque_frame(ctx))
+        // The title is translated, but the window's position must not move when
+        // the language does — `Window::new` derives its `Area` id from the title
+        // text, so switching language would otherwise reset the placement.
+        .id(egui::Id::new("mamepgui_dirs"))
         .show(ctx, |ui| {
+            // The MvUI mark, at the left of the title bar. It cannot be added as
+            // a widget: the title bar is drawn by `Window` itself *above* this
+            // closure's rectangle, and `Ui::painter` is clipped to that
+            // rectangle, so a shape drawn up there is discarded without warning.
+            // Cloning the painter and replacing the clip rect with the title
+            // bar's own bounds lifts that restriction.
+            //
+            // Painting here rather than after `show()` returns is deliberate and
+            // is what makes it visible: `Window` reserves the frame background
+            // (`Shape::Noop`, `frame.rs:247`) and the title-bar background
+            // (`window.rs:523`) as placeholders *before* running this closure and
+            // fills them in afterwards (`frame.rs:339`, `window.rs:592`). Because
+            // `Painter::set` replaces a shape in place, those backgrounds keep
+            // their early indices and every shape added from here lands on top.
+            let content = ui.max_rect();
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(ui.clip_rect().min.x, content.min.y - bar_h),
+                egui::pos2(ui.clip_rect().max.x, content.min.y),
+            );
+            let size = (bar_h - 8.0).clamp(12.0, 20.0);
+            let mark = egui::Rect::from_center_size(
+                egui::pos2(
+                    bar.min.x + style.spacing.window_margin.left + size * 0.5,
+                    bar.center().y,
+                ),
+                egui::vec2(size, size),
+            );
+            // `Image::paint_at` needs a `Ui`, and the `Ui` we have is clipped
+            // away up here, so go straight to the painter and address the texture
+            // by hand. `SizedTexture` carries the id and the source size but no UV
+            // rect, so the whole texture is addressed directly.
+            if let Ok(egui::load::TexturePoll::Ready { texture }) = app_logo().load(
+                ctx,
+                egui::TextureOptions::LINEAR,
+                egui::SizeHint::Scale(egui::emath::OrderedFloat(size)),
+            ) {
+                let mut p = ui.painter().clone();
+                p.set_clip_rect(bar);
+                p.image(
+                    texture.id,
+                    mark,
+                    egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(texture.size.x as f32, texture.size.y as f32),
+                    ),
+                    egui::Color32::WHITE,
+                );
+            }
             ui.label(note);
+            ui.label(
+                egui::RichText::new(exe_note.clone()).small().weak(),
+            );
             ui.add_space(4.0);
             egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
                 for (group, rows) in &table {
@@ -699,35 +824,13 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
                                         egui::Label::new(row.label.clone()),
                                     );
                                     let value = edits.get_mut(row.key).expect("seeded above");
-                                    let placeholder =
-                                        format!("{hint_label}: {}", row.default_hint);
-                                    let picked_dir = if value.is_empty() {
-                                        None
-                                    } else {
-                                        let p = std::path::Path::new(&*value);
-                                        Some(p.is_dir() || (!row.is_dir && p.is_file()))
-                                    };
                                     ui.add_sized(
                                         [280.0, 18.0],
                                         egui::TextEdit::singleline(value)
-                                            .hint_text(placeholder)
                                             .desired_width(280.0),
                                     );
-                                    // a file row that does not exist is worth
-                                    // saying out loud: it is the usual reason a
-                                    // document panel stays empty
-                                    if !row.is_dir && picked_dir == Some(false) {
-                                        ui.colored_label(
-                                            ctx.style().visuals.warn_fg_color,
-                                            missing.clone(),
-                                        );
-                                    }
                                     if ui.small_button(browse_label.clone()).clicked() {
                                         browse = Some((row.key, row.is_dir));
-                                    }
-                                    let filled = !edits.get(row.key).map(|s| s.is_empty()).unwrap_or(true);
-                                    if filled && ui.small_button(reset_label.clone()).clicked() {
-                                        reset = Some(row.key);
                                     }
                                 });
                             }
@@ -735,22 +838,20 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
                 }
             });
             ui.separator();
-            ui.horizontal(|ui| {
+            // One action, right-aligned. "Cancel" is the title bar's X, which is
+            // where a cancel belongs; a second button restating it only invites
+            // the question of which one is authoritative.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(ok_label).clicked() {
                     apply = true;
-                }
-                if ui.button(cancel_label).clicked() {
-                    cancel = true;
                 }
             });
         });
 
-    if cancel {
-        edits.clear();
-    }
-    if let Some(key) = reset {
-        edits.insert(key.to_string(), String::new());
-    }
+    // The title bar's X is the cancel action: it discards the working copy and
+    // writes nothing, exactly as the removed Cancel button did.
+    let cancelled = !open;
+
     if let Some((key, is_dir)) = browse {
         let cur = edits.get(key).cloned().unwrap_or_default();
         let mut dlg = rfd::FileDialog::new();
@@ -758,13 +859,35 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
             crate::core::paths::exe_dir()
         } else {
             let p = std::path::Path::new(&cur);
-            if p.is_dir() {
-                p.to_path_buf()
+            if p.is_absolute() {
+                if p.is_dir() {
+                    p.to_path_buf()
+                } else {
+                    p.parent()
+                        .map(|d| d.to_path_buf())
+                        .unwrap_or_else(crate::core::paths::exe_dir)
+                }
             } else {
-                p.parent().map(|d| d.to_path_buf()).unwrap_or_else(crate::core::paths::exe_dir)
+                // a relative value names something under the exe dir; start the
+                // browser there rather than at the process cwd
+                let abs = crate::core::paths::exe_dir().join(p);
+                if abs.is_dir() {
+                    abs
+                } else {
+                    abs.parent()
+                        .map(|d| d.to_path_buf())
+                        .unwrap_or_else(crate::core::paths::exe_dir)
+                }
             }
         };
         dlg = dlg.set_directory(&start_dir);
+        // The MAME row picks the executable itself, so the filter is what stops
+        // the user from browsing to a folder and wondering why nothing loads.
+        dlg = if key == "mame_binary" {
+            dlg.add_filter("MAME", &["exe"])
+        } else {
+            dlg
+        };
         let picked = if is_dir { dlg.pick_folder() } else { dlg.pick_file() };
         if let Some(p) = picked {
             edits.insert(key.to_string(), p.to_string_lossy().to_string());
@@ -783,6 +906,20 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
         for k in empty {
             app.gui.remove(&k);
             edits.remove(&k);
+        }
+        // A picked MAME path is stored as given, but a *cleared* one must not
+        // silently leave the app pointing at nothing: fall back to the chain's
+        // current value so an empty field can never brick the emulator path.
+        if !edits.contains_key("mame_binary") {
+            if let Some(cur) = app
+                .opts
+                .as_ref()
+                .and_then(|o| o.try_lock().ok())
+                .and_then(|o| o.opts.get("mame_binary").map(|p| p.currvalue.clone()))
+                .filter(|s| !s.trim().is_empty())
+            {
+                edits.insert("mame_binary".to_string(), cur);
+            }
         }
         for (k, v) in &edits {
             app.gui.set(k, v.clone());
@@ -823,12 +960,12 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
     }
 
     // keep the working copy only while the dialog is open
-    app.dir_edits = if app.show_dirs_win && !apply && !cancel {
+    app.dir_edits = if app.show_dirs_win && !apply && !cancelled {
         edits
     } else {
         Default::default()
     };
-    app.show_dirs_win = app.show_dirs_win && !apply && !cancel;
+    app.show_dirs_win = app.show_dirs_win && !apply && !cancelled;
 }
 
 // ---------------------------------------------------------------------
@@ -1016,10 +1153,9 @@ fn draw_about(app: &mut MameApp, ctx: &egui::Context) {
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add(
-                    egui::Image::new(egui::include_image!("../assets/images/logo.png"))
-                        .max_size(egui::vec2(96.0, 96.0)),
-                );
+                // same reason as the start-up panel: `egui::Image` renders the
+                // ⚠ fallback when the embedded bytes have not resolved yet
+                draw_app_logo(ui, 96.0);
             });
             ui.heading(format!("MvUI v{}", env!("CARGO_PKG_VERSION")));
             ui.label(app.tr("MvUI — a Rust + egui frontend for MAME"));

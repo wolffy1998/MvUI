@@ -58,10 +58,14 @@ pub const ZH_CN: &[(&str, &str)] = &[
     ("Exit", "退出"),
     ("Directories...", "目录..."),
     ("Default Game Options", "默认游戏选项"),
-    ("GUI Style", "界面样式"),
+    ("Font", "图标字体"),
+    ("Smaller", "较小"),
+    ("Default Size", "默认"),
+    ("Larger", "较大"),
+    ("Largest", "最大"),
     ("Dark", "深色"),
     ("Light", "浅色"),
-    ("Background", "背景"),
+    ("Window Background", "窗口背景"),
     ("Stretch", "拉伸"),
     ("Tile", "平铺"),
     ("Language", "语言"),
@@ -69,19 +73,16 @@ pub const ZH_CN: &[(&str, &str)] = &[
     ("Refresh", "刷新"),
     ("MAME Extra Config", "MAME 额外配置"),
     ("Refresh Database", "刷新档案"),
-    ("Roms", "ROM 目录"),
+    ("MAME", "MAME"),
+    ("MAME program", "MAME 程序"),
     ("Artwork", "图片目录"),
     ("Documents", "文档目录"),
     ("Other", "其他"),
     ("Localized game list", "本地化游戏列表"),
     ("Background images", "背景图片"),
     ("Folder lists", "收藏夹列表"),
-    ("Default (next to mvui.exe)", "默认（程序所在目录）"),
     ("Browse...", "浏览..."),
-    ("Reset to default", "恢复默认"),
-    ("All paths are resolved relative to the program directory when relative.", "相对路径以程序所在目录为基准。"),
-    ("Apply and close", "应用并关闭"),
-    ("missing", "缺失"),
+    ("Relative paths are resolved against the program directory.", "相对路径以程序所在目录为基准。"),
     ("Documentation", "说明"),
     ("Information Panels", "自定义信息栏"),
     ("Filter", "过滤"),
@@ -167,8 +168,8 @@ pub const ZH_CN: &[(&str, &str)] = &[
     ("Loading game list…", "正在加载游戏列表…"),
     ("Game List", "游戏列表"),
     ("selecting…", "选择中…"),
-    ("MAME/MESS executable not configured.", "未配置 MAME/MESS 主程序。"),
-    ("MAME/MESS executable:", "MAME/MESS 主程序："),
+    ("MAME executable not configured.", "未配置 MAME 主程序。"),
+    ("MAME executable:", "MAME 主程序："),
     ("MvUI — a Rust + egui frontend for MAME", "MvUI —— Rust + egui 编写的 MAME 前端"),
     ("mame: {}", "MAME 版本：{}"),
     ("not detected", "未检测到"),
@@ -216,7 +217,7 @@ pub const ZH_CN: &[(&str, &str)] = &[
     ("settings.icons", "图标目录"),
     ("settings.snap", "截图目录"),
     ("settings.ini", "ini 目录"),
-    ("settings.history", "history.dat"),
+    ("settings.history", "history.xml"),
     ("settings.command", "command.dat"),
     ("settings.save", "保存"),
     ("options.title", "选项"),
@@ -512,10 +513,14 @@ pub const ZH_TW: &[(&str, &str)] = &[
     ("Exit", "結束"),
     ("Directories...", "目錄..."),
     ("Default Game Options", "預設遊戲選項"),
-    ("GUI Style", "介面樣式"),
+    ("Font", "圖標字型"),
+    ("Smaller", "較小"),
+    ("Default Size", "預設"),
+    ("Larger", "較大"),
+    ("Largest", "最大"),
     ("Dark", "深色"),
     ("Light", "淺色"),
-    ("Background", "背景"),
+    ("Window Background", "窗口背景"),
     ("Stretch", "延展"),
     ("Tile", "並排"),
     ("Language", "語言"),
@@ -523,19 +528,16 @@ pub const ZH_TW: &[(&str, &str)] = &[
     ("Refresh", "重新整理"),
     ("MAME Extra Config", "MAME 額外設定"),
     ("Refresh Database", "重新整理檔案"),
-    ("Roms", "ROM 目錄"),
+    ("MAME", "MAME"),
+    ("MAME program", "MAME 程式"),
     ("Artwork", "圖片目錄"),
     ("Documents", "文件目錄"),
     ("Other", "其他"),
     ("Localized game list", "本地化遊戲清單"),
     ("Background images", "背景圖片"),
     ("Folder lists", "收藏夾清單"),
-    ("Default (next to mvui.exe)", "預設（程式所在目錄）"),
     ("Browse...", "瀏覽..."),
-    ("Reset to default", "恢復預設"),
-    ("All paths are resolved relative to the program directory when relative.", "相對路徑以程式所在目錄為基準。"),
-    ("Apply and close", "套用並關閉"),
-    ("missing", "缺失"),
+    ("Relative paths are resolved against the program directory.", "相對路徑以程式所在目錄為基準。"),
     ("Documentation", "說明"),
     ("Information Panels", "自訂資訊欄"),
     ("Filter", "篩選"),
@@ -621,8 +623,8 @@ pub const ZH_TW: &[(&str, &str)] = &[
     ("Loading game list…", "正在載入遊戲清單…"),
     ("Game List", "遊戲清單"),
     ("selecting…", "選擇中…"),
-    ("MAME/MESS executable not configured.", "未設定 MAME/MESS 執行檔。"),
-    ("MAME/MESS executable:", "MAME/MESS 執行檔:"),
+    ("MAME executable not configured.", "未設定 MAME 執行檔。"),
+    ("MAME executable:", "MAME 執行檔:"),
     ("MvUI — a Rust + egui frontend for MAME", "MvUI —— Rust + egui 編寫的 MAME 前端"),
     ("mame: {}", "MAME 版本：{}"),
     ("not detected", "未檢測到"),
@@ -670,7 +672,7 @@ pub const ZH_TW: &[(&str, &str)] = &[
     ("settings.icons", "圖示目錄"),
     ("settings.snap", "遊戲圖目錄"),
     ("settings.ini", "ini 目錄"),
-    ("settings.history", "history.dat"),
+    ("settings.history", "history.xml"),
     ("settings.command", "command.dat"),
     ("settings.save", "儲存"),
     ("options.title", "選項"),
@@ -1112,5 +1114,47 @@ mod tests {
             );
         }
         assert!(keys.len() > 60, "expected a decent-size key set");
+    }
+
+    /// The menu labels the user pinned by name, in both tables.
+    ///
+    /// `dynamic_keys_are_translated` only proves a key *exists*; it cannot catch a
+    /// value drifting back to an older wording. That is exactly what happened to
+    /// the View menu: `Font` was changed to 图标字体 in the Traditional table and
+    /// the Simplified one silently kept 字体, so the two languages disagreed and
+    /// the rename never took effect. Assertions live here rather than in the
+    /// source so a future edit has to argue with them.
+    #[test]
+    fn pinned_menu_labels_are_consistent() {
+        // (key, simplified, traditional)
+        let pinned = [
+            ("Font", "图标字体", "圖標字型"),
+            ("Window Background", "窗口背景", "窗口背景"),
+        ];
+        for (key, zh_cn, zh_tw) in pinned {
+            // the tables are `HashMap<&str, String>`, so `get` hands back `&&str`
+            assert_eq!(
+                zh_cn_table().get(key).copied(),
+                Some(zh_cn),
+                "zh_CN value for {key:?} drifted"
+            );
+            assert_eq!(
+                zh_tw_table().get(key).copied(),
+                Some(zh_tw),
+                "zh_TW value for {key:?} drifted"
+            );
+        }
+    }
+
+    /// The rename to 图标字体 was requested because the submenu scales the whole
+    /// interface, not just glyphs — but the i18n *key* stayed `"Font"`, so this
+    /// test also pins the fact that the menu still looks its label up under that
+    /// key. Renaming the key alone would make the menu fall back to English.
+    #[test]
+    fn font_menu_label_is_looked_up_by_its_original_key() {
+        assert!(zh_cn_table().contains_key("Font"));
+        assert!(zh_tw_table().contains_key("Font"));
+        // and the old wording must be gone from the View menu's own key
+        assert_ne!(zh_cn_table().get("Font").copied(), Some("字体"));
     }
 }
