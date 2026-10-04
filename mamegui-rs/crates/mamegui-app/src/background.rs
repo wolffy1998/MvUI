@@ -559,19 +559,19 @@ pub fn load_dat(
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| file_path.clone());
             let local = std::path::Path::new(&lang_dir).join(name);
-            if let Some(bytes) = dat::read_dat_bytes(&local.to_string_lossy()) {
-                html = dat::get_history(&bytes, &tag, method, dark, &cloneof);
-            }
+            html = read_one_dat(&local, &tag, method, dark, &cloneof);
         }
         if html.is_empty() {
-            if let Some(bytes) = dat::read_dat_bytes(&file_path) {
-                html = dat::get_history(&bytes, &tag, method, dark, &cloneof);
-            }
+            html = read_one_dat(std::path::Path::new(&file_path), &tag, method, dark, &cloneof);
         } else {
             html.push_str("<hr>");
-            if let Some(bytes) = dat::read_dat_bytes(&file_path) {
-                html.push_str(&dat::get_history(&bytes, &tag, method, dark, &cloneof));
-            }
+            html.push_str(&read_one_dat(
+                std::path::Path::new(&file_path),
+                &tag,
+                method,
+                dark,
+                &cloneof,
+            ));
         }
         let text = strip_html(&html);
         let _ = tx.send(AppEvent::DatReady {
@@ -581,6 +581,27 @@ pub fn load_dat(
         });
         ctx.request_repaint();
     });
+}
+
+/// Read one record out of a DAT, by path.
+///
+/// The byte-range index (design §3.2) answers from `mtime`-validated memory and
+/// reads only the record's own bytes, turning a 10-20 MB linear scan per lookup
+/// into a few KB read. It only covers plain files, so anything else — a DAT
+/// inside a zip, an unreadable file, or an index the tag is absent from —
+/// falls back to the original `read_dat_bytes` + `get_history` scan. The two
+/// produce identical output; `datindex`'s tests pin that.
+fn read_one_dat(path: &std::path::Path, tag: &str, method: usize, dark: bool, cloneof: &str) -> String {
+    if path.is_file() {
+        if let Some(hit) = mamegui_core::datindex::history_indexed(path, tag, method, dark, cloneof) {
+            if !hit.is_empty() {
+                return hit;
+            }
+        }
+    }
+    dat::read_dat_bytes(&path.to_string_lossy())
+        .map(|b| dat::get_history(&b, tag, method, dark, cloneof))
+        .unwrap_or_default()
 }
 
 /// pump mame -verifyroms/-verifysamples output (origin: MameExeRomAuditor)

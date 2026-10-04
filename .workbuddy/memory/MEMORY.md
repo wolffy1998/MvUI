@@ -127,6 +127,18 @@ Rust 里的代码注释统一用 `origin: xxx` 标注对应的旧版函数/行�
   然后 `apply_theme_with_bg` 里 `v.window_fill` 半透明 128（= 旧版
   `setTransparentBg` 的 `QPalette::Base`），`panel_fill` 保持不透明。
   另：表头拖拽幽灵底色要用 `panel_fill` 不能用 `window_fill`（浮层要实体底）。
+- **DAT 有字节偏移索引**（`core/src/datindex.rs`，设计 §3.2/§3.3）：`$info=标签`
+  → 记录字节区间，mtime 失效，实测 **22.998ms → 0.067ms（340x）**。三条铁律：
+  (1) **只做性能层**：miss / 过期 / zip 内 DAT 一律回落 `get_history` 线性扫描，
+      9 项测试逐字节 pin 两条路径一致；
+  (2) **记录范围是「贪婪」的** —— rec_data 只被「不含该 tag 的 `$info=`」清除，
+      同一 tag 出现在两条记录里时会吞掉中间那条记录。按位置切块会返回更少
+      文本，**行为就变了**；
+  (3) 缓存里的 `DatIndex` 必须用 **`Arc`** —— `clone()` 会深拷贝 5 万个 tag 的
+      HashMap（约 20ms/次），足以抹掉全部收益（第一版实测就是 0.9x）。
+  另外 `history_indexed` 里 cloneof 回退会**递归调自己**，锁作用域必须窄于递归
+  路径，否则 `std::sync::Mutex` 不可重入直接死锁（cargo test 会 SIGTERM）。
+  基准：`cargo run --release --example datindex_bench`（自造 18MB DAT 测等价+速度）。
 - **背景目录按旧版语义**：`backgrounds_dir()` 读 `background_directory` 选项
   （默认 `bkground`，相对 **mame.exe 目录**，支持 `$HOME`）——不是 exe 旁边的
   `assets/backgrounds/`。用户实际用法就是 `D:\Game\MAME\MAME-0.284\bkground\*.png`。
@@ -140,7 +152,7 @@ Rust 里的代码注释统一用 `origin: xxx` 标注对应的旧版函数/行�
   或先把窗口 `SetWindowPos` 到主屏置顶再抓。旧 `shot_tree.py` 会最大化，
   尺寸对不上，别混用。
 - 维护基线：`cargo check --workspace` **0 warning**、`cargo test --workspace`
-  **27 项**通过（core 21 + app 6）、`cargo audit` **0 漏洞**。
+  **36 项**通过（core 30 + app 6）、`cargo audit` **0 漏洞**。
   依赖：`encoding_rs`（GBK）、`winresource`（build-dep，exe 图标，需 windres）、
   `quick-xml 0.41`（从 0.36 升上去修 RUSTSEC-2026-0194/0195）。
 - **安全边界（2026-10-04 审计）**：

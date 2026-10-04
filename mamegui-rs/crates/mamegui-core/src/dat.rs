@@ -86,6 +86,84 @@ pub fn link_color(dark: bool) -> &'static str {
     }
 }
 
+/// Render payload lines to HTML-ish output.
+///
+/// Shared by the linear scan ([get_history]) and the byte-range index
+/// (datindex::record_text) so the two cannot drift: the index decides *which
+/// bytes* are the record, this decides what they render to.
+///
+/// Takes the lines already sliced out - the scan collects them as it walks, the
+/// index hands over the range's lines. Joining them back into one string would
+/// be lossy (str::lines drops the fact that a trailing empty line existed), so
+/// they stay a slice.
+fn render_lines(lines: &[&str], dark_bg: bool) -> String {
+    render_lines_for(lines, None, dark_bg)
+}
+
+/// `own_tag` is the tag the record was opened by, if the caller knows it.
+///
+/// A `$info=` line inside a record is ambiguous: for the scan it ends the
+/// payload, but when it carries the record's own tag the scan *keeps going*
+/// (that is the greedy span reproduced in datindex). Passing the tag lets both
+/// paths share this one function without disagreeing about that case.
+fn render_lines_for(lines: &[&str], own_tag: Option<&str>, dark_bg: bool) -> String {
+    let link = link_color(dark_bg);
+    let mut out: Vec<String> = Vec::new();
+    for line in lines {
+        let line = *line;
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("$info=") {
+            // the next record's opener ends this payload — unless it carries
+            // our own tag, in which case the scan keeps collecting
+            let carries = own_tag.is_some_and(|t| {
+                line.strip_prefix("$info=")
+                    .is_some_and(|rest| rest.split(',').any(|x| x.trim() == t))
+            });
+            if !carries {
+                break;
+            }
+            continue;
+        }
+        if line.starts_with('$') {
+            if let Some(href) = line.strip_prefix("$<a href=") {
+                out.push(format!("<a style=\"color:{link}\" href={href}><br>"));
+            } else {
+                out.push(format!("{line}<br>"));
+            }
+        } else {
+            out.push(format!("{line}<br>"));
+        }
+    }
+    out.join("")
+}
+
+/// Public wrapper for the index path: turn a record's byte range into output.
+pub fn format_record(range_text: &str, own_tag: Option<&str>, dark_bg: bool) -> String {
+    let lines: Vec<&str> = range_text.lines().collect();
+    render_lines_for(&lines, own_tag, dark_bg)
+}
+
+/// Trim the `<br>` padding and prepend the MAWS link, i.e. everything
+/// [`get_history`] does to a rendered payload before handing it over.
+/// Applied *after* either extraction path so the results match exactly.
+pub fn finish_record(mut s: String, search_tag: &str, method: usize, dark_bg: bool) -> String {
+    if method == DOCK_HISTORY {
+        s = format!(
+            "<a style=\"color:{}\" href=\"http://maws.mameworld.info/maws/romset/{search_tag}\">View information at MAWS</a><br>",
+            link_color(dark_bg)
+        ) + &s;
+    }
+    while s.starts_with("<br>") {
+        s = s[4..].to_string();
+    }
+    while s.ends_with("<br>") {
+        s = s[..s.len() - 4].to_string();
+    }
+    s
+}
+
 /// origin: UpdateSelectionThread::getHistory — returns HTML-ish lines
 pub fn get_history(
     file_bytes: &[u8],
@@ -96,8 +174,8 @@ pub fn get_history(
 ) -> String {
     let text = String::from_utf8_lossy(file_bytes);
     let mut rec_data = false;
-    let mut out: Vec<String> = Vec::new();
-    let link = link_color(dark_bg);
+    // line-offset state only exists for the scan; the formatter itself is shared
+    let mut rec_lines: Vec<&str> = Vec::new();
     for line in text.lines() {
         if line.starts_with('#') {
             continue;
@@ -111,19 +189,13 @@ pub fn get_history(
                     break;
                 }
             } else if rec_data {
-                if let Some(href) = line.strip_prefix("$<a href=") {
-                    out.push(format!(
-                        "<a style=\"color:{link}\" href={href}><br>"
-                    ));
-                } else {
-                    out.push(format!("{line}<br>"));
-                }
+                rec_lines.push(line);
             }
         } else if rec_data {
-            out.push(format!("{line}<br>"));
+            rec_lines.push(line);
         }
     }
-    let mut s = out.join("");
+    let mut s = render_lines(&rec_lines, dark_bg);
     if s.is_empty() {
         // recursive clone fallback
         if !cloneof.is_empty() {
@@ -131,17 +203,7 @@ pub fn get_history(
         }
         return String::new();
     }
-    if method == DOCK_HISTORY {
-        s = format!(
-            "<a style=\"color:{link}\" href=\"http://maws.mameworld.info/maws/romset/{search_tag}\">View information at MAWS</a><br>"
-        ) + &s;
-    }
-    while s.starts_with("<br>") {
-        s = s[4..].to_string();
-    }
-    while s.ends_with("<br>") {
-        s = s[..s.len() - 4].to_string();
-    }
+    s = finish_record(s, search_tag, method, dark_bg);
     s
 }
 

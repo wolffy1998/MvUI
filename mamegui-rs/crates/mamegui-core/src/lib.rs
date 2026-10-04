@@ -4,6 +4,7 @@ pub mod archive;
 pub mod audit;
 pub mod cache;
 pub mod dat;
+pub mod datindex;
 pub mod folders;
 pub mod icons;
 pub mod launcher;
