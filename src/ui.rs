@@ -1,0 +1,1380 @@
+//! All egui drawing: menu tree, dockable tab area (egui_dock), folder dock,
+//! status bar with parse/audit progress (origin: mainwindow.ui + QDockWidget tabify).
+
+use crate::app::{MameApp, PlayKind, ListMode, COL_LAST, COLUMN_TITLES};
+use crate::icons;
+use egui_dock::{DockArea, DockState, NodeIndex};
+use crate::core::folders::{self, FolderChild, FolderKind};
+use crate::core::launcher::RunMode;
+
+/// estimated machine count for parse percentage (modern MAME ~46k)
+const EST_MACHINES: f32 = 46_000.0;
+
+/// where Help ▸ Documentation points
+const HELP_URL: &str = "https://bbs.xqemu.cn/";
+
+/// tabs in the dockable central area
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum MainTab {
+    List,
+    /// the machine-tree panel; a dock tab like any other, so it can be dragged
+    /// around (and other tabs can be docked into it)
+    Folders,
+    Image(usize),
+    Text(usize),
+}
+
+/// share of the dock width the folder tree gets by default
+const FOLDER_DOCK_FRACTION: f32 = 0.17;
+
+/// size of a folder-tree entry's icon (origin: `res/32x32/folder.png`, which
+/// `gamelist.cpp:2830` puts on every tree entry)
+const FOLDER_ICON: f32 = 16.0;
+
+use egui_dock::Split;
+
+fn split_right(state: &mut DockState<MainTab>, parent: NodeIndex, fraction: f32, tabs: Vec<MainTab>) -> [NodeIndex; 2] {
+    state.split((egui_dock::SurfaceIndex(0), parent), Split::Right, fraction, egui_dock::Node::leaf_with(tabs))
+}
+
+fn split_below(state: &mut DockState<MainTab>, parent: NodeIndex, fraction: f32, tabs: Vec<MainTab>) -> [NodeIndex; 2] {
+    state.split((egui_dock::SurfaceIndex(0), parent), Split::Below, fraction, egui_dock::Node::leaf_with(tabs))
+}
+
+pub fn default_docks_filtered(
+    images: &[bool; 7],
+    texts: &[bool; 5],
+    folders: bool,
+) -> DockState<MainTab> {
+    // The machine tree is a normal dock tab in the left strip (origin: the
+    // `QDockWidget` of 1.8.2, which could also be floated and tabified).
+    let (mut state, root) = if folders {
+        let mut s = DockState::new(vec![MainTab::Folders]);
+        let [_, right] = split_right(&mut s, NodeIndex::root(), FOLDER_DOCK_FRACTION, vec![MainTab::List]);
+        (s, right)
+    } else {
+        (DockState::new(vec![MainTab::List]), NodeIndex::root())
+    };
+    let img_tabs: Vec<MainTab> = (0..7).filter(|&i| images[i]).map(MainTab::Image).collect();
+    let txt_tabs: Vec<MainTab> = (0..5).filter(|&i| texts[i]).map(MainTab::Text).collect();
+    if !img_tabs.is_empty() {
+        let [list_node, _] = split_right(&mut state, root, 0.68, img_tabs);
+        if !txt_tabs.is_empty() {
+            let _ = split_below(&mut state, list_node, 0.70, txt_tabs);
+        }
+    } else if !txt_tabs.is_empty() {
+        let _ = split_below(&mut state, root, 0.70, txt_tabs);
+    }
+    state
+}
+
+/// sort key so two tab sets can be compared without Ord on MainTab
+fn tab_key(t: &MainTab) -> (u8, usize) {
+    match t {
+        MainTab::List => (0, 0),
+        MainTab::Image(i) => (1, *i),
+        MainTab::Text(i) => (2, *i),
+        MainTab::Folders => (3, 0),
+    }
+}
+
+/// the exact tab set the View-menu visibility checkboxes imply
+pub fn expected_tabs(images: &[bool; 7], texts: &[bool; 5], folders: bool) -> Vec<MainTab> {
+    let mut v = vec![MainTab::List];
+    if folders {
+        v.push(MainTab::Folders);
+    }
+    v.extend((0..7).filter(|&i| images[i]).map(MainTab::Image));
+    v.extend((0..5).filter(|&i| texts[i]).map(MainTab::Text));
+    v
+}
+
+/// Restore the saved dock tree (split ratios + tab positions) from the settings
+/// string, but only when it still matches the checkbox state — otherwise a
+/// stale layout would resurrect docks the user has switched off.
+pub fn restore_docks(
+    saved: &str,
+    images: &[bool; 7],
+    texts: &[bool; 5],
+    folders: bool,
+) -> Option<DockState<MainTab>> {
+    if saved.is_empty() {
+        return None;
+    }
+    let state: DockState<MainTab> = serde_json::from_str(saved).ok()?;
+    let mut have: Vec<(u8, usize)> = state.iter_all_tabs().map(|(_, t)| tab_key(t)).collect();
+    let mut want: Vec<(u8, usize)> = expected_tabs(images, texts, folders)
+        .iter()
+        .map(tab_key)
+        .collect();
+    have.sort_unstable();
+    want.sort_unstable();
+    if have == want {
+        Some(state)
+    } else {
+        None
+    }
+}
+
+struct DockTabs<'a> {
+    app: &'a mut MameApp,
+}
+
+/// egui_dock's default look has two artefacts on this layout:
+///
+/// * a node separator is stroked *on top of* the neighbouring node's tab bar, so
+///   the line looks like a stray vertical stroke cutting through the tab (it was
+///   clearly visible inside the "Game List"/"Flyer" tabs' left padding);
+/// * six image tabs overflow their node, and egui_dock then paints a 7.5px
+///   scroll bar pill right under the tab row — that grey rounded bar.
+fn dock_style(ctx: &egui::Context) -> egui_dock::Style {
+    let mut style = egui_dock::Style::from_egui(&ctx.style());
+    // keep the splitter invisible while idle; it still highlights on hover and the
+    // grab area (`extra_interact_width`) is untouched
+    style.separator.color_idle = egui::Color32::TRANSPARENT;
+    // the hover/drag highlight fills the whole 4px grab strip, so a pure black
+    // default reads as a heavy bar — soften it
+    style.separator.color_hovered = egui::Color32::from_gray(150);
+    style.separator.color_dragged = egui::Color32::from_gray(90);
+    style.tab_bar.show_scroll_bar_on_overflow = false;
+    // slightly narrower tabs, so a full row of image tabs is less likely to
+    // overflow in the first place
+    style.tab.tab_body.inner_margin = egui::Margin::symmetric(4.0, 2.0);
+    // The tab fills stay opaque on purpose: the game list needs a solid
+    // backdrop or its text turns unreadable over a busy wallpaper. Only
+    // `panel_fill` (menu/toolbar/status bars) is made translucent, and that
+    // happens in `apply_theme_with_bg`.
+    style
+}
+
+impl egui_dock::TabViewer for DockTabs<'_> {
+    type Tab = MainTab;
+
+    fn title(&mut self, tab: &mut MainTab) -> egui::WidgetText {
+        let name = match tab {
+            MainTab::List => self.app.tr("Game List"),
+            MainTab::Folders => self.app.tr("Folders"),
+            MainTab::Image(d) => self.app.tr(crate::core::dat::DOCK_NAMES[*d]),
+            MainTab::Text(d) => {
+                self.app.tr(["History", "MAMEInfo", "DriverInfo", "Story", "Command"][*d])
+            }
+        };
+        egui::WidgetText::from(name)
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut MainTab) {
+        match tab {
+            MainTab::List => self.app.draw_table(ui),
+            MainTab::Folders => self.app.draw_folders(ui),
+            MainTab::Image(d) => self.app.picture_content(ui, *d),
+            MainTab::Text(d) => self.app.documents_content(ui, *d),
+        }
+    }
+}
+
+impl eframe::App for MameApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.stash_ctx(ctx);
+        if !self.started {
+            self.startup();
+        }
+        self.pump_events(ctx);
+        // apply the persisted theme once per start-up: the visuals are not
+        // serialized, so without this the window would come up in egui's
+        // default light theme regardless of what `dark_bg` says
+        if !self.theme_applied {
+            self.theme_applied = true;
+            let has_bg = self.background_file.is_some();
+            if has_bg {
+                if let Some(f) = self.background_file.clone() {
+                    let dir = self.bg_dir.clone();
+                    self.dark_bg = crate::app::background_is_dark(&dir, &f);
+                }
+            }
+            crate::app::apply_theme_with_bg(ctx, self.dark_bg, has_bg);
+        }
+        // stamp a selection change once, wherever it came from (click, refilter,
+        // restore) — the debounce in `selection_settling` reads it
+        if self.current_game != self.published_game {
+            self.published_game = self.current_game.clone();
+            self.sel_changed_at = Some(std::time::Instant::now());
+        }
+        if self.needs_refilter {
+            self.refilter();
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            self.refresh_all();
+        }
+        if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
+            self.search_take_focus = true;
+        }
+        if self.wants_close {
+            self.save_settings();
+            self.cleanup_temp_roms(None);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if self.lib_status != crate::app::LibStatus::Ready
+            || self.boot_auditing
+            || self.audit_handle.is_some()
+        {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        // the debounced loads need one more frame once the window has elapsed
+        if self.selection_settling() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
+
+        crate::windows::draw_windows(self, ctx);
+        self.draw_menu(ctx);
+        self.draw_toolbar(ctx);
+        // the machine tree is a dock tab now (MainTab::Folders) — dragging the
+        // splitter next to it resizes it, and its width lives in `dock_layout`
+        egui::CentralPanel::default().show(ctx, |ui| {
+            // the backdrop goes down first, inside this panel, so the dock area
+            // and everything in it are painted over it (see `draw_background`)
+            self.draw_background(ui);
+            if self.need_mame_pick || self.mame.is_none() {
+                self.draw_startup_panel(ui);
+                return;
+            }
+            let mut state = std::mem::replace(
+                &mut self.dock_state,
+                DockState::new(vec![MainTab::List]),
+            );
+            {
+                let mut viewer = DockTabs { app: self };
+                DockArea::new(&mut state)
+                    .style(dock_style(ctx))
+                    .show_inside(ui, &mut viewer);
+            }
+            self.dock_state = state;
+        });
+        self.draw_status(ctx);
+        self.draw_toast(ctx);
+        self.save_settings_periodic();
+    }
+
+    /// the window-manager close button bypasses wants_close
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_settings();
+        // the WM close button bypasses wants_close — drop the temp roms here too
+        self.cleanup_temp_roms(None);
+    }
+}
+
+pub fn button(label: impl Into<egui::WidgetText>) -> egui::Button<'static> {
+    egui::Button::new(label)
+}
+
+impl MameApp {
+    pub fn tr(&self, key: &str) -> String {
+        crate::i18n::tr(&self.lang, key)
+    }
+
+    fn save_settings_periodic(&mut self) {
+        self.frame_count += 1;
+        if self.frame_count % 200 == 0 {
+            self.save_settings();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // menu tree (origin mainwindow.ui)
+    // ------------------------------------------------------------------
+
+    /// The window backdrop, drawn as the **central panel's own frame fill**.
+    ///
+    /// It used to be painted on `Order::Background` over `ctx.screen_rect()`,
+    /// which is wrong twice over. `screen_rect()` is the whole window including
+    /// the menu/toolbar/status bars, and the picture is opaque, so it buried the
+    /// entire interface — with `Order::Background` nominally the lowest layer,
+    /// the panels still lost (verified: alpha 255 hid the menu bar too, alpha
+    /// 128 let it bleed through and wash out the text). Docking the picture to
+    /// the central panel's frame makes egui own the ordering: the backdrop is
+    /// painted first inside that frame and every widget draws on top of it.
+    ///
+    /// Origin: 1.8.2 `setBgPixmap` put the pixmap on the main window's
+    /// background role, then `setTransparentBg` swapped `QPalette::Base` for
+    /// `rgba(0,0,0,128)` under the tree/list docks — i.e. a translucent panel
+    /// over a window-wide picture. `window_fill` (which `egui_dock` turns into
+    /// `TabBodyStyle::bg_fill`, style.rs:704) is that same brush here.
+    fn draw_background(&mut self, ui: &mut egui::Ui) {
+        let Some(file) = self.background_file.clone() else {
+            return;
+        };
+        let dir = self.bg_dir.clone();
+        let ctx = ui.ctx().clone();
+        let mut tex = self.bg_tex.take();
+        let handle = crate::app::load_background(&dir, &file, &mut tex, &ctx);
+        self.bg_tex = tex;
+        let Some(tex) = handle else { return };
+
+        let area = ui.max_rect();
+        let painter = ui.painter_at(area);
+        let id = tex.id();
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        if self.bg_stretch {
+            // cover the area, keeping the aspect ratio (origin:
+            // `scaled(size(), Qt::KeepAspectRatioByExpanding)`)
+            painter.image(id, area, uv, egui::Color32::WHITE);
+        } else {
+            // repeat at the picture's own size
+            let sz = tex.size();
+            let (tw, th) = (sz[0].max(1) as f32, sz[1].max(1) as f32);
+            let mut y = area.min.y;
+            while y < area.max.y {
+                let mut x = area.min.x;
+                while x < area.max.x {
+                    let cell = egui::Rect::from_min_max(
+                        egui::pos2(x, y),
+                        egui::pos2((x + tw).min(area.max.x), (y + th).min(area.max.y)),
+                    );
+                    painter.image(id, cell, uv, egui::Color32::WHITE);
+                    x += tw;
+                }
+                y += th;
+            }
+        }
+    }
+
+    fn draw_menu(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button(self.tr("File"), |ui| {
+                    self.play_section(ui);
+                    ui.separator();
+                    self.add_folder_section(ui);
+                    let label = self.tr("Remove From This Folder");
+                    if ui
+                        .add_enabled(self.can_remove_from_folder(), button(label))
+                        .clicked()
+                    {
+                        self.remove_from_folder();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    let src_label = self.src_properties_label();
+                    if ui.add_enabled(self.has_game(), button(src_label)).clicked() {
+                        self.open_properties(crate::core::options::OPTLEVEL_SRC);
+                        ui.close_menu();
+                    }
+                    let props = self.tr("Properties");
+                    if ui.add_enabled(self.has_game(), button(props)).clicked() {
+                        self.open_properties(crate::core::options::OPTLEVEL_CURR);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    self.audit_submenu(ui);
+                    ui.separator();
+                    let exit = self.tr("Exit");
+                    if ui.button(exit).clicked() {
+                        self.wants_close = true;
+                    }
+                });
+                ui.menu_button(self.tr("Options"), |ui| {
+                    let d = self.tr("Directories...");
+                    if ui.button(d).clicked() {
+                        self.dirs_buf = self
+                            .opts
+                            .as_ref()
+                            .and_then(|o| o.try_lock().ok())
+                            .and_then(|o| o.opts.get("rompath").map(|p| p.currvalue.clone()))
+                            .unwrap_or_default();
+                        self.show_dirs_win = true;
+                        ui.close_menu();
+                    }
+                    let def = self.tr("Default Game Options");
+                    if ui.button(def).clicked() {
+                        self.open_properties(crate::core::options::OPTLEVEL_GLOBAL);
+                        ui.close_menu();
+                    }
+                    self.language_submenu(ui);
+                });
+                ui.menu_button(self.tr("View"), |ui| {
+                    ui.menu_button(self.tr("Customize Fields"), |ui| {
+                        for i in 1..COL_LAST {
+                            let mut v = self.col_visible[i];
+                            if ui.checkbox(&mut v, self.tr(COLUMN_TITLES[i])).changed() {
+                                self.col_visible[i] = v;
+                            }
+                        }
+                    });
+                    self.info_panels_submenu(ui);
+                    ui.separator();
+                    self.gui_style_submenu(ui);
+                    self.background_submenu(ui);
+                    ui.separator();
+                    for (mode, key) in
+                        [(ListMode::Grouped, "Grouped"), (ListMode::Details, "Details")]
+                    {
+                        let label = self.tr(key);
+                        if ui.radio(self.list_mode == mode, label).clicked() {
+                            self.list_mode = mode;
+                            ui.close_menu();
+                        }
+                    }
+                    // grid lines on the game list; on by default
+                    let gl = self.tr("Show Grid Lines");
+                    ui.checkbox(&mut self.show_grid, gl);
+                    let ll = self.tr("Local Language Game List");
+                    if ui.checkbox(&mut self.local_game_list, ll).changed() {
+                        self.needs_refilter = true;
+                    }
+                    ui.separator();
+                    // origin actionRefresh: re-audit + re-init. F5 is bound to the
+                    // same action in `update`.
+                    let r = self.tr("Refresh");
+                    if ui.button(format!("{r}    (F5)")).clicked() {
+                        self.refresh_all();
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button(self.tr("Help"), |ui| {
+                    let d = self.tr("Documentation");
+                    if ui.button(d).clicked() {
+                        self.open_url(HELP_URL);
+                        ui.close_menu();
+                    }
+                    let a = self.tr("About");
+                    if ui.button(a).clicked() {
+                        self.show_about = true;
+                        ui.close_menu();
+                    }
+                });
+            });
+        });
+    }
+
+    pub fn play_section(&mut self, ui: &mut egui::Ui) {
+        let play_label = if self.has_game() {
+            format!("{} {}", self.tr("Play"), self.current_game)
+        } else {
+            self.tr("Play")
+        };
+        if ui.add_enabled(self.has_game(), button(play_label)).clicked() {
+            self.launch(RunMode::Normal, vec![]);
+            ui.close_menu();
+        }
+        ui.menu_button(self.tr("Play With"), |ui| {
+            let cl = self.tr("Command Line...");
+            if ui.add_enabled(self.has_game(), button(cl)).clicked() {
+                self.open_cmd_dialog();
+                ui.close_menu();
+            }
+            ui.separator();
+            for kind in [
+                PlayKind::Savestate,
+                PlayKind::Playback,
+                PlayKind::Record,
+                PlayKind::Mng,
+                PlayKind::Avi,
+                PlayKind::Wave,
+            ] {
+                let label = match kind {
+                    PlayKind::Savestate => self.tr("Load Savestate..."),
+                    PlayKind::Playback => self.tr("Playback Input..."),
+                    PlayKind::Record => self.tr("Record Input..."),
+                    PlayKind::Mng => self.tr("Record MNG Output..."),
+                    PlayKind::Avi => self.tr("Record AVI Output..."),
+                    PlayKind::Wave => self.tr("Record Wave Output..."),
+                };
+                if ui.add_enabled(self.has_game(), button(label)).clicked() {
+                    self.open_play_dialog(kind);
+                    ui.close_menu();
+                }
+            }
+        });
+        self.delete_cfg_submenu(ui);
+    }
+
+    pub fn delete_cfg_submenu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.tr("Delete Cfg"), |ui| {
+            let files = self.delete_cfg_candidates();
+            for path in &files {
+                if ui.button(path.display().to_string()).clicked() {
+                    let _ = std::fs::remove_file(path);
+                    self.log(format!("deleted {}", path.display()));
+                    ui.close_menu();
+                }
+            }
+            if !files.is_empty() {
+                ui.separator();
+                let ra = self.tr("Remove All");
+                if ui.button(ra).clicked() {
+                    for p in files {
+                        let _ = std::fs::remove_file(&p);
+                        self.log(format!("deleted {}", p.display()));
+                    }
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    pub fn add_folder_section(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.tr("Add to Folder"), |ui| {
+            for (name, store) in self.ext_folder_data.clone() {
+                ui.menu_button(name.clone(), |ui| {
+                    let root_label = self.tr("Root Folder [.]");
+                    if ui.button(root_label).clicked() {
+                        if let Some((_, s)) =
+                            self.ext_folder_data.iter_mut().find(|(n, _)| *n == name)
+                        {
+                            s.add("ROOT_FOLDER", &self.current_game.clone());
+                        }
+                        self.save_ext_folder(&name);
+                        self.needs_refilter = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    for section in store.entries.keys() {
+                        let label =
+                            section.strip_prefix(folders::EXTFOLDER_MAGIC).unwrap_or(section);
+                        if ui.button(label.to_string()).clicked() {
+                            if let Some((_, s)) =
+                                self.ext_folder_data.iter_mut().find(|(n, _)| *n == name)
+                            {
+                                s.add(section, &self.current_game.clone());
+                            }
+                            self.save_ext_folder(&name);
+                            self.needs_refilter = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    pub fn audit_submenu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.tr("Audit"), |ui| {
+            // the single-game audit moved to View ▸ Refresh (F5); the batch
+            // audits and the exports stay here
+            let ar = self.tr("Audit All Roms");
+            if ui.button(ar).clicked() {
+                self.verify(false, false);
+                ui.close_menu();
+            }
+            let asr = self.tr("Audit All Samples");
+            if ui.button(asr).clicked() {
+                self.verify(false, true);
+                ui.close_menu();
+            }
+            ui.separator();
+            for (key, method) in [
+                ("Export All Set Issues...", crate::core::audit::AuditMethod::ExportAll),
+                ("Export Incomplete Sets Only...", crate::core::audit::AuditMethod::ExportIncomplete),
+                ("Export Completely Missing Sets Only...", crate::core::audit::AuditMethod::ExportMissing),
+                ("Export All Sets...", crate::core::audit::AuditMethod::ExportComplete),
+            ] {
+                let text = self.tr(key);
+                if ui.button(text).clicked() {
+                    self.pick_fixdat_target(method);
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            let hv = self.tr("Export Have List...");
+            if ui.button(hv).clicked() {
+                self.pick_list_target(true);
+                ui.close_menu();
+            }
+            let ms = self.tr("Export Miss List...");
+            if ui.button(ms).clicked() {
+                self.pick_list_target(false);
+                ui.close_menu();
+            }
+        });
+    }
+
+    /// One "information panels" submenu: the seven picture docks, the five
+    /// document docks and the two picture-only options. The old View menu had
+    /// them split across "Pictures" and "Documents"; they are the same kind of
+    /// thing (a dock you can show or hide), so they live together now.
+    fn info_panels_submenu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.tr("Information Panels"), |ui| {
+            for i in 0..7 {
+                let mut v = self.image_dock_visible[i];
+                let name = self.tr(crate::core::dat::DOCK_NAMES[i]);
+                if ui.checkbox(&mut v, name).changed() {
+                    self.image_dock_visible[i] = v;
+                    self.dock_state = default_docks_filtered(
+                        &self.image_dock_visible,
+                        &self.text_dock_visible,
+                        self.show_folder_dock,
+                    );
+                }
+            }
+            ui.separator();
+            for (i, name) in ["History", "MAMEInfo", "DriverInfo", "Story", "Command"]
+                .iter()
+                .enumerate()
+            {
+                let mut v = self.text_dock_visible[i];
+                let label = self.tr(name);
+                if ui.checkbox(&mut v, label).changed() {
+                    self.text_dock_visible[i] = v;
+                    self.dock_state = default_docks_filtered(
+                        &self.image_dock_visible,
+                        &self.text_dock_visible,
+                        self.show_folder_dock,
+                    );
+                }
+            }
+            ui.separator();
+            let ea = self.tr("Enforce Aspect Ratio");
+            ui.checkbox(&mut self.enforce_aspect, ea);
+            let ss = self.tr("Strech Screenshot Larger");
+            ui.checkbox(&mut self.stretch_sshot, ss);
+        });
+    }
+
+    /// Light / dark theme. Was "Options ▸ GUI Style"; both entries now really
+    /// apply the palette (`dark_bg` used to be a flag nothing read).
+    fn gui_style_submenu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let has_bg = self.background_file.is_some();
+        ui.menu_button(self.tr("GUI Style"), |ui| {
+            let dark = self.tr("Dark");
+            if ui.radio(self.dark_bg, dark).clicked() {
+                self.dark_bg = true;
+                crate::app::apply_theme_with_bg(&ctx, true, has_bg);
+                ui.close_menu();
+            }
+            let light = self.tr("Light");
+            if ui.radio(!self.dark_bg, light).clicked() {
+                self.dark_bg = false;
+                crate::app::apply_theme_with_bg(&ctx, false, has_bg);
+                ui.close_menu();
+            }
+        });
+    }
+
+    /// Window background: the images in `assets/backgrounds` as one exclusive
+    /// radio group (origin: 1.8.2's `bgActions`), plus the stretch/tile pair
+    /// (origin: `bgStretchActions`). Stretch fills the window, tiling repeats
+    /// the picture at its natural size.
+    fn background_submenu(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.menu_button(self.tr("Background"), |ui| {
+            // rescan on open: the directory is next to mame.exe, so pictures
+            // dropped in after start-up show up without a restart
+            let fresh = crate::app::scan_backgrounds(&self.bg_dir);
+            if fresh != self.bg_choices {
+                self.bg_choices = fresh;
+            }
+            let none = self.tr("None");
+            let mut picked = self.background_file.clone();
+            if ui.radio(picked.is_none(), none).clicked() {
+                picked = None;
+            }
+            for name in self.bg_choices.clone() {
+                if ui.radio(picked.as_deref() == Some(name.as_str()), &name).clicked() {
+                    picked = Some(name);
+                }
+            }
+            if picked != self.background_file {
+                self.background_file = picked;
+                match self.background_file.clone() {
+                    Some(f) => {
+                        // decoding may flip light/dark from the picture's luma
+                        let dir = self.bg_dir.clone();
+                        let mut tex = self.bg_tex.take();
+                        crate::app::load_background(&dir, &f, &mut tex, &ctx);
+                        self.bg_tex = tex;
+                        let dark = crate::app::background_is_dark(&dir, &f);
+                        self.dark_bg = dark;
+                        crate::app::apply_theme_with_bg(&ctx, dark, true);
+                    }
+                    None => {
+                        // no picture: the panels go opaque again
+                        self.bg_tex = None;
+                        let dark = self.dark_bg;
+                        crate::app::apply_theme_with_bg(&ctx, dark, false);
+                    }
+                }
+                ctx.request_repaint();
+            }
+            if self.bg_dir.is_dir() {
+                ui.separator();
+                ui.weak(self.bg_dir.display().to_string());
+            } else {
+                ui.separator();
+                ui.weak(format!(
+                    "{}: {}",
+                    self.tr("Background"),
+                    self.bg_dir.display()
+                ));
+            }
+            ui.separator();
+            let s = self.tr("Stretch");
+            if ui.radio(self.bg_stretch, s).clicked() {
+                self.bg_stretch = true;
+            }
+            let t = self.tr("Tile");
+            if ui.radio(!self.bg_stretch, t).clicked() {
+                self.bg_stretch = false;
+            }
+        });
+    }
+
+    fn language_submenu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.tr("Language"), |ui| {
+            for (code, label) in crate::i18n::LANGUAGES {
+                if ui
+                    .radio(self.lang == *code, egui::RichText::new((*label).to_string()))
+                    .clicked()
+                {
+                    self.lang = code.to_string();
+                    self.save_settings();
+                    ui.close_menu();
+                }
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // toolbar
+    // ------------------------------------------------------------------
+
+    fn draw_toolbar(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                // filter popup, left of the search box: the four hide flags
+                // used to live in View ▸ Custom Filters
+                let any_filter = self.filter_flags != 0;
+                let fb = self.tr("Filter");
+                let fb = if any_filter {
+                    format!("{fb} ({})", self.filter_flags.count_ones())
+                } else {
+                    fb
+                };
+                if ui
+                    .add(egui::Button::new(fb).selected(any_filter))
+                    .on_hover_text(self.tr("Filter the game list"))
+                    .clicked()
+                {
+                    self.show_filter_win = !self.show_filter_win;
+                }
+                let take_focus = self.search_take_focus;
+                let hint = self.tr("Search (Ctrl+F)");
+                let resp = ui.add_sized(
+                    [280.0, 22.0],
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text(hint)
+                        .id(egui::Id::new("search_box")),
+                );
+                if take_focus {
+                    resp.request_focus();
+                    self.search_take_focus = false;
+                }
+                if resp.changed() {
+                    self.search_changed();
+                }
+                if ui.small_button("✕").clicked() {
+                    self.search.clear();
+                    self.search_changed();
+                }
+                ui.separator();
+                let play = format!("▶ {}", self.tr("Play"));
+                if ui.add_enabled(self.has_game(), egui::Button::new(play)).clicked() {
+                    self.launch(RunMode::Normal, vec![]);
+                }
+                let audit = self.tr("Audit");
+                if ui.button(audit).clicked() {
+                    self.refresh_all();
+                }
+            });
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // folder tree dock
+    // ------------------------------------------------------------------
+
+    /// Full-row band of a tree entry.
+    ///
+    /// Tints the whole line — the way the game list's rows do — while the pointer
+    /// is on it, and keeps the selection tint while the entry is the current
+    /// folder. `SelectableLabel` could not do this: it only ever paints its own,
+    /// text-sized rect, so the colour stopped at the end of the name.
+    ///
+    /// The hover test is done against the pointer rather than through
+    /// `Response::hovered()`: the branch arrow is registered after this band and
+    /// wins the hover over its own cell, and the tint has to cover that cell too.
+    ///
+    /// Returns the band and whether the line was clicked.
+    fn tree_row_band(ui: &mut egui::Ui, id: egui::Id, panel: egui::Rect) -> (egui::Rect, bool) {
+        // the row box is the label's own height; adding the vertical item spacing
+        // makes neighbouring bands meet, so the tint reads as one continuous line
+        let h = ui.text_style_height(&egui::TextStyle::Button) + ui.spacing().item_spacing.y;
+        let top = ui.max_rect().top();
+        let band = egui::Rect::from_min_max(
+            egui::pos2(panel.left(), top),
+            egui::pos2(panel.right(), top + h),
+        );
+        let hit = ui.interact(band, id, egui::Sense::click());
+        // Highlight is hover-only: the line tints while the pointer is on it and
+        // goes back to normal when the pointer leaves — whether or not the entry is
+        // the current folder. Selection is carried by the label's text colour
+        // instead (see `tree_row_label`).
+        if ui
+            .ctx()
+            .input(|i| i.pointer.latest_pos())
+            .is_some_and(|p| band.contains(p))
+        {
+            ui.painter()
+                .rect_filled(band, 0.0, ui.visuals().widgets.hovered.bg_fill);
+        }
+        (band, hit.clicked())
+    }
+
+    /// Tree entry label, coloured like the game list's cells (the selection
+    /// foreground on the selected line, the normal one otherwise).
+    ///
+    /// `Sense::empty()` matters: a `Label` defaults to `Sense::hover()` and would
+    /// take the hover and the press away from the row band behind it.
+    fn tree_row_label(ui: &mut egui::Ui, selected: bool, text: &str) -> egui::Response {
+        let v = ui.visuals();
+        let color = if selected {
+            v.selection.stroke.color
+        } else {
+            v.text_color()
+        };
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).color(color))
+                .truncate()
+                .selectable(false)
+                .sense(egui::Sense { click: false, drag: false, focusable: false }),
+        )
+    }
+
+    /// One first-level entry: branch column, folder icon, label.
+    ///
+    /// The branch column is reserved for *every* entry — one that cannot be
+    /// expanded keeps it empty — so all icons and labels share one grid, the way
+    /// the 1.8.2 `QTreeView` lines up childless entries with the expandable ones
+    /// below them.
+    ///
+    /// Returns `(arrow_clicked, row_clicked, label_dx)`, where `label_dx` is the
+    /// distance from the row's left edge to the first character of the label. The
+    /// second level is indented by exactly that distance, so a child icon starts
+    /// where its parent's text starts. Measuring it beats deriving it from the
+    /// style constants, which drift with font and zoom.
+    fn folder_row(
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        panel: egui::Rect,
+        expandable: bool,
+        openness: f32,
+        selected: bool,
+        text: &str,
+    ) -> (bool, bool, f32) {
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            let (_band, row_hit) = Self::tree_row_band(ui, id.with("row"), panel);
+            let row_left = ui.max_rect().left();
+            // egui gives its collapsing toggler the whole indent width and no gap
+            // behind it; mirror that so both kinds of row land on one grid.
+            let gap = ui.spacing_mut().item_spacing.x;
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let (_slot, rect) = ui.allocate_space(Self::folder_branch(ui));
+            ui.spacing_mut().item_spacing.x = gap;
+            let mut arrow = false;
+            if expandable {
+                let resp = ui.interact(rect, id.with("arrow"), egui::Sense::click());
+                Self::paint_branch_arrow(ui, rect, resp.hovered(), openness);
+                arrow = resp.clicked();
+            }
+            icons::draw_passive(ui, &ctx, icons::FOLDER, FOLDER_ICON);
+            let label = Self::tree_row_label(ui, selected, text);
+            let dx = label.rect.min.x - row_left;
+            // the branch indicator toggles and nothing else, as in the Qt tree:
+            // a click on it must not also move the selection
+            (arrow, row_hit && !arrow, dx)
+        })
+        .inner
+    }
+
+    /// Flat branch triangle for the folder tree: grey at rest, darker on hover,
+    /// turning from ▶ to ▼ like the 1.8.2 tree. egui's own collapsing arrow is a
+    /// solid black triangle, which reads too heavy next to the folder icons.
+    fn paint_branch_arrow(ui: &egui::Ui, rect: egui::Rect, hovered: bool, openness: f32) {
+        let rect = egui::Rect::from_center_size(rect.center(), rect.size() * 0.6);
+        let points = if openness > 0.5 {
+            vec![rect.left_top(), rect.right_top(), rect.center_bottom()]
+        } else {
+            vec![rect.left_top(), rect.left_bottom(), rect.right_center()]
+        };
+        let color = if hovered {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        ui.painter()
+            .add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+    }
+
+    /// A second-level entry: folder icon + label and no branch column (nothing
+    /// nests below a second-level entry).
+    ///
+    /// Second-level entries carry the same `res/32x32/folder.png` as the tree
+    /// root in the reference layout; the caller indents them so the child icon
+    /// starts where the parent label starts.
+    fn folder_child_row(
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        panel: egui::Rect,
+        selected: bool,
+        text: &str,
+    ) -> bool {
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            let (_band, clicked) = Self::tree_row_band(ui, id, panel);
+            icons::draw_passive(ui, &ctx, icons::FOLDER, FOLDER_ICON);
+            Self::tree_row_label(ui, selected, text);
+            clicked
+        })
+        .inner
+    }
+
+    /// Branch column: the full `indent` width, which is what egui's collapsing
+    /// header reserves for its toggler.
+    fn folder_branch(ui: &egui::Ui) -> egui::Vec2 {
+        egui::vec2(ui.spacing().indent, ui.spacing().icon_width)
+    }
+
+    /// Draw the second level of one root, indented by `indent` points.
+    fn folder_body(ui: &mut egui::Ui, indent: f32, add: impl FnOnce(&mut egui::Ui)) {
+        let prev_indent = ui.spacing_mut().indent;
+        let prev_vline = ui.visuals().indent_has_left_vline;
+        ui.spacing_mut().indent = indent;
+        // no guide line down the side of the section: the 1.8.2 tree has none,
+        // and the child icons already show the nesting.
+        ui.visuals_mut().indent_has_left_vline = false;
+        ui.indent("folder_body", add);
+        ui.spacing_mut().indent = prev_indent;
+        ui.visuals_mut().indent_has_left_vline = prev_vline;
+    }
+
+    fn draw_folders(&mut self, ui: &mut egui::Ui) {
+        // Never wrap a folder entry onto a second line: when the dock is narrowed
+        // the label is elided instead, and entries that no longer fit are simply
+        // not shown (origin: the Qt tree view, which elides section text).
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        if self.lib.is_none() {
+            self.loading_or_error(ui);
+            return;
+        }
+        let Some(cache) = self.folder_cache.clone() else {
+            let p = self.tr("preparing folders…");
+            ui.label(p);
+            return;
+        };
+        let ctx = ui.ctx().clone();
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // the full-row hover/selection bands span the whole tree, second level
+            // included, so they need the panel's own left/right edges
+            let panel = ui.max_rect();
+            for root in &cache.roots {
+                if self.hidden_folders.iter().any(|h| h == &root.label) {
+                    continue;
+                }
+                let is_root_selected = self.folder_matches_root(&root.kind);
+                let text = format!("{} ({})", self.tr(&root.label), root.count);
+                let kind = root.kind.clone();
+                let label = root.label.clone();
+                let expandable = !root.children.is_empty();
+                let id = ui.make_persistent_id(("root_folder", &root.kind));
+                let mut state =
+                    egui::containers::collapsing_header::CollapsingState::load_with_default_open(
+                        &ctx, id, false,
+                    );
+                let (arrow, row_hit, child_indent) = Self::folder_row(
+                    ui,
+                    id,
+                    panel,
+                    expandable,
+                    state.openness(&ctx),
+                    is_root_selected,
+                    &text,
+                );
+                if arrow {
+                    state.toggle(ui);
+                    // `toggle` only flips the in-memory flag; egui's own header
+                    // persisted it as a side effect of drawing the body, which we
+                    // no longer use, so store it here or the row never opens.
+                    state.store(&ctx);
+                }
+                if row_hit {
+                    self.select_root(kind.clone(), &label);
+                }
+                if state.openness(&ctx) > 0.0 {
+                    // keep the flag persisted while the section is open, the way
+                    // egui's own `show_body` does — otherwise the row can snap
+                    // shut again as soon as the app goes idle
+                    state.store(&ctx);
+                    Self::folder_body(ui, child_indent, |ui| {
+                        for child in &root.children {
+                            self.draw_folder_child(ui, &kind, &label, child, panel);
+                        }
+                    });
+                }
+            }
+            for (name, store) in self.ext_folder_data.clone() {
+                let total: usize = store.entries.values().map(|v| v.len()).sum();
+                let is_sel = self.current_folder == format!("/{name}");
+                let id = ui.make_persistent_id(("ext_folder", &name));
+                let mut state =
+                    egui::containers::collapsing_header::CollapsingState::load_with_default_open(
+                        &ctx, id, false,
+                    );
+                let text = format!("{name} ({total})");
+                let (arrow, row_hit, child_indent) =
+                    Self::folder_row(ui, id, panel, true, state.openness(&ctx), is_sel, &text);
+                if arrow {
+                    state.toggle(ui);
+                    state.store(&ctx);
+                }
+                if row_hit {
+                    self.select_ext_root(&name);
+                }
+                if state.openness(&ctx) > 0.0 {
+                    state.store(&ctx);
+                    Self::folder_body(ui, child_indent, |ui| {
+                        let root_games = store.games_in("ROOT_FOLDER");
+                        if !root_games.is_empty() {
+                            let rl = self.tr("Root Folder [.]");
+                            if Self::folder_child_row(
+                                ui,
+                                ui.make_persistent_id(("ext_root", &name)),
+                                panel,
+                                self.current_folder == format!("/{name}")
+                                    && self.folder_key.is_none(),
+                                &format!("{rl} ({})", root_games.len()),
+                            ) {
+                                self.select_ext_root(&name);
+                            }
+                        }
+                        for section in store.entries.keys() {
+                            let label = section
+                                .strip_prefix(folders::EXTFOLDER_MAGIC)
+                                .unwrap_or(section);
+                            let games = store.games_in(section);
+                            if Self::folder_child_row(
+                                ui,
+                                ui.make_persistent_id(("ext_section", &name, label)),
+                                panel,
+                                self.current_folder == format!("/{name}/{label}"),
+                                &format!("{label} ({})", games.len()),
+                            ) {
+                                self.select_ext_sub(&name, label);
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+
+    fn draw_folder_child(
+        &mut self,
+        ui: &mut egui::Ui,
+        kind: &FolderKind,
+        root_label: &str,
+        child: &FolderChild,
+        panel: egui::Rect,
+    ) {
+        let selected =
+            self.folder_kind == *kind && self.folder_key.as_deref() == Some(child.key.as_str());
+        let child_label = match kind {
+            FolderKind::Bios => {
+                let desc = self
+                    .maps
+                    .bios_map
+                    .iter()
+                    .find(|(_, n)| **n == child.key)
+                    .map(|(d, _)| d.clone())
+                    .unwrap_or_else(|| child.key.clone());
+                format!("{desc} ({})", child.count)
+            }
+            FolderKind::Console => {
+                let desc = self
+                    .maps
+                    .console_map
+                    .iter()
+                    .find(|(_, n)| **n == child.key)
+                    .map(|(d, _)| d.clone())
+                    .unwrap_or_else(|| child.key.clone());
+                format!("{desc} ({})", child.count)
+            }
+            _ => {
+                // child labels come from `utils->getLongName` (control types,
+                // media kinds, dump status) — the 1.8.2 catalogue translates them
+                let label = self.tr(&child.label);
+                format!("{label} ({})", child.count)
+            }
+        };
+        let id = ui.make_persistent_id(("folder_child", kind, &child.key));
+        if Self::folder_child_row(ui, id, panel, selected, &child_label) {
+            self.folder_kind = kind.clone();
+            self.folder_key = Some(child.key.clone());
+            self.current_folder = format!("{root_label}/{}", child.label);
+            self.needs_refilter = true;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // dock content renderers
+    // ------------------------------------------------------------------
+
+    pub fn picture_content(&mut self, ui: &mut egui::Ui, dock: usize) {
+        let game = self.current_game.clone();
+        // A matching entry means the request finished. For a game without art the
+        // entry is `(game, None)` and must not be re-requested — otherwise the
+        // placeholder would spawn a background load on every single frame.
+        let tex = match self.snap_tex.get(&dock) {
+            Some((g, t)) if *g == game => t.clone(),
+            _ => {
+                self.request_preview(dock);
+                None
+            }
+        };
+        egui::ScrollArea::both().show(ui, |ui| match tex {
+            Some(tex) => {
+                let avail = ui.available_size();
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::Center), |ui| {
+                    ui.add(egui::Image::new(&tex).max_size(avail));
+                });
+            }
+            None => {
+                let (rect, resp) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click());
+                ui.painter()
+                    .rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, egui::Color32::GRAY));
+                let none = self.tr("No snapshot");
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    none,
+                    egui::FontId::proportional(15.0),
+                    egui::Color32::GRAY,
+                );
+                if resp.clicked() {
+                    let tabs: Vec<usize> =
+                        (0..7).filter(|&i| self.image_dock_visible[i]).collect();
+                    if tabs.len() > 1 {
+                        let idx = tabs.iter().position(|&t| t == dock).unwrap_or(0);
+                        let next = tabs[(idx + 1) % tabs.len()];
+                        self.image_dock_tab = next;
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn documents_content(&mut self, ui: &mut egui::Ui, dock: usize) {
+        let game = self.current_game.clone();
+        let text = self
+            .dat_texts
+            .get(&(dock, game.clone()))
+            .cloned()
+            .flatten();
+        if text.is_none() {
+            self.request_dat(dock);
+        }
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            match (dock, text) {
+                (d, Some(text)) if d == 11 => {
+                    for line in
+                        crate::core::dat::convert_command_lines(&text).iter().take(3000)
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            for seg in &line.segments {
+                                match seg {
+                                    crate::core::dat::Segment::Text(s) => {
+                                        ui.monospace(s);
+                                    }
+                                    crate::core::dat::Segment::Icon(n) => {
+                                        // origin: convertCommand emits
+                                        // `<img src=":/res/16x16/dir-N.png">` — prefer the
+                                        // embedded PNG and fall back to a glyph only when
+                                        // the file really is missing
+                                        if !icons::notation_icon(ui, n, 16.0) {
+                                            let (glyph, color) = icons::notation_glyph(n);
+                                            ui.label(egui::RichText::new(glyph)
+                                                .monospace()
+                                                .strong()
+                                                .color(color));
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+                (_, Some(text)) => {
+                    ui.monospace(&text);
+                }
+                _ => {
+                    ui.weak("-");
+                }
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // status bar (progress + badges)
+    // ------------------------------------------------------------------
+
+    fn draw_status(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let count_label = format!("{} {}", self.visible.len(), self.tr("games"));
+                ui.label(count_label);
+                ui.separator();
+                if let Some(m) = self.status_info() {
+                    // only the grades + description/year: cloning the whole
+                    // GameMeta here cost a few hundred Strings per frame
+                    let badges = [
+                        ("status", m.badges[0]),
+                        ("emulation", m.badges[1]),
+                        ("color", m.badges[2]),
+                        ("sound", m.badges[3]),
+                        ("graphic", m.badges[4]),
+                        ("cocktail", m.badges[5]),
+                        ("protection", m.badges[6]),
+                        ("savestate", m.badges[7]),
+                    ];
+                    for (name, grade) in badges {
+                        if grade == crate::core::model::STATUS_NA {
+                            continue;
+                        }
+                        let text = if name == "savestate" {
+                            if grade == 1 {
+                                self.tr("supported")
+                            } else {
+                                self.tr("unsupported")
+                            }
+                        } else {
+                            match grade {
+                                1 => self.tr("good"),
+                                2 => self.tr("imperfect"),
+                                0 => self.tr("preliminary"),
+                                _ => self.tr("unknown"),
+                            }
+                        };
+                        let resp = icons::draw_square(ui, icons::status_color(grade), 14.0);
+                        // origin: mameopt/status tooltips — tr("status"), tr("emulation"), …
+                        resp.on_hover_text(format!("{}: {text}", self.tr(name)));
+                    }
+                    ui.separator();
+                    ui.strong(m.title);
+                    ui.weak(format!(
+                        "({})",
+                        if m.year.is_empty() { "?" } else { &m.year }
+                    ));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if !self.running.is_empty() {
+                        ui.colored_label(icons::GREEN, "▶ MAME");
+                    }
+                    let (done, total, cur) = if let Some(h) = &self.audit_handle {
+                        h.snapshot()
+                    } else if self.boot_auditing {
+                        self.audit_stage.clone()
+                    } else {
+                        (0, 0, String::new())
+                    };
+                    if total > 0 {
+                        let pct = (done as f32 / total as f32).clamp(0.0, 1.0);
+                        ui.add_sized(
+                            [170.0, 14.0],
+                            egui::ProgressBar::new(pct).show_percentage(),
+                        );
+                        ui.weak(format!("{} {cur} {pct:.0}%", self.tr("Auditing")));
+                    } else if self.boot_auditing || self.audit_handle.is_some() {
+                        ui.weak(self.tr("Auditing"));
+                    }
+                    // cancel affordance for the running audit (boot or manual)
+                    if let Some(h) = &self.audit_handle {
+                        if !h.cancelled() && ui.small_button(self.tr("Cancel")).clicked() {
+                            h.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            self.log("audit cancel requested".to_string());
+                        }
+                    }
+                    if self.lib_status == crate::app::LibStatus::Loading {
+                        let (done, _, stage) = &self.lib_progress;
+                        let pct = ((*done as f32 / EST_MACHINES) * 100.0).min(99.0);
+                        ui.add_sized(
+                            [170.0, 14.0],
+                            egui::ProgressBar::new(pct / 100.0).show_percentage(),
+                        );
+                        ui.weak(format!(
+                            "{} {pct:.0}% ({done}) {stage}",
+                            self.tr("Parsing XML")
+                        ));
+                    }
+                });
+            });
+        });
+    }
+
+    pub fn loading_or_error(&self, ui: &mut egui::Ui) {
+        match self.lib_status {
+            crate::app::LibStatus::Idle => {
+                ui.label(self.tr("No MAME binary configured."));
+            }
+            crate::app::LibStatus::Loading => {
+                ui.label(self.tr("Loading game list…"));
+            }
+            crate::app::LibStatus::Error => {
+                ui.colored_label(egui::Color32::RED, self.last_error.clone().unwrap_or_default());
+            }
+            crate::app::LibStatus::Ready => {}
+        }
+    }
+
+    fn draw_startup_panel(&mut self, ui: &mut egui::Ui) {
+        ui.centered_and_justified(|ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(40.0);
+                ui.add(
+                    egui::Image::new(egui::include_image!("../assets/images/logo.png"))
+                        .max_size(egui::vec2(120.0, 120.0)),
+                );
+                ui.add_space(8.0);
+                ui.heading("MvUI");
+                ui.add_space(8.0);
+                ui.label(self.tr("MAME/MESS executable not configured."));
+                ui.add_space(12.0);
+                let sel = self.tr("Select mame.exe...");
+                if ui.button(sel).clicked() {
+                    self.open_mame_picker();
+                }
+                ui.add_space(6.0);
+                if let Some(m) = &self.mame {
+                    ui.weak(m.path.display().to_string());
+                } else if self.picking {
+                    ui.weak(self.tr("selecting…"));
+                }
+            });
+        });
+    }
+
+    fn draw_toast(&mut self, ctx: &egui::Context) {
+        if let Some(err) = self.last_error.clone() {
+            egui::Window::new("⚠")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 60.0])
+                .show(ctx, |ui| {
+                    ui.label(&err);
+                    let ok = self.tr("OK");
+                    if ui.button(ok).clicked() {
+                        self.last_error = None;
+                    }
+                });
+        }
+    }
+}

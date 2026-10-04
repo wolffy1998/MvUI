@@ -20,8 +20,8 @@ Rewritten feature-for-feature against the 1.8.2 reference. `cargo check
 ## Build
 
 ```sh
-cd mamegui-rs
-cargo build --release      # → mamegui-rs/target/release/mvui.exe
+cargo build --release      # → target/release/mvui.exe
+cargo test                 # 36 tests
 ```
 
 Requires a Rust toolchain. On Windows the executable icon additionally needs
@@ -31,24 +31,38 @@ without it the build still succeeds and only prints a `cargo:warning`.
 ## Layout
 
 ```
-├── README.md              this file: overview + build
-├── docs/
-│   ├── ANALYSIS-…1.8.2.md  how the original Qt/C++ GUI works
-│   ├── DESIGN.md           the redesign document (design intent, §-referenced)
-│   ├── WORKSPACE.md        the Rust workspace in detail
-│   └── OPTIMIZATION.md     change log
-├── icon-designs/          app icon sources
-├── mamegui-rs/            the Rust workspace
-│   ├── crates/mamegui-core/   pure logic, no UI: MAME I/O, rom audit, options
-│   ├── crates/mamegui-app/    egui/eframe front-end (binary: `mvui`)
-│   └── assets/                icons, optiontemplate.xml, backgrounds
-└── .workbuddy/            development notes and screenshot tooling
+.
+├── Cargo.toml / Cargo.lock
+├── src/
+│   ├── lib.rs              library face: exposes `core` for examples & tests
+│   ├── main.rs             binary entry point (the `mvui` exe)
+│   ├── core/               domain layer — no egui anywhere below this line
+│   │                        MAME I/O, rom audit, option chain, archives,
+│   │                        DAT index, game-list cache
+│   └── app.rs, views.rs,   the egui/eframe front end
+│       ui.rs, windows.rs …
+├── assets/
+│   ├── icons/              the icon set inherited from 1.8.2 (embedded by
+│   │                        build.rs); 16x16/, 32x32/, mamegui/
+│   ├── images/             app icon, logo, icon design renders
+│   ├── backgrounds/        window wallpaper presets
+│   └── optiontemplate.xml  the MAME option table
+├── examples/               runnable checks (datindex_bench)
+├── tools/                  icon generation scripts
+├── folders/                external folder lists (Favorites.ini)
+├── .workbuddy/             project memory, reference docs, dev tooling
+└── build.rs                embeds the icon set + the exe icon resource
 ```
 
-`mamegui-core` holds everything that is not drawing: reading `listxml`, the rom
-audit, the option chain, archive access, the game-list cache. `mamegui-app` only
-draws and dispatches. That split is what makes the logic testable without a
-window.
+`src/core` holds everything that is not drawing; the modules beside it only draw
+and dispatch. It used to be a separate crate, which enforced the boundary
+mechanically. It is a module now, so the rule is documented rather than
+compiler-checked: **nothing under `src/core/` may depend on `egui`, `eframe` or
+`rfd`.** That is what keeps the logic testable without a window.
+
+Reference documentation lives in `.workbuddy/docs/`: the analysis of the
+original 1.8.2 codebase (the behaviour specification), the redesign document,
+the image/document loading architecture, and the optimisation log.
 
 ## Design notes
 

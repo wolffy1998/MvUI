@@ -4,8 +4,8 @@
 mamepgui 1.8.2（Qt/C++）用 Rust + egui 重写。**项目名 MvUI，已迁移到
 `C:\Users\11921\Desktop\MvUI`（2026-10-04），并推送到 GitHub
 `wolffy1998/MvUI`（SSH 443，`gh` CLI 未装，用纯 git）。**
-Rust 工程在 `mamegui-rs/`（workspace：`mamegui-core` 纯逻辑 + `mamegui-app` UI，
-产物 `mvui.exe`）。
+**Rust 工程就是仓库根**（单 crate `mvui`）：`src/core/` = 纯逻辑层（不依赖 egui），
+其余 `src/*.rs` = UI 层，产物 `target/release/mvui.exe`。
 旧目录 `Desktop\mamepgui-rewrite\` **已于 2026-10-04 删除**（内容全部并入 MvUI，
 只剩一个空目录壳）。项目记忆现在也住在这里：`.workbuddy/memory/`。
 
@@ -18,14 +18,16 @@ Rust 里的代码注释统一用 `origin: xxx` 标注对应的旧版函数/行�
 
 ## 两份 README，各管一段（别搞混）
 - 根目录 `README.md` = **旧版 1.8.2 的架构分析** → 行为基准（旧版怎么做，就怎么做）。
-- 根目录 `README-OG.md` = **本项目 mamegui-rs 的重构设计文档** → 实现基准
+- `.workbuddy/docs/DESIGN.md` = **本项目的重构设计文档** → 实现基准
   （§6 业务 / §9 图标 / §12 并发线程 / §13 配置缓存 / §17 功能对照清单）。
-- 工程内的改动记录：`mamegui-rs/OPTIMIZATION.md`。
+  改动记录：`.workbuddy/docs/OPTIMIZATION.md`。旧版架构分析（旧版行为基准）
+  在 `.workbuddy/docs/ANALYSIS-mamepgui-1.8.2.md`，图片/文档加载架构在
+  `.workbuddy/docs/WORKSPACE.md`。
 
 ## 关键文件对照
 | Rust | 旧版对应 |
 | --- | --- |
-| `core/src/audit.rs` | `audit.cpp` |
+| `src/core/audit.rs` | `audit.cpp` |
 | `core/src/listxml.rs` | `MameDat` 的 listxml 解析 |
 | `core/src/cache.rs` | `MameDat::save/load`（gamelist.cache） |
 | `core/src/folders.rs` | `gamelist.cpp::initFolders` / `filterAcceptsRow` |
@@ -52,9 +54,9 @@ Rust 里的代码注释统一用 `origin: xxx` 标注对应的旧版函数/行�
 - **工程没有 git 仓库**（`git status` 报 not a repository）。改坏文件只能手写补回，
   所以批量删除/替换后**必须立刻 `cargo check`**，别连删十几处再编译。
   另外「一次改多文件」的脚本里，两处同文案的 replace 要留意命中数。
-- `build.rs` 的 cwd 是 **package 根**（`crates/mamegui-app`），引用工作区根的
+- `build.rs` 的 `CARGO_MANIFEST_DIR` **就是仓库根**，引用 `assets/` 只需一层
   `assets/` 必须用 `CARGO_MANIFEST_DIR` 拼 `../../assets/...`；图标资源改动后
-  可查 `target/*/build/mamegui-app-*/out/icon_assets.rs`（应有 105 项）。
+  可查 `target/*/build/mvui-*/out/icon_assets.rs`（应有 105 项）。
 - source 级 ini 名按 **MAME 本体**算：`ini/source/<文件名去扩展名>.ini`
   （`mame-0.168/src/emu/emuopts.cpp::parse_standard_inis`，只取文件名、丢目录）。
   别照抄旧版 `sourcefile.replace(".c",".ini")`（对 `.cpp` 会产出 `pacman.inipp`）。
@@ -163,10 +165,10 @@ Rust 里的代码注释统一用 `origin: xxx` 标注对应的旧版函数/行�
     防恶意 icons.zip 的分配 DoS。
   - sevenz-rust 的 RUSTSEC-2026-0245（decompress_impl 路径穿越）**不适用**：
     我们只用 `SevenZReader::open` + `for_each_entries`。依据留档在
-    `mamegui-rs/.cargo/audit.toml`（注意是 `.cargo/audit.toml`，
+    `.cargo/audit.toml`（注意是 `.cargo/audit.toml`，
     cargo-audit 0.22 的固定路径，`--file` 是指定 lockfile 不是配置）。
   - MAME 一律 `Command::arg` 启动，**不经 shell**，无命令注入面。
-- `optiontemplate.xml` **只有一份**，在 workspace 根 `mamegui-rs/assets/`；
+- `optiontemplate.xml` **只有一份**，在仓库根 `assets/`；
   core 用 `include_str!("../../../../assets/optiontemplate.xml")`，
   曾经在 `crates/mamegui-core/assets/` 还有一份副本（已删）——别再复制。
 - **表头浮动幽灵**（MxUI 式拖动）：`app.header_drag_x: f32` 在按下时锁存

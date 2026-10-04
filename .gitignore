@@ -23,3 +23,9 @@ desktop.ini
 .workbuddy/tools/**/*.png
 .workbuddy/tools/alive*.txt
 .workbuddy/tools/probe*.txt
+
+# Icon-generation output in tools/ (the renders themselves are kept, under
+# assets/images/, because they are the reference for the current artwork)
+tools/*.png
+tools/probe*.txt
+tools/__pycache__/
