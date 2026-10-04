@@ -127,7 +127,7 @@ struct DockTabs<'a> {
 ///   clearly visible inside the "Game List"/"Flyer" tabs' left padding);
 /// * six image tabs overflow their node, and egui_dock then paints a 7.5px
 ///   scroll bar pill right under the tab row — that grey rounded bar.
-fn dock_style(ctx: &egui::Context) -> egui_dock::Style {
+fn dock_style(ctx: &egui::Context, wallpaper: bool, dark: bool) -> egui_dock::Style {
     let mut style = egui_dock::Style::from_egui(&ctx.style());
     // keep the splitter invisible while idle; it still highlights on hover and the
     // grab area (`extra_interact_width`) is untouched
@@ -140,10 +140,22 @@ fn dock_style(ctx: &egui::Context) -> egui_dock::Style {
     // slightly narrower tabs, so a full row of image tabs is less likely to
     // overflow in the first place
     style.tab.tab_body.inner_margin = egui::Margin::symmetric(4.0, 2.0);
-    // The tab fills stay opaque on purpose: the game list needs a solid
-    // backdrop or its text turns unreadable over a busy wallpaper. Only
-    // `panel_fill` (menu/toolbar/status bars) is made translucent, and that
-    // happens in `apply_theme_with_bg`.
+    // The dock leaves are the one place a translucent fill belongs: this is the
+    // layer 1.8.2 made see-through in `setTransparentBg` (QPalette::Base), and
+    // it is what lets the wallpaper show through the game list and the info
+    // docks. It is set *here* rather than on `visuals.window_fill` because egui
+    // derives both this and every menu/popup frame from `window_fill` — making
+    // that one translucent turned the whole interface, menus included, to grey
+    // mush. Setting `tab_body.bg_fill` here keeps the two independent.
+    if wallpaper {
+        // 1.8.2 `setTransparentBg`: one brush, `QPalette::Base` →
+        // `rgba(0,0,0,128)` dark / `rgba(255,255,255,128)` light
+        style.tab.tab_body.bg_fill = if dark {
+            egui::Color32::from_black_alpha(128)
+        } else {
+            egui::Color32::from_white_alpha(128)
+        };
+    }
     style
 }
 
@@ -237,6 +249,10 @@ impl eframe::App for MameApp {
                 self.draw_startup_panel(ui);
                 return;
             }
+            // whether the dock leaves get the see-through fill, and which of
+            // the two veils to use — resolved before `self` is borrowed below
+            let wallpaper = self.background_file.is_some();
+            let dark = self.dark_bg;
             let mut state = std::mem::replace(
                 &mut self.dock_state,
                 DockState::new(vec![MainTab::List]),
@@ -244,7 +260,7 @@ impl eframe::App for MameApp {
             {
                 let mut viewer = DockTabs { app: self };
                 DockArea::new(&mut state)
-                    .style(dock_style(ctx))
+                    .style(dock_style(ctx, wallpaper, dark))
                     .show_inside(ui, &mut viewer);
             }
             self.dock_state = state;
@@ -371,25 +387,7 @@ impl MameApp {
                         self.wants_close = true;
                     }
                 });
-                ui.menu_button(self.tr("Options"), |ui| {
-                    let d = self.tr("Directories...");
-                    if ui.button(d).clicked() {
-                        self.dirs_buf = self
-                            .opts
-                            .as_ref()
-                            .and_then(|o| o.try_lock().ok())
-                            .and_then(|o| o.opts.get("rompath").map(|p| p.currvalue.clone()))
-                            .unwrap_or_default();
-                        self.show_dirs_win = true;
-                        ui.close_menu();
-                    }
-                    let def = self.tr("Default Game Options");
-                    if ui.button(def).clicked() {
-                        self.open_properties(crate::core::options::OPTLEVEL_GLOBAL);
-                        ui.close_menu();
-                    }
-                    self.language_submenu(ui);
-                });
+                self.settings_menu(ui);
                 ui.menu_button(self.tr("View"), |ui| {
                     ui.menu_button(self.tr("Customize Fields"), |ui| {
                         for i in 1..COL_LAST {
@@ -419,14 +417,6 @@ impl MameApp {
                     let ll = self.tr("Local Language Game List");
                     if ui.checkbox(&mut self.local_game_list, ll).changed() {
                         self.needs_refilter = true;
-                    }
-                    ui.separator();
-                    // origin actionRefresh: re-audit + re-init. F5 is bound to the
-                    // same action in `update`.
-                    let r = self.tr("Refresh");
-                    if ui.button(format!("{r}    (F5)")).clicked() {
-                        self.refresh_all();
-                        ui.close_menu();
                     }
                 });
                 ui.menu_button(self.tr("Help"), |ui| {
@@ -714,6 +704,52 @@ impl MameApp {
             let t = self.tr("Tile");
             if ui.radio(!self.bg_stretch, t).clicked() {
                 self.bg_stretch = false;
+            }
+        });
+    }
+
+    /// Settings — the top-level menu that owns everything configurable.
+    ///
+    /// It used to be called "Options" and held two flat entries plus a nested
+    /// Language. It is now three peers — Language, Directories, MAME extra
+    /// config — with the refresh action last, because "refresh" is an action
+    /// rather than a setting and belongs at the end of the list, not in View
+    /// where it used to sit.
+    fn settings_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(self.tr("Settings"), |ui| {
+            self.language_submenu(ui);
+
+            let d = self.tr("Directories");
+            if ui.button(d).clicked() {
+                self.dirs_buf = self
+                    .opts
+                    .as_ref()
+                    .and_then(|o| o.try_lock().ok())
+                    .and_then(|o| o.opts.get("rompath").map(|p| p.currvalue.clone()))
+                    .unwrap_or_default();
+                self.show_dirs_win = true;
+                ui.close_menu();
+            }
+
+            // MAME's own per-machine / global options, i.e. everything that ends
+            // up in mame.ini rather than in mamepgui.ini
+            let x = self.tr("MAME Extra Config");
+            if ui.button(x).clicked() {
+                self.open_properties(crate::core::options::OPTLEVEL_GLOBAL);
+                ui.close_menu();
+            }
+
+            ui.separator();
+
+            // origin actionRefresh: re-audit + re-init. F5 is bound to the same
+            // action in `update`, so the shortcut keeps working from anywhere.
+            let r = self.tr("Refresh Database");
+            if ui.button(format!("{r}    (F5)")).clicked() {
+                self.refresh_all();
+                // the localized list is a plain text file the user may have
+                // edited since boot; re-read it as part of the same refresh
+                self.reload_localized_list();
+                ui.close_menu();
             }
         });
     }

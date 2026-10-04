@@ -11,6 +11,21 @@ pub struct GuiSettings {
 }
 
 impl GuiSettings {
+    /// Directory holding `mvui.exe`.
+    ///
+    /// Since the layout flattening this is the anchor for every *content*
+    /// directory: `snap/`, `flyers/`, `dats/`, `folders/`, `bkground/` and
+    /// `mame_cn.lst` all live next to the program unless the user points them
+    /// elsewhere. That is deliberately **not** the mame directory any more —
+    /// romsets and artwork are separate concerns, and a portable install should
+    /// not need write access to the MAME tree.
+    pub fn exe_dir() -> PathBuf {
+        std::env::current_exe()
+            .ok()
+            .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     /// main(): CFG_PREFIX resolution + `-configpath` handling
     pub fn cfg_prefix() -> PathBuf {
         let mut prefix: Option<String> = None;

@@ -8,6 +8,24 @@ use crate::core::options::{
     OPTLEVEL_GUI, OPTLEVEL_GLOBAL, OPTLEVEL_SRC, LEVEL_NAMES,
 };
 
+/// A window frame that does not let the wallpaper through.
+///
+/// `apply_theme_with_bg` makes `window_fill` half-transparent while a
+/// background image is set, which is right for the dock panels — the picture is
+/// supposed to show through them. It is wrong for a dialog: a settings window
+/// you cannot read the labels in is worse than one that hides the wallpaper, so
+/// every `egui::Window` gets an explicitly opaque fill.
+pub fn opaque_frame(ctx: &egui::Context) -> egui::Frame {
+    let mut f = egui::Frame::window(&ctx.style());
+    f.fill = f.fill.gamma_multiply(0.0);
+    f.fill = if ctx.style().visuals.dark_mode {
+        egui::Color32::from_rgb(32, 32, 32)
+    } else {
+        egui::Color32::from_rgb(252, 252, 252)
+    };
+    f
+}
+
 pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_options(app, ctx);
     draw_dirs(app, ctx);
@@ -27,6 +45,7 @@ fn draw_filter(app: &mut MameApp, ctx: &egui::Context) {
         .open(&mut show)
         .resizable(false)
         .default_width(240.0)
+        .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             for (flag, key) in [
                 (F_CLONES, "Hide Clones"),
@@ -60,6 +79,7 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
         .resizable(true)
         .default_width(860.0)
         .default_height(560.0)
+        .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             app.ensure_chain();
             // level tabs
@@ -354,19 +374,53 @@ fn edit_control(app: &mut MameApp, ui: &mut egui::Ui, d: &SnapOpt, opts: &std::s
             }
         }
         3 => {
-            let combo = egui::ComboBox::from_id_salt(format!("opt-{}", d.name))
-                .selected_text(app.tr(&val));
-            combo.show_ui(ui, |ui| {
-                for (canon, gui) in &d.choices {
-                    // the canonical value stays untranslated; the shown guivalue
-                    // is what the 1.8.2 catalogue translates (e.g. Auto / None)
-                    if ui.selectable_label(val == *gui, app.tr(gui)).clicked() {
-                        app.opt_edits.insert(d.name.clone(), gui.clone());
-                        apply_edit(app, opts, &d.name);
+            // Every value is shown, not hidden behind a drop-down.
+            //
+            // The template's widest enumeration is `scale_effect` with 18
+            // entries and the widest common one (`snapview`, `video`) has 5-9,
+            // so laying them out inline costs a few rows and saves a click on
+            // every single edit. A combo also had a second problem: it covered
+            // the rows below it and inherited the translucent window fill, so
+            // the open list was hard to read over a wallpaper.
+            //
+            // The canonical value stays untranslated; the shown guivalue is what
+            // the 1.8.2 catalogue translates (e.g. Auto / None).
+            let picked = d
+                .choices
+                .iter()
+                .find(|(_, gui)| *gui == val)
+                .map(|(canon, _)| canon.clone())
+                .unwrap_or_else(|| val.clone());
+            let mut next: Option<String> = None;
+            if d.choices.len() > 6 {
+                // wide enumerations wrap into columns so one option does not
+                // push the rest of the table off the dialog
+                let per_col = (d.choices.len() + 1) / 2;
+                ui.horizontal(|ui| {
+                    for chunk in d.choices.chunks(per_col) {
+                        ui.vertical(|ui| {
+                            for (_canon, gui) in chunk {
+                                if ui
+                                    .selectable_label(picked == *gui, app.tr(gui))
+                                    .clicked()
+                                {
+                                    next = Some(gui.clone());
+                                }
+                            }
+                        });
                     }
-                    let _ = canon;
+                });
+            } else {
+                for (_canon, gui) in &d.choices {
+                    if ui.selectable_label(picked == *gui, app.tr(gui)).clicked() {
+                        next = Some(gui.clone());
+                    }
                 }
-            });
+            }
+            if let Some(gui) = next {
+                app.opt_edits.insert(d.name.clone(), gui);
+                apply_edit(app, opts, &d.name);
+            }
         }
         4 | 9 => {
             if ui
@@ -489,82 +543,292 @@ fn apply_edit(app: &mut MameApp, opts: &std::sync::Mutex<OptionCore>, name: &str
 // dirs dialog (origin: DirsUI — multi-path list editor)
 // ---------------------------------------------------------------------
 
-fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
-    let mut show = app.show_dirs_win;
-    let mut apply = false;
-    egui::Window::new(app.tr("Directories"))
-        .open(&mut show)
-        .resizable(true)
-        .default_width(520.0)
-        .show(ctx, |ui| {
-            let mut items: Vec<String> = app
-                .dirs_buf
-                .split(';')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let mut changed = false;
-            let mut remove: Option<usize> = None;
-            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                for (i, item) in items.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_sized([360.0, 18.0], egui::TextEdit::singleline(item))
-                            .changed()
-                        {
-                            changed = true;
-                        }
-                        if ui.small_button("...").clicked() {
-                            if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                                *item = p.to_string_lossy().to_string();
-                                changed = true;
-                            }
-                        }
-                        if ui.small_button("−").clicked() {
-                            remove = Some(i);
-                        }
-                    });
-                }
-            });
-            if let Some(r) = remove {
-                items.remove(r);
-                changed = true;
-            }
-            ui.horizontal(|ui| {
-                if ui.button(app.tr("Append directory")).clicked() {
-                    items.push(String::new());
-                    changed = true;
-                }
-            });
-            if changed {
-                app.dirs_buf = items.join(";");
-            }
-            ui.separator();
-            if ui.button(app.tr("OK")).clicked() {
-                apply = true;
-            }
-        });
-    app.show_dirs_win = show;
-    if apply {
-        if let (Some(opts), Some(name)) = (&app.opts, app.dirs_target_option.clone()) {
-            let mut guard = opts.lock().unwrap();
-            if let Some(o) = guard.opts.get_mut(&name) {
-                o.globalvalue = app.dirs_buf.clone();
-                o.currvalue = app.dirs_buf.clone();
-            }
-            let path = guard.mame_ini_path.join(if guard.mess_like { "mess.ini" } else { "mame.ini" });
-            let default_ini = app
-                .lib
+/// One editable path in Settings ▸ Directories.
+///
+/// Everything is owned rather than borrowed: the whole table is built before the
+/// `Window` closure runs, because the closure needs `&mut app` for the edit map
+/// and `app.tr` for the labels, and those two cannot be live at the same time.
+struct DirRow {
+    key: &'static str,
+    /// already translated
+    label: String,
+    /// absolute default, shown greyed out while the field is empty
+    default_hint: String,
+    is_dir: bool,
+}
+
+/// The dialog table: `(translated group heading, rows)`.
+fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
+    use crate::core::{dat, paths};
+    let exe = paths::exe_dir();
+    let hint = |rel: &str| exe.join(rel).to_string_lossy().to_string();
+    let tr = |s: &str| app.tr(s).to_string();
+
+    let mut out: Vec<(String, Vec<DirRow>)> = Vec::new();
+
+    // ROMs — the one path that still belongs to MAME, so it keeps its own
+    // default and is the only row whose value MAME itself consumes
+    out.push((
+        tr("Roms"),
+        vec![DirRow {
+            key: "rompath",
+            label: tr("Roms"),
+            default_hint: app
+                .opts
                 .as_ref()
-                .and_then(|l| l.try_lock().ok())
-                .map(|l| l.default_ini.clone())
-                .unwrap_or_default();
-            let _ = guard.save_ini_file(OPTLEVEL_GLOBAL, &path, &default_ini);
+                .and_then(|o| o.try_lock().ok())
+                .and_then(|o| o.opts.get("rompath").map(|p| p.defvalue.clone()))
+                .unwrap_or_default(),
+            is_dir: true,
+        }],
+    ));
+
+    // Artwork — one row per image dock, each defaulting to <exe>/<its own dir>
+    let artwork: Vec<DirRow> = paths::IMAGE_DIRS
+        .iter()
+        .enumerate()
+        .map(|(i, (key, rel))| DirRow {
+            key,
+            label: tr(dat::DOCK_NAMES.get(i).copied().unwrap_or("Image")),
+            default_hint: hint(rel),
+            is_dir: true,
+        })
+        .collect();
+    out.push((tr("Artwork"), artwork));
+
+    // Documents — one row per .dat. `mameinfo_file` backs two docks, so it is
+    // listed once under the first of them (MAME信息).
+    let documents: Vec<DirRow> = paths::DAT_FILES
+        .iter()
+        .map(|(key, file)| {
+            let name = dat::DOCK_NAMES
+                .iter()
+                .position(|n| dat::dock_file_option(docks_index(n)) == Some(*key))
+                .and_then(|i| dat::DOCK_NAMES.get(i))
+                .copied()
+                .unwrap_or("History");
+            DirRow {
+                key,
+                label: tr(name),
+                default_hint: hint(&format!("{}/{}", paths::DAT_SUBDIR, file)),
+                is_dir: false,
+            }
+        })
+        .collect();
+    out.push((tr("Documents"), documents));
+
+    // Everything else MvUI supplies itself
+    out.push((
+        tr("Other"),
+        vec![
+            DirRow {
+                key: "localized_list_file",
+                label: tr("Localized game list"),
+                default_hint: hint(paths::LST_FILE),
+                is_dir: false,
+            },
+            DirRow {
+                key: "background_directory",
+                label: tr("Background images"),
+                default_hint: hint(paths::BG_SUBDIR),
+                is_dir: true,
+            },
+            DirRow {
+                key: "folder_directory",
+                label: tr("Folder lists"),
+                default_hint: hint(paths::FOLDERS_SUBDIR),
+                is_dir: true,
+            },
+        ],
+    ));
+
+    out
+}
+
+fn docks_index(name: &str) -> usize {
+    crate::core::dat::DOCK_NAMES
+        .iter()
+        .position(|n| *n == name)
+        .unwrap_or(0)
+}
+
+fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
+    let mut open = app.show_dirs_win;
+    let mut apply = false;
+    let mut cancel = false;
+    let mut reset: Option<&'static str> = None;
+    let mut browse: Option<(&'static str, bool)> = None;
+
+    // snapshot: the table is static apart from translations, and the edit map
+    // is the working copy the closure mutates
+    let table = dir_rows(app);
+    let mut edits = std::mem::take(&mut app.dir_edits);
+    for row in table.iter().flat_map(|(_, r)| r.iter()) {
+        edits
+            .entry(row.key.to_string())
+            .or_insert_with(|| app.gui.get(row.key).unwrap_or_default().to_string());
+    }
+    let hint_label = app.tr("Default (next to mvui.exe)").to_string();
+    let note = app
+        .tr("All paths are resolved relative to the program directory when relative.")
+        .to_string();
+    let browse_label = app.tr("Browse...").to_string();
+    let reset_label = app.tr("Reset to default").to_string();
+    let ok_label = app.tr("Apply and close").to_string();
+    let cancel_label = app.tr("Cancel").to_string();
+    let title = app.tr("Directories").to_string();
+    let missing = app.tr("missing").to_string();
+
+    egui::Window::new(title)
+        .open(&mut open)
+        .resizable(true)
+        .default_width(680.0)
+        .frame(opaque_frame(ctx))
+        .show(ctx, |ui| {
+            ui.label(note);
+            ui.add_space(4.0);
+            egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+                for (group, rows) in &table {
+                    egui::CollapsingHeader::new(group.clone())
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            for row in rows {
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(
+                                        [140.0, 18.0],
+                                        egui::Label::new(row.label.clone()),
+                                    );
+                                    let value = edits.get_mut(row.key).expect("seeded above");
+                                    let placeholder =
+                                        format!("{hint_label}: {}", row.default_hint);
+                                    let picked_dir = if value.is_empty() {
+                                        None
+                                    } else {
+                                        let p = std::path::Path::new(&*value);
+                                        Some(p.is_dir() || (!row.is_dir && p.is_file()))
+                                    };
+                                    ui.add_sized(
+                                        [280.0, 18.0],
+                                        egui::TextEdit::singleline(value)
+                                            .hint_text(placeholder)
+                                            .desired_width(280.0),
+                                    );
+                                    // a file row that does not exist is worth
+                                    // saying out loud: it is the usual reason a
+                                    // document panel stays empty
+                                    if !row.is_dir && picked_dir == Some(false) {
+                                        ui.colored_label(
+                                            ctx.style().visuals.warn_fg_color,
+                                            missing.clone(),
+                                        );
+                                    }
+                                    if ui.small_button(browse_label.clone()).clicked() {
+                                        browse = Some((row.key, row.is_dir));
+                                    }
+                                    let filled = !edits.get(row.key).map(|s| s.is_empty()).unwrap_or(true);
+                                    if filled && ui.small_button(reset_label.clone()).clicked() {
+                                        reset = Some(row.key);
+                                    }
+                                });
+                            }
+                        });
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(ok_label).clicked() {
+                    apply = true;
+                }
+                if ui.button(cancel_label).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if cancel {
+        edits.clear();
+    }
+    if let Some(key) = reset {
+        edits.insert(key.to_string(), String::new());
+    }
+    if let Some((key, is_dir)) = browse {
+        let cur = edits.get(key).cloned().unwrap_or_default();
+        let mut dlg = rfd::FileDialog::new();
+        let start_dir = if cur.is_empty() {
+            crate::core::paths::exe_dir()
         } else {
-            app.gui.set("rompath", app.dirs_buf.clone());
-            let _ = app.gui.save();
+            let p = std::path::Path::new(&cur);
+            if p.is_dir() {
+                p.to_path_buf()
+            } else {
+                p.parent().map(|d| d.to_path_buf()).unwrap_or_else(crate::core::paths::exe_dir)
+            }
+        };
+        dlg = dlg.set_directory(&start_dir);
+        let picked = if is_dir { dlg.pick_folder() } else { dlg.pick_file() };
+        if let Some(p) = picked {
+            edits.insert(key.to_string(), p.to_string_lossy().to_string());
         }
     }
+
+    if apply {
+        // an empty field means "use the default", so the key is *removed*
+        // rather than stored as an empty string — that keeps a single code path
+        // (`core::paths`) deciding what the default is
+        let empty: Vec<String> = edits
+            .iter()
+            .filter(|(_, v)| v.trim().is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in empty {
+            app.gui.remove(&k);
+            edits.remove(&k);
+        }
+        for (k, v) in &edits {
+            app.gui.set(k, v.clone());
+        }
+        let _ = app.gui.save();
+
+        // keep the option chain in step; the content loaders read
+        // `content_setting`, which falls back to it for values that only ever
+        // lived in mame.ini
+        if let Some(opts) = app.opts.clone() {
+            let mut guard = opts.lock().unwrap();
+            for (k, v) in &edits {
+                if let Some(o) = guard.opts.get_mut(k) {
+                    o.globalvalue = v.clone();
+                    o.currvalue = v.clone();
+                }
+            }
+        }
+
+        // re-read everything that depends on these paths
+        let dir = app.content_background_dir();
+        if dir != app.bg_dir {
+            app.bg_dir = dir.clone();
+            if app
+                .background_file
+                .as_deref()
+                .is_some_and(|f| !dir.join(f).is_file())
+            {
+                app.background_file = None;
+                app.bg_tex = None;
+            }
+        }
+        app.bg_choices = crate::app::scan_backgrounds(&app.bg_dir);
+        app.load_ext_folders();
+        app.reload_localized_list();
+        // rompath feeds the audit, so a change there invalidates the results
+        app.refresh_all();
+    }
+
+    // keep the working copy only while the dialog is open
+    app.dir_edits = if app.show_dirs_win && !apply && !cancel {
+        edits
+    } else {
+        Default::default()
+    };
+    app.show_dirs_win = app.show_dirs_win && !apply && !cancel;
 }
 
 // ---------------------------------------------------------------------
@@ -583,6 +847,7 @@ fn draw_play(app: &mut MameApp, ctx: &egui::Context) {
         .open(&mut keep)
         .resizable(false)
         .default_width(480.0)
+        .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             let mut file = app
                 .play_dialog
@@ -710,6 +975,7 @@ fn draw_cmd(app: &mut MameApp, ctx: &egui::Context) {
         .open(&mut show)
         .resizable(true)
         .default_width(720.0)
+        .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.add_sized([700.0, 60.0], egui::TextEdit::multiline(&mut app.cmd_text));
             ui.separator();
@@ -747,6 +1013,7 @@ fn draw_about(app: &mut MameApp, ctx: &egui::Context) {
     egui::Window::new(app.tr("About"))
         .open(&mut show)
         .resizable(false)
+        .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add(
@@ -774,6 +1041,7 @@ fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {
         .resizable(true)
         .default_width(520.0)
         .default_height(320.0)
+        .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for l in app.verify_lines.clone() {

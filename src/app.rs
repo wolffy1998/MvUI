@@ -233,6 +233,11 @@ pub struct MameApp {
     pub audit_handle: Option<Arc<crate::core::audit::AuditHandle>>,
     pub mounted: HashMap<(String, String), String>,
     pub dirs_target_option: Option<String>,
+    /// Working copy of every path in Settings ▸ Directories, keyed by setting
+    /// name. Empty string means "use the built-in default", which is what the
+    /// dialog shows as a placeholder rather than as a path — that way the user
+    /// can always see what the default *is* without having to remember it.
+    pub dir_edits: std::collections::BTreeMap<String, String>,
     pub show_csv_win: Option<String>,
     pub exporting_method: Option<crate::core::audit::AuditMethod>,
     pub export_target: Option<PathBuf>,
@@ -310,9 +315,8 @@ impl MameApp {
             .get("background_file")
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
-        let bg_dir = backgrounds_dir(
-            gui.get("background_directory"),
-            gui.get("mame_binary").map(PathBuf::from).as_deref(),
+        let bg_dir = crate::core::paths::background_dir(
+            gui.get("background_directory").map(str::trim).filter(|s| !s.is_empty()),
         );
         let bg_choices = scan_backgrounds(&bg_dir);
         let mut col_visible = [true; COL_LAST];
@@ -469,6 +473,7 @@ impl MameApp {
             export_target: None,
             mounted: HashMap::new(),
             dirs_target_option: None,
+            dir_edits: std::collections::BTreeMap::new(),
             show_csv_win: None,
             sel_changed_at: None,
             published_game: String::new(),
@@ -726,9 +731,9 @@ impl MameApp {
             path: PathBuf::from(path),
             version: version.to_string(),
         });
-        // the background directory is resolved against the mame directory
-        // (origin: `getPath(background_directory)`), which is only known now
-        let dir = backgrounds_dir(self.gui.get("background_directory"), Some(Path::new(path)));
+        // the background directory is anchored to the exe dir, but rescan it
+        // here anyway: this is the first moment the GUI settings are known good
+        let dir = self.content_background_dir();
         if dir != self.bg_dir {
             self.bg_dir = dir;
             // a picture configured for the old dir is no longer reachable
@@ -803,12 +808,81 @@ impl MameApp {
             .join(";")
     }
 
-    pub fn opt_resolved_file(&self, key: &str) -> String {
-        self.opt_resolved_dirs(key)
-            .split(';')
-            .next()
-            .unwrap_or("")
-            .to_string()
+    // ------------------------------------------------------------------
+    // content paths (artwork, DATs, backgrounds, folder lists)
+    //
+    // These deliberately do NOT go through `opt_resolved_dirs`: that resolves
+    // against the mame directory, which is right for rompath and wrong for
+    // everything MvUI itself supplies. See `core::paths` for the rule.
+    // ------------------------------------------------------------------
+
+    /// The user's setting for a content path, GUI settings first.
+    ///
+    /// Every one of these keys is `guivisible="1"` in the template, which is what
+    /// makes 1.8.2 persist it into mamepgui.ini rather than mame.ini. The GUI
+    /// map is therefore the authoritative copy; the option chain is only
+    /// consulted as a fallback for installs whose mame.ini already carries a
+    /// value from the old layout.
+    fn content_setting(&self, key: &str) -> Option<String> {
+        if let Some(v) = self.gui.get(key).map(str::trim).filter(|s| !s.is_empty()) {
+            return Some(v.to_string());
+        }
+        self.opts
+            .as_ref()
+            .and_then(|o| o.try_lock().ok())
+            .and_then(|o| o.opts.get(key).map(|p| p.globalvalue.clone()))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    }
+
+    /// Directories to search for one image dock, `;`-separated.
+    pub fn content_image_dirs(&self, dock: usize) -> String {
+        let key = crate::core::dat::dock_directory_option(dock);
+        let configured = self.content_setting(key);
+        crate::core::paths::resolve_list(configured.as_deref(), default_image_subdir(dock))
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(";")
+    }
+
+    /// Absolute path of one document dock's `.dat`.
+    pub fn content_dat_file(&self, dock: usize) -> String {
+        let Some(key) = crate::core::dat::dock_file_option(dock) else {
+            return String::new();
+        };
+        let configured = self.content_setting(key);
+        let fallback = crate::core::paths::DAT_FILES
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, f)| *f)
+            .unwrap_or("history.dat");
+        match configured {
+            Some(v) => crate::core::paths::resolve(Some(&v), fallback),
+            None => crate::core::paths::exe_dir()
+                .join(crate::core::paths::DAT_SUBDIR)
+                .join(fallback),
+        }
+        .to_string_lossy()
+        .to_string()
+    }
+
+    /// The external folder lists directory (`<exe>/folders` by default).
+    pub fn content_folders_dir(&self) -> PathBuf {
+        let configured = self.content_setting("folder_directory");
+        crate::core::paths::folders_dir(configured.as_deref())
+    }
+
+    /// The localized game list (`<exe>/mame_cn.lst` by default).
+    pub fn content_localized_list(&self) -> PathBuf {
+        let configured = self.content_setting("localized_list_file");
+        crate::core::paths::localized_list(configured.as_deref())
+    }
+
+    /// Where the wallpaper images live.
+    pub fn content_background_dir(&self) -> PathBuf {
+        let configured = self.content_setting("background_directory");
+        crate::core::paths::background_dir(configured.as_deref())
     }
 
     /// origin: ensure_chain — cumulative option chain load to the current level
@@ -938,7 +1012,12 @@ impl MameApp {
                         Ok(payload) => {
                             let ReadyPayload { lib, folders, from_cache, .. } = payload;
                             {
-                                let guard = lib.lock().unwrap();
+                                let mut guard = lib.lock().unwrap();
+                                // the localized list is applied here, not during the
+                                // audit: it is a plain text file the user edits by
+                                // hand, so re-reading it must not require re-auditing
+                                // 40 000 roms
+                                self.apply_localized_list(&mut guard);
                                 self.maps = FolderMaps::build(&guard);
                             }
                             // the library handle used to be dropped on the floor
@@ -1089,22 +1168,68 @@ impl MameApp {
 
     // ---- ext folders (origin: parseExtFolders/initExtFolders) ----
 
+    /// Fill `lc_desc` / `lc_mftr` from `mame_cn.lst`.
+    ///
+    /// 1.8.2 read these from the binary `.mmo` file next to mame.exe; the port
+    /// never implemented that, so the Localized Game List switch did nothing at
+    /// all (`lc_desc` was always empty). The replacement is a tab-separated
+    /// text list in the MvUI directory — see `core::lst`.
+    ///
+    /// A missing list is not an error: it just leaves every game untranslated,
+    /// which is the same as having the switch off.
+    pub fn apply_localized_list(&mut self, lib: &mut crate::core::library::GameLibrary) {
+        let path = self.content_localized_list();
+        if !path.is_file() {
+            return;
+        }
+        let map = crate::core::lst::load(&path);
+        if map.is_empty() {
+            return;
+        }
+        let mut hits = 0usize;
+        for g in &mut lib.games {
+            if let Some((desc, mftr)) = map.get(&g.name) {
+                g.lc_desc = desc.clone();
+                g.lc_mftr = mftr.clone();
+                hits += 1;
+            }
+        }
+        self.log(format!(
+            "localized list: {} entries from {} ({} matched)",
+            map.len(),
+            path.display(),
+            hits
+        ));
+    }
+
+    /// Re-read `mame_cn.lst` into the live library and refilter.
+    pub fn reload_localized_list(&mut self) {
+        let Some(lib) = self.lib.clone() else { return };
+        if let Ok(mut guard) = lib.lock() {
+            // clear first so a removed entry reverts to the MAME description
+            for g in &mut guard.games {
+                g.lc_desc.clear();
+                g.lc_mftr.clear();
+            }
+            self.apply_localized_list(&mut guard);
+        }
+        self.needs_refilter = true;
+    }
+
     pub fn load_ext_folders(&mut self) {
         self.ext_folder_data.clear();
-        let folder_dir = self
-            .gui
-            .get("folder_directory")
-            .unwrap_or("folders")
-            .to_string();
+        // `<exe>/folders` unless the user pointed it elsewhere; the directory is
+        // created here because an absent one means the tree has no root at all
+        // and 1.8.2 wrote Favorites.ini into it unconditionally.
+        let dir = self.content_folders_dir();
+        let folder_dir = dir.to_string_lossy().to_string();
         let mut names: Vec<String> = Vec::new();
-        for d in folder_dir.split(';') {
-            if let Ok(rd) = std::fs::read_dir(d) {
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.extension().map(|x| x == "ini").unwrap_or(false) {
-                        if let Some(stem) = p.file_stem() {
-                            names.push(stem.to_string_lossy().to_string());
-                        }
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().map(|x| x == "ini").unwrap_or(false) {
+                    if let Some(stem) = p.file_stem() {
+                        names.push(stem.to_string_lossy().to_string());
                     }
                 }
             }
@@ -1112,13 +1237,10 @@ impl MameApp {
         // auto-create Favorites (origin exact bytes)
         let has_fav = names.iter().any(|n| n == "Favorites");
         if !has_fav {
-            if let Some(first) = folder_dir.split(';').next() {
-                let _ = std::fs::create_dir_all(first);
-                let fav = PathBuf::from(first).join("Favorites.ini");
-                if !fav.exists() {
-                    let _ = std::fs::write(&fav, crate::core::folders::FAVORITES_INI_BYTES);
-                    names.push("Favorites".into());
-                }
+            let fav = dir.join("Favorites.ini");
+            if !fav.exists() {
+                let _ = std::fs::write(&fav, crate::core::folders::FAVORITES_INI_BYTES);
+                names.push("Favorites".into());
             }
         }
         names.sort();
@@ -1136,64 +1258,20 @@ impl MameApp {
     }
 
     pub fn save_ext_folder(&mut self, name: &str) {
-        let folder_dir = self
-            .gui
-            .get("folder_directory")
-            .unwrap_or("folders")
-            .to_string();
+        let dir = self.content_folders_dir();
         if let Some((_, store)) = self.ext_folder_data.iter_mut().find(|(n, _)| n == name) {
             let text = crate::core::folders::save_ext_folders(&store.entries);
-            let path = first_folder_dir(&folder_dir).join(format!("{name}.ini"));
-            let _ = std::fs::write(path, text);
+            let _ = std::fs::write(dir.join(format!("{name}.ini")), text);
         }
     }
 }
 
-pub fn first_folder_dir(folder_dir: &str) -> PathBuf {
-    folder_dir
-        .split(';')
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("folders"))
-}
-
-/// Where the window background images live.
-///
-/// Origin: 1.8.2 `mainwindow.cpp:1447` reads
-/// `utils->getPath(pGuiSettings->value("background_directory", "bkground"))`
-/// — i.e. the `background_directory` **option** (default `bkground`,
-/// `optiontemplate.xml:12`) resolved against the mame.exe directory, because
-/// `getPath` only expands `$HOME` and cleans the path
-/// (`utils.cpp:102`). So the stock layout is `<mame>/bkground/bkground.png`,
-/// which is why the reference install keeps the picture next to mame.exe and
-/// not next to the GUI.
-///
-/// The GUI-override set (`guivisible="1"`) is what gets written back to
-/// mamepgui.ini, so the configured value is read from the settings map first
-/// and the template default is the fallback.
-pub fn backgrounds_dir(configured: Option<&str>, mame_exe: Option<&Path>) -> PathBuf {
-    let configured = configured
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("bkground")
-        .replace("$HOME", &home_dir());
-    // relative → against the mame directory (the old `getPath` behaviour relies
-    // on the process cwd being the mame dir); absolute → used as-is
-    let p = PathBuf::from(configured.trim());
-    if p.is_absolute() {
-        return p;
-    }
-    let base = mame_exe
-        .and_then(|e| e.parent())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(p)
-}
-
-fn home_dir() -> String {
-    std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default()
+/// Default subdirectory of one image dock, used when the option is unset.
+fn default_image_subdir(dock: usize) -> &'static str {
+    crate::core::paths::IMAGE_DIRS
+        .get(dock)
+        .map(|(_, rel)| *rel)
+        .unwrap_or("pcb")
 }
 
 /// Every usable background image, by file name, sorted. Origin: 1.8.2 built the
@@ -1330,15 +1408,19 @@ pub fn apply_theme_with_bg(ctx: &egui::Context, dark: bool, transparent: bool) {
         } else {
             egui::Color32::from_white_alpha(128)
         };
-        // `window_fill` is what `egui_dock` turns into `TabBodyStyle::bg_fill`
-        // (egui_dock-0.14 style.rs:704 `from_egui`), i.e. the fill of every dock
-        // leaf — the folder tree, the game list, the info docks. This is the
-        // slot 1.8.2 made translucent in `setTransparentBg`
-        // (`QPalette::Base` → `rgba(0,0,0,128)`), and it is what lets the
-        // wallpaper read through the panels while the text stays legible.
-        v.window_fill = veil;
-        // striped rows sit on that translucent backdrop; keep them translucent
-        // too or they read as bright bands floating over the picture
+        // `window_fill` stays **opaque** on purpose. egui derives three things
+        // from it: every dock leaf's `TabBodyStyle::bg_fill` (style.rs:704),
+        // every menu frame (`Frame::menu`, frame.rs:123) and every popup. Only
+        // the first one should be see-through — 1.8.2's `setTransparentBg`
+        // swapped exactly one brush (`QPalette::Base` → `rgba(0,0,0,128)`) and
+        // left the menu bar and toolbars solid. Making `window_fill` translucent
+        // to get the dock right therefore washed out the menus too; the veil now
+        // goes into `ui::dock_style`'s `tab_body.bg_fill` instead, which is the
+        // one slot only the dock leaves read.
+        //
+        // Striped rows are drawn by the game list on top of the leaf, so they
+        // take the same veil — an opaque stripe over a translucent panel reads
+        // as a bright band floating above the picture.
         v.faint_bg_color = veil;
         // 1.8.2 kept the text fully opaque over the wallpaper
         // (`QDockWidget, QStatusBar QLabel { color: white }` in the stylesheet
@@ -1351,11 +1433,13 @@ pub fn apply_theme_with_bg(ctx: &egui::Context, dark: bool, transparent: bool) {
         //    the dock backdrop. It is egui's void/fallback colour, so nothing
         //    changed and the picture stayed invisible.
         //  * this veil *plus* painting the picture on `Order::Background` over
-        //    `ctx.screen_rect()` — the veil is right, but the picture then
-        //    covered the whole window including the menu bar and toolbar
-        //    (both of which use the opaque `panel_fill`) and buried the entire
+        //    `ctx.screen_rect()` — the picture then covered the whole window
+        //    including the menu bar and toolbar and buried the entire
         //    interface. The picture is now drawn inside the central panel by
-        //    `ui::draw_background`, so the veil can only affect dock leaves.
+        //    `ui::draw_background`.
+        //  * putting the veil on `window_fill` — right colour, wrong consumer:
+        //    the menu and popup frames read the same slot, so they went
+        //    translucent too.
     }
     ctx.set_visuals(v);
 }

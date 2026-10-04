@@ -141,10 +141,34 @@ Rust 里的代码注释统一用 `origin: xxx` 标注对应的旧版函数/行�
   另外 `history_indexed` 里 cloneof 回退会**递归调自己**，锁作用域必须窄于递归
   路径，否则 `std::sync::Mutex` 不可重入直接死锁（cargo test 会 SIGTERM）。
   基准：`cargo run --release --example datindex_bench`（自造 18MB DAT 测等价+速度）。
-- **背景目录按旧版语义**：`backgrounds_dir()` 读 `background_directory` 选项
-  （默认 `bkground`，相对 **mame.exe 目录**，支持 `$HOME`）——不是 exe 旁边的
-  `assets/backgrounds/`。用户实际用法就是 `D:\Game\MAME\MAME-0.284\bkground\*.png`。
-  目录要缓存进 `app.bg_dir`（在 `try_accept_mame` 里重扫，因为那时才知道 mame 路径）。
+- **内容目录一律锚定 exe 目录**（`core/paths.rs`，2026-10-04 起，不再是 mame 目录）：
+  `snap/ flyers/ cabinets/ marquees/ titles/ cpanel/ pcb/ dats/ folders/ bkground/`
+  和 `mame_cn.lst` 默认全在 `<mvui.exe 所在目录>` 下，目录不存在会创建。
+  解析顺序：配置绝对路径原样用 → 相对路径按 **exe 目录** → 没配置用内置默认。
+  **`rompath` 是唯一例外**（天生属于 MAME），仍走 `opt_resolved_dirs()`；
+  artwork/dat 一律走 `content_image_dirs()` / `content_dat_file()` /
+  `content_folders_dir()` / `content_localized_list()` / `content_background_dir()`
+  （都经 `content_setting()`：GUI 设置优先，option 链兜底）。
+  **改这些默认值只改 `core/paths.rs` 一处**——目录弹窗的空值是
+  `gui.remove(key)` 而不是存空串，正是为了守住这个单点。
+- **本地化游戏列表读 `mame_cn.lst`**（`core/lst.rs`），不是 1.8.2 的二进制 `.moo`
+  （那个从未实现，所以开关一直是空操作）。格式：**3 列 tab 分隔、无表头**
+  `set名 \t 描述 \t 厂商`（实测第 2/3 列内容相同）。**文件实际是 GB18030 不是
+  UTF-8**，必须走 `options::read_text_file`（BOM→UTF-8→GB18030）。
+  在 `LibraryReady` 时应用（不在审计阶段），所以改完按刷新即生效。
+- **`window_fill` 必须保持不透明**：egui 从这一个槽位派生了 dock leaf 的
+  `TabBodyStyle::bg_fill`（egui_dock style.rs:704）、`Frame::menu`
+  （frame.rs:123）和所有 popup。把它设半透明会让**菜单和弹窗一起变透明**。
+  壁纸的 veil 只写进 `ui::dock_style(ctx, wallpaper, dark)` 的
+  `style.tab.tab_body.bg_fill`（唯一只被 dock leaf 读的槽位），
+  `faint_bg_color` 跟着 veil（否则半透明面板上出现不透明亮带）。
+  7 个 `egui::Window` 全部加 `windows::opaque_frame(ctx)`。这正是 1.8.2
+  `setTransparentBg` 只换**一个**画刷（`QPalette::Base`）的做法。
+- **选项对话框不用 ComboBox**：枚举（kind=3）直接平铺 `selectable_label`，
+  超过 6 项分两列。模板最宽的枚举 `scale_effect` 只有 18 项，平铺成本远低于
+  一次点击；ComboBox 展开时还盖住下面的行且继承半透明底色。
+- **背景目录按旧版语义**：`background_directory` 选项 + 内置默认 `bkground`
+  （沿用 1.8.2 的拼写），但基准目录已从 mame 目录改为 exe 目录。
 - **背景纹理必须降采样**：用户那张是 5888x3312 = 19.5 Mpx，直接 `load_texture`
   吃 ~78MB 显存。`BG_MAX_EDGE = 4096` + `fit_within()`（保持宽高比、只缩不放）。
   `background_is_dark` 同样先缩到 64 再求均值，否则 UI 线程要卡几百毫秒。
@@ -154,7 +178,7 @@ Rust 里的代码注释统一用 `origin: xxx` 标注对应的旧版函数/行�
   或先把窗口 `SetWindowPos` 到主屏置顶再抓。旧 `shot_tree.py` 会最大化，
   尺寸对不上，别混用。
 - 维护基线：`cargo check --workspace` **0 warning**、`cargo test --workspace`
-  **36 项**通过（core 30 + app 6）、`cargo audit` **0 漏洞**。
+  **46 项**通过（core 40 + app 6）、`cargo audit` **0 漏洞**。
   依赖：`encoding_rs`（GBK）、`winresource`（build-dep，exe 图标，需 windres）、
   `quick-xml 0.41`（从 0.36 升上去修 RUSTSEC-2026-0194/0195）。
 - **安全边界（2026-10-04 审计）**：

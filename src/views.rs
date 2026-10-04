@@ -581,7 +581,8 @@ impl MameApp {
         if self.selection_settling() {
             return;
         }
-        let dirs = self.opt_resolved_dirs(crate::core::dat::dock_directory_option(dock));
+        // artwork lives under the MvUI directory by default, not the MAME one
+        let dirs = self.content_image_dirs(dock);
         if dirs.is_empty() {
             return;
         }
@@ -640,9 +641,8 @@ impl MameApp {
             return;
         }
         // Same as N3: no early return may happen after the key is latched.
-        let file_path = crate::core::dat::dock_file_option(dock)
-            .map(|key| self.opt_resolved_file(key))
-            .unwrap_or_default();
+        // DATs live in `<exe>/dats` by default
+        let file_path = self.content_dat_file(dock);
         if file_path.is_empty() {
             return;
         }
@@ -1403,6 +1403,9 @@ impl MameApp {
                 .fixed_pos(pos)
                 .order(egui::Order::Foreground)
                 .show(&ctx, |ui| {
+                    // `panel_fill` is opaque in both themes, so the menu stays
+                    // readable over a wallpaper — a context menu you cannot read
+                    // is worse than one that hides the picture
                     let resp = egui::Frame::none()
                         .fill(ui.visuals().panel_fill)
                         .stroke(ui.visuals().window_stroke)
