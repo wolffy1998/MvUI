@@ -1,0 +1,25 @@
+# Rust build output — the single largest thing here (~1.9 GB)
+/target/
+**/target/
+
+# Cargo lock is intentionally NOT ignored: this is an application, so the
+# exact dependency versions belong in version control (reproducible builds).
+
+# Local runtime state the app creates next to the exe
+.mamepgui/
+*.log
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Scratch output from the screenshot/measurement tooling in .workbuddy/tools
+.workbuddy/tools/*.png
+.workbuddy/tools/**/*.png
+.workbuddy/tools/alive*.txt
+.workbuddy/tools/probe*.txt

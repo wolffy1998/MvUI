@@ -1,0 +1,4 @@
+# Pin the GNU linker to the full MinGW-W64 installation (has w32api import
+# libraries like libshlwapi.a that the rust sysroot's self-contained stub lacks).
+[target.x86_64-pc-windows-gnu]
+linker = "C:\\Users\\11921\\scoop\\apps\\mingw\\current\\bin\\gcc.exe"

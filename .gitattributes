@@ -1,0 +1,11 @@
+# Normalise line endings in the repository. The working copy stays LF, so a
+# CRLF checkout on Windows would otherwise show every file as modified.
+* text=auto eol=lf
+
+# Binary assets — never touched by the EOL machinery
+*.png binary
+*.ico binary
+*.jpg binary
+*.woff2 binary
+*.ttf binary
+LICENSE binary

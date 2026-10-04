@@ -1,0 +1,33 @@
+# cargo-audit configuration (cargo-audit 0.22)
+#
+# Run from `mamegui-rs/`:  cargo audit
+# Any change here should be justified in a comment — a blanket suppression is
+# how real vulnerabilities stop being noticed.
+
+[advisories]
+# RUSTSEC-2026-0245 (severity 8.3) is a path-traversal / arbitrary-file-write
+# in `sevenz_rust`'s `de_funcs::decompress_impl` and every wrapper around it
+# (`decompress`, `decompress_file`, `decompress_with_password`, ...).
+#
+# MvUI never calls any of them. The only sevenz-rust calls in the whole
+# workspace are
+#     SevenZReader::open(path, Password::empty())      — archive.rs
+#     SevenZReader::for_each_entries(|entry, reader|) — archive.rs
+# and every byte that reaches the filesystem goes through our own
+# `archive::extract_mame_file`, which resolves the destination with
+# `archive::sanitized_join` and refuses traversal, absolute, drive-relative and
+# UNC paths (5 tests in `archive::tests`).
+#
+# There is no upgrade path either: the advisory says "No fixed upgrade is
+# available" and the crate is unmaintained. Revisit this line if we ever swap
+# the 7z reader.
+ignore = ["RUSTSEC-2026-0245"]
+
+# The remaining notices are informational, not vulnerabilities:
+#   bincode 1.3.3  — transitive via rfd (Windows file dialogs)
+#   paste   1.0.15 — build-time macro helper of a dependency
+#   ttf-parser 0.25 — transitive via ab_glyph/egui font stack
+# None of them parses input we act on. The two crates that DO parse external
+# data are quick-xml (upgraded to 0.41, see crates/mamegui-core/Cargo.toml) and
+# sevenz-rust (above).
+informational_warnings = ["unmaintained"]

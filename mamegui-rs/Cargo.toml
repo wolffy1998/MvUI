@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/mamegui-core", "crates/mamegui-app"]
+
+[workspace.package]
+edition = "2021"
+version = "1.0.0"
+license = "MIT"
+
+[profile.release]
+lto = "thin"
+strip = true
