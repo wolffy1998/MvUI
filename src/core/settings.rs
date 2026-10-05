@@ -11,6 +11,10 @@
 use crate::dlog;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// `cfg_prefix()` 的结果，进程内只算一次。
+static CFG_PREFIX: OnceLock<PathBuf> = OnceLock::new();
 
 pub struct GuiSettings {
     pub path: PathBuf,
@@ -37,7 +41,19 @@ impl GuiSettings {
     /// `-configpath` 处理。
     ///
     /// 优先级：`-configpath <dir>` 参数 > exe 目录下的 `.mvui/`。
+    ///
+    /// 结果缓存：`perf_log` 每写一条日志都会问一次 `cache_dir()` → 这里，
+    /// 不缓存就是每条日志一遍参数扫描 + 一遍 `create_dir_all`。
+    ///
+    /// **这个函数里不许有 `dlog!`**——它是日志落点自己的上游：
+    /// `dlog!` → `perf_log` → `cache_dir()` → 这里 → `dlog!`，
+    /// 无限递归直接栈溢出（Windows 上表现为 0xC0000005，无报错）。
+    /// `log.rs` 那道重入闸是最后一道保险，不是让它绕过去的理由。
     pub fn cfg_prefix() -> PathBuf {
+        CFG_PREFIX.get_or_init(Self::compute_cfg_prefix).clone()
+    }
+
+    fn compute_cfg_prefix() -> PathBuf {
         let mut prefix: Option<String> = None;
         let args: Vec<String> = std::env::args().collect();
         for (i, a) in args.iter().enumerate() {
@@ -59,7 +75,6 @@ impl GuiSettings {
             }
         };
         let _ = std::fs::create_dir_all(&base);
-        dlog!("设置: 配置目录 = {}", base.display());
         base
     }
 

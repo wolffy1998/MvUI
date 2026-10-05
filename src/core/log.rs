@@ -13,10 +13,35 @@
 //! dlog!("解析完成: {} 条", n);
 //! ```
 
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 /// 日志落点。由 UI 层在启动时注册，进程内只允许设置一次。
 static SINK: OnceLock<fn(&str)> = OnceLock::new();
+
+thread_local! {
+    /// sink 正在执行的标记，防止日志自己把自己再调一遍。
+    ///
+    /// 这条链子真实存在过：`dlog!` → sink(`app::perf_log`) →
+    /// `GuiSettings::cache_dir()` → `cfg_prefix()` → `dlog!` → …… 无限递归，
+    /// 栈溢出。**Windows 上它表现为 `0xC0000005` 访问违规**：没有 Rust
+    /// panic、没有 stderr 输出、没有事件日志记录，窗口来不及画出来就退了，
+    /// 双击 exe 看起来就是"毫无反应"。
+    static IN_SINK: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 进入 sink；已经在里面则返回 `None`（说明这是一次重入，调用方应丢弃）。
+///
+/// 用 `Drop` 复位而不是用完手动清：sink 里若 panic，标记不会永久卡住。
+struct Reentry;
+impl Drop for Reentry {
+    fn drop(&mut self) {
+        IN_SINK.with(|c| c.set(false));
+    }
+}
+fn enter() -> Option<Reentry> {
+    IN_SINK.with(|c| if c.replace(true) { None } else { Some(Reentry) })
+}
 
 /// 注册日志落点。已经注册过则返回 false，不覆盖已有 sink。
 pub fn set_sink(f: fn(&str)) -> bool {
@@ -31,8 +56,9 @@ pub fn has_sink() -> bool {
     SINK.get().is_some()
 }
 
-/// 写一条调试日志。未注册落点时直接返回。
+/// 写一条调试日志。未注册落点、或这是一次重入调用，都直接返回。
 pub fn debug(msg: impl AsRef<str>) {
+    let Some(_guard) = enter() else { return };
     if let Some(f) = SINK.get() {
         f(msg.as_ref());
     }
