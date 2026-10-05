@@ -4,6 +4,7 @@ use crate::events::{AppEvent, ReadyPayload, SharedLib, SharedOpts};
 use crate::core::folders::{FolderKind, FolderMaps};
 use crate::core::mameproc::MameBinary;
 use crate::core::settings::GuiSettings;
+use mvui::dlog;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -34,6 +35,21 @@ pub const F_CLONES: u16 = 0x0001;
 pub const F_NONWORKING: u16 = 0x0002;
 pub const F_UNAVAILABLE: u16 = 0x0004;
 pub const F_MECHANICAL: u16 = 0x4000;
+
+/// `boot.log` 的文件名，落在 `<配置根>/cache/` 底下。
+///
+/// 只被 debug 构建的写盘函数用到，所以跟着 `#[cfg]` 走——否则 release
+/// 下它是一个没人引用的常量，一条 dead_code 警告。
+#[cfg(debug_assertions)]
+const LOG_FILE_NAME: &str = "boot.log";
+
+/// 超过这个大小就把日志截断（README P3：逐帧日志曾让它无限增长）。
+#[cfg(debug_assertions)]
+const PERF_LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// 截断后保留的尾部大小。
+#[cfg(debug_assertions)]
+const PERF_LOG_KEEP_BYTES: u64 = 1024 * 1024;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum LibStatus {
@@ -649,6 +665,20 @@ impl MameApp {
     }
 
     pub fn save_settings(&mut self) {
+        self.write_settings(true)
+    }
+
+    /// 周期性保存用（见 `ui::save_settings_periodic`）。
+    ///
+    /// 写盘的内容与 [`save_settings`] 完全一样，只是不记账：那条定时器
+    /// 每 200 帧跑一次，是防崩溃丢设置的兜底而不是用户动作，每次往
+    /// boot.log 里塞一条"保存 N 条"只会稀释真正值得看的信息——而且
+    /// 一次审计动辄几十分钟，那段时间里它就是日志里的全部内容。
+    pub fn save_settings_quiet(&mut self) {
+        self.write_settings(false)
+    }
+
+    fn write_settings(&mut self, log_it: bool) {
         // `save()` writes the whole map, so a key that is *absent* from it stays
         // absent on disk for good. That is how `mame_binary` was lost: one run
         // started without it in the map (no ini, or an unreadable one), the
@@ -713,7 +743,12 @@ impl MameApp {
             "background_file",
             self.background_file.clone().unwrap_or_default(),
         );
-        if let Err(e) = self.gui.save() {
+        let saved = if log_it {
+            self.gui.save()
+        } else {
+            self.gui.save_quiet()
+        };
+        if let Err(e) = saved {
             // surfaced instead of silently dropping the settings file
             self.log(format!("settings save failed: {e}"));
         }
@@ -725,27 +760,26 @@ impl MameApp {
         self.started = true;
         // drop whatever a previous session (or a crash) left in the temp-rom dir
         crate::core::archive::clear_temp_rom_dir();
-        // These went to `eprintln!`, which is a dead end in a release build:
-        // `main.rs` sets `windows_subsystem = "windows"`, so the process has no
-        // console and stderr is never seen. `perf_log` writes them to
-        // `.mvui/cache/boot.log`, which is also where the rest of the
-        // start-up trace already goes.
-        perf_log("startup: validating mame binary");
+        // 这些曾经是 `eprintln!`，在 release 构建里是死路：`main.rs` 设了
+        // `windows_subsystem = "windows"`，进程没有控制台，stderr 永远看不到。
+        // 改道 `dlog!`：debug 构建落到 `.mvui/cache/boot.log`，release 下
+        // 整句被编译期常量消掉。
+        dlog!("启动: 开始校验 MAME 主程序");
         let path = self
             .gui
             .get("mame_binary")
             .unwrap_or("mamep.exe")
             .to_string();
         let version = detect_version(&path);
-        perf_log(&format!("startup: detected version={version:?} path={path}"));
+        dlog!("启动: 探测版本 {:?} 路径 {}", version, path);
         if self.try_accept_mame(&path, &version) {
-            perf_log("startup: accepted, booting");
+            dlog!("启动: MAME 可用（{}），开始引导", version);
             self.boot();
         } else {
-            perf_log("startup: invalid, opening picker thread");
+            dlog!("启动: MAME 不可用，打开文件选择框");
             self.open_mame_picker();
         }
-        perf_log("startup: done");
+        dlog!("启动: 校验结束");
     }
 
     fn try_accept_mame(&mut self, path: &str, version: &str) -> bool {
@@ -828,7 +862,7 @@ impl MameApp {
     }
 
     pub fn boot(&mut self) {
-        perf_log("boot() called");
+        dlog!("引导: 启动后台线程（读缓存 → listxml → showconfig → 审计）");
         self.need_mame_pick = false;
         self.lib_status = LibStatus::Loading;
         self.progress_open = true;
@@ -1056,11 +1090,11 @@ impl MameApp {
                     self.audit_stage = (done, total, system);
                 }
                 AppEvent::LibraryReady(res) => {
-                    perf_log("event: LibraryReady");
+                    dlog!("事件: LibraryReady 到达");
                     match res {
                         Ok(payload) => {
                             let ReadyPayload { lib, folders, from_cache, .. } = payload;
-                            {
+                            let machine_count = {
                                 let mut guard = lib.lock().unwrap();
                                 // the localized list is applied here, not during the
                                 // audit: it is a plain text file the user edits by
@@ -1068,7 +1102,8 @@ impl MameApp {
                                 // 40 000 roms
                                 self.apply_localized_list(&mut guard);
                                 self.maps = FolderMaps::build(&guard);
-                            }
+                                guard.len()
+                            };
                             // the library handle used to be dropped on the floor
                             // here: self.lib stayed None, so refilter() cleared the
                             // list ("0 games"), draw_folders() fell through to an
@@ -1084,7 +1119,11 @@ impl MameApp {
                                 self.current_game = g.to_string();
                             }
                             self.log("game list ready".to_string());
-                            perf_log("event: LibraryReady processed (FolderMaps built)");
+                            dlog!(
+                                "事件: LibraryReady 处理完毕（{} 台机种, 来自缓存={}）",
+                                machine_count,
+                                from_cache
+                            );
                         }
                         Err(e) => {
                             self.lib_status = LibStatus::Error;
@@ -1504,14 +1543,30 @@ pub fn apply_theme_with_bg(ctx: &egui::Context, dark: bool, transparent: bool) {
     ctx.set_visuals(v);
 }
 
-/// Boot/performance log. Capped: a long session with per-frame logging grew it
-/// without limit (README P3). When it passes [`PERF_LOG_MAX_BYTES`] it is
-/// truncated to its last [`PERF_LOG_KEEP_BYTES`].
+/// 启动/性能日志的落点：写 `<配置根>/cache/boot.log`。
+///
+/// **只有 debug 构建会落盘。** release 下这是一个真正的空操作——
+/// 不 stat、不建目录、不开文件句柄，所以发行版既不会留下
+/// `boot.log`，也不会因为日志去创建 `cache` 目录（那个目录本来
+/// 只由缓存自己按需创建）。总闸是 [`crate::core::log::ENABLED`]，
+/// 编译期常量，因此 `format!` 在调用点之外也不会被求值。
+///
+/// 上限：一次长会话配上逐帧日志会让它无限增长（README P3）。超过
+/// [`PERF_LOG_MAX_BYTES`] 时截断，只留最后 [`PERF_LOG_KEEP_BYTES`]。
+///
+/// 这是 core 的 `dlog!` 落的同一个地方——注册在 `main` 里，见
+/// [`crate::core::log::set_sink`]。
 pub fn perf_log(msg: &str) {
+    if !crate::core::log::ENABLED {
+        return;
+    }
+    write_boot_log(msg);
+}
+
+#[cfg(debug_assertions)]
+fn write_boot_log(msg: &str) {
     use std::io::Write;
-    const PERF_LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
-    const PERF_LOG_KEEP_BYTES: u64 = 1024 * 1024;
-    let p = GuiSettings::cache_dir().join("boot.log");
+    let p = GuiSettings::cache_dir().join(LOG_FILE_NAME);
     if let Ok(meta) = std::fs::metadata(&p) {
         if meta.len() > PERF_LOG_MAX_BYTES {
             if let Ok(bytes) = std::fs::read(&p) {
@@ -1530,6 +1585,11 @@ pub fn perf_log(msg: &str) {
         let _ = writeln!(f, "[{:?}] {}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0), msg);
     }
 }
+
+/// release 构建下没有落点函数体可编，整个写盘逻辑（包括那两个
+/// 字节数上限）都不参与编译。
+#[cfg(not(debug_assertions))]
+fn write_boot_log(_msg: &str) {}
 
 pub fn detect_version(path: &str) -> String {
     if path.is_empty() {
@@ -1551,4 +1611,47 @@ fn read_ext_folder_text(folder_dir: &str, name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `perf_log` 必须跟着构建模式走：debug 落盘，release 什么都不做。
+    ///
+    /// 这条在 release 下跑时是**真正有牙齿**的那条——`perf_log` 连
+    /// `cache_dir()` 都不会调，所以既不 stat 也不建目录，发行版不会在
+    /// 用户机器上凭空造出 `.mvui/cache/boot.log`（README P3 那个 4 MB
+    /// 上限之所以存在，就是因为它一度每帧都在长）。
+    ///
+    /// debug 下断言的是同一件事的另一头：调用安全返回、不 panic。
+    /// 真正的"落盘"没法在这里断言——`cfg_prefix()` 是 `OnceLock`
+    /// 全局，写用户目录既不可测也不该做。
+    #[test]
+    fn perf_log_follows_the_build_profile() {
+        assert_eq!(
+            crate::core::log::ENABLED,
+            cfg!(debug_assertions),
+            "日志总闸必须与构建模式一致"
+        );
+        // 两种构建下都必须安全返回（release 下是一次真正的空操作）
+        perf_log("单测: 这条在 release 下什么都不该做");
+    }
+
+    /// 日志落点的文件名不能被"顺手改掉"——`settings::cache_dir()` 下面
+    /// 只有这一个日志文件，改名会让用户找不到它，也和 README 里写的
+    /// 排查步骤对不上。
+    #[cfg(debug_assertions)]
+    #[test]
+    fn log_file_name_is_stable() {
+        assert_eq!(LOG_FILE_NAME, "boot.log");
+    }
+
+    /// 截断上限必须还在：一次长会话配上逐帧日志会把它喂到无上限增长。
+    #[cfg(debug_assertions)]
+    #[test]
+    fn log_stays_capped() {
+        assert!(PERF_LOG_MAX_BYTES <= 16 * 1024 * 1024);
+        assert!(PERF_LOG_KEEP_BYTES < PERF_LOG_MAX_BYTES);
+    }
 }

@@ -227,6 +227,7 @@ pub fn audit_all(
     // 的进度转发线程永远不退出，会一直往 channel 里灌（README P2-19）。
     let _finish_guard = FinishOnDrop(handle.finished.clone());
 
+    let audit_t0 = std::time::Instant::now();
     dlog!(
         "审计: 开始（{} 台机种, {} 个 rompath）",
         lib.len(),
@@ -235,7 +236,13 @@ pub fn audit_all(
 
     // 把上一轮记住的归档清单拉进来。这就是 10–20 分钟和几秒钟的
     // 区别：成本在于打开 4.4 万个 zip，而清单只在文件变了才变。
+    let cache_t0 = std::time::Instant::now();
     crate::core::audit_cache::load();
+    dlog!(
+        "审计: 归档清单缓存载入完成（{} 条记录），耗时 {:?}",
+        crate::core::audit_cache::len(),
+        cache_t0.elapsed()
+    );
 
     // 1) 重置：nodump 视为 available
     for g in &mut lib.games {
@@ -260,6 +267,12 @@ pub fn audit_all(
         }
     }
 
+    // 枚举待扫单元。这一步要把每个 rompath 整目录读一遍（`read_dir`），
+    // 4.4 万个条目在机械盘上是**整整一段静默期**——在这期间
+    // `progress.1` 还是 0，状态栏只能打"正在审计"而给不出百分比。
+    // 分母只有枚举完才知道，所以这不是可以"顺手修好"的东西，
+    // 而是一次审计里"前若干秒没有百分比"的全部原因。
+    let enum_t0 = std::time::Instant::now();
     let mut units: Vec<(PathBuf, usize)> = Vec::new();
     for dir in rom_paths {
         let entries = match std::fs::read_dir(dir) {
@@ -289,9 +302,19 @@ pub fn audit_all(
     }
 
     handle.set_total(units.len());
-    dlog!("审计: 待扫单元 {} 个", units.len());
+    dlog!(
+        "审计: 待扫单元 {} 个（枚举耗时 {:?}）——分母此刻才确定，状态栏从这条日志之后才开始有百分比",
+        units.len(),
+        enum_t0.elapsed()
+    );
 
+    let scan_t0 = std::time::Instant::now();
     let results = scan_units(&units, lib, handle);
+    dlog!(
+        "审计: 单元扫描完成（{} 个单元, 耗时 {:?}）",
+        units.len(),
+        scan_t0.elapsed()
+    );
 
     // 所有被打开过的单元的归档清单现在已经记下来了。先清掉那些文件
     // 已经消失的条目，再把整份交给持久化缓存，这样**下一次**审计——
@@ -399,6 +422,8 @@ pub fn audit_all(
         .map(|g| g.name.clone())
         .collect();
     let total_consoles = console_names.len();
+    let console_t0 = std::time::Instant::now();
+    let mut consoles_done = 0usize;
     for (ci, console) in console_names.iter().enumerate() {
         let Some(dirpath) = extra_software.get(console) else {
             continue;
@@ -407,8 +432,22 @@ pub fn audit_all(
             continue;
         }
         handle.set_progress(ci, total_consoles, console);
+        dlog!(
+            "审计: 主机（console）扫描 {}/{} — {} → {}",
+            ci + 1,
+            total_consoles,
+            console,
+            dirpath
+        );
         audit_console(lib, console, dirpath);
+        consoles_done += 1;
     }
+    dlog!(
+        "审计: 主机扫描完成（{} 台机种, 处理 {} 个主机目录, 耗时 {:?}）",
+        total_consoles,
+        consoles_done,
+        console_t0.elapsed()
+    );
     // 在 `finish()` **之前**清掉阶段标签并停表，这样转发线程最后观察到
     // 的状态是"已完成"，而不是跑到一半时留下的过期百分比。UI 是靠
     // `is_finished` 来把进度条整个撤掉的，所以在这里归零不会让它卡在
@@ -421,9 +460,10 @@ pub fn audit_all(
     // 统计一下结果，便于在 boot.log 里对照界面上看到的数字
     let complete = lib.games.iter().filter(|g| g.available == GAME_COMPLETE).count();
     dlog!(
-        "审计: 完成（{} 台中 {} 台完整）",
+        "审计: 完成（{} 台中 {} 台完整），总耗时 {:?}",
         lib.len(),
-        complete
+        complete,
+        audit_t0.elapsed()
     );
 }
 

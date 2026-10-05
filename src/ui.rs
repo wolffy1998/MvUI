@@ -327,7 +327,10 @@ impl MameApp {
             return;
         }
         if self.frame_count % 200 == 0 {
-            self.save_settings();
+            // 静默版本：这是防崩溃丢设置的兜底定时器，不是用户动作，
+            // 每次记一条"保存 N 条"只会稀释 boot.log 里真正值得看的东西
+            // （一次审计几十分钟，期间日志里就只剩它了）。
+            self.save_settings_quiet();
         }
     }
 

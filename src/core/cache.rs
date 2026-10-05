@@ -94,6 +94,7 @@ pub fn save_library(
         library.len(),
         audited
     );
+    let write_t0 = std::time::Instant::now();
     let tmp = path.with_extension("tmp");
     {
         // **写入必须过缓冲。** `bincode::serialize_into` 对每个字符串和
@@ -121,7 +122,14 @@ pub fn save_library(
         f.sync_all()?;
     }
     fs::rename(&tmp, path)?;
-    dlog!("缓存: 写入完成 {}", path.display());
+    // 耗时值得记：这个文件在冷启动要被写两次（审计前后各一次），而
+    // 去掉 BufWriter 会让它从 0.12 秒变成约 50 秒——日志里没有这个
+    // 数字的话，那次退化只能靠用户投诉才发现。
+    dlog!(
+        "缓存: 写入完成 {}，耗时 {:?}",
+        path.display(),
+        write_t0.elapsed()
+    );
     Ok(())
 }
 
@@ -183,6 +191,7 @@ fn drain_buffer<W: Write, T>(
 
 /// 完全命中返回 Ok(data)；需要重建时返回 `Err(VersionChanged)`。
 pub fn load(path: &Path, current_mame_version: &str) -> Result<CacheData, CacheError> {
+    let load_t0 = std::time::Instant::now();
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -225,11 +234,12 @@ pub fn load(path: &Path, current_mame_version: &str) -> Result<CacheData, CacheE
     // 都返回 None，半个界面会变成死的
     data.library.rebuild_indexes();
     dlog!(
-        "缓存: 命中 {}（{} 台机种, audited={}, {} 字节）",
+        "缓存: 命中 {}（{} 台机种, audited={}, {} 字节, 读+反序列化耗时 {:?}）",
         path.display(),
         data.library.len(),
         data.audited,
-        bytes.len()
+        bytes.len(),
+        load_t0.elapsed()
     );
     Ok(data)
 }

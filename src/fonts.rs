@@ -1,5 +1,6 @@
 //! Font loading: system CJK fonts with graceful fallback (design doc §8).
 
+use mvui::dlog;
 use egui::{FontData, FontDefinitions, FontFamily};
 
 const CJK_CANDIDATES: &[&str] = &[
@@ -34,7 +35,7 @@ fn first_usable(paths: &[&str]) -> Option<Vec<u8>> {
     for p in paths {
         match std::fs::read(p) {
             Ok(bytes) if looks_like_font(&bytes) => return Some(bytes),
-            Ok(_) => crate::app::perf_log(&format!("fonts: {p} is not a usable font")),
+            Ok(_) => dlog!("字体: {} 不是可用的 sfnt 字体，跳过", p),
             Err(_) => {}
         }
     }
@@ -57,8 +58,10 @@ pub fn install(ctx: &egui::Context) {
         }
         // nothing usable: log it, because the default UI language is Chinese and
         // the symptom (every glyph a box) is otherwise impossible to diagnose
-        None => crate::app::perf_log(
-            "fonts: no usable CJK font found — missing glyphs expected (tofu)",
+        None => dlog!(
+            "字体: 没找到可用的中文字体，界面会出现方框（tofu）——\
+             试过的路径: {}",
+            CJK_CANDIDATES.join(", ")
         ),
     }
     match first_usable(MONO_CANDIDATES) {
@@ -70,7 +73,10 @@ pub fn install(ctx: &egui::Context) {
                 fam.insert(0, MONO_FONT_KEY.to_owned());
             }
         }
-        None => crate::app::perf_log("fonts: no usable monospace font found"),
+        None => dlog!(
+            "字体: 没找到可用的等宽字体——试过的路径: {}",
+            MONO_CANDIDATES.join(", ")
+        ),
     }
     ctx.set_fonts(fonts);
 }

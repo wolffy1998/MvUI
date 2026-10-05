@@ -16,6 +16,7 @@ mod ui;
 
 use app::MameApp;
 use core::settings::GuiSettings;
+use mvui::dlog;
 
 fn main() -> Result<(), eframe::Error> {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -26,7 +27,25 @@ fn main() -> Result<(), eframe::Error> {
     // 不注册这个 sink，core 里那些 `dlog!` 就全是空操作，boot.log 里
     // 只会有 UI 侧的记录。必须在启动**早期**注册，连解析和审计之前
     // 的过程才记得到。
+    //
+    // **只有 debug 构建真的注册。** `set_sink` 在 release 下直接返回
+    // false 且不落点，于是 `dlog!` 与 `perf_log` 全是空操作，不创建
+    // `boot.log`、也不创建它所在的 `cache` 目录。这一行本身在两种
+    // 构建里都保留，省掉一处"只有 debug 编得过"的差异。
+    // 返回值只表示"落点是不是本次设上的"，两种构建都这么问：debug 下
+    // 恒为 true（唯一一次注册必然成功），release 下恒为 false。返回值
+    // 本身没有用途，所以直接丢掉，不留一个只为消警告的 `let _ =`。
     let _ = core::log::set_sink(app::perf_log);
+
+    // 配置根目录是日志自己的落点（`cache` 挂在它下面），所以这条记录
+    // 只能打在注册**之后**——顺序反了就是一次什么也没写下的调用。
+    // 用 `dlog!` 而不是 `if ENABLED { perf_log(format!(...)) }`：后者的
+    // `format!` 在实参位置求值，release 下即使分支不进也已经被要求
+    // 过一次（这里无所谓，但同样的写法抄到热路径上就是真开销）。
+    dlog!(
+        "启动: 配置根目录 {}",
+        core::settings::GuiSettings::cfg_prefix().display()
+    );
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

@@ -109,6 +109,20 @@ impl GuiSettings {
     /// 把写错误返回给调用方，而不是吞掉：保存失败曾经会静默丢掉
     /// 全部设置（README P3）。
     pub fn save(&self) -> std::io::Result<()> {
+        self.write(true)
+    }
+
+    /// 落盘但不记账。
+    ///
+    /// `ui::save_settings_periodic` 每 200 帧调一次 `save`，那是防崩溃
+    /// 丢设置的后台兜底，不是用户动作——每次都往 boot.log 里写一条
+    /// "保存 N 条"就是纯噪音（README P3 那条 4 MB 上限就是这么被喂大
+    /// 的）。用户真的改了设置时走 [`save`]，那才是值得记的事件。
+    pub fn save_quiet(&self) -> std::io::Result<()> {
+        self.write(false)
+    }
+
+    fn write(&self, log_it: bool) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -117,11 +131,13 @@ impl GuiSettings {
             out.push_str(&format!("{k}={v}\n"));
         }
         std::fs::write(&self.path, out)?;
-        dlog!(
-            "设置: 保存 {} 条到 {}",
-            self.map.len(),
-            self.path.display()
-        );
+        if log_it {
+            dlog!(
+                "设置: 保存 {} 条到 {}",
+                self.map.len(),
+                self.path.display()
+            );
+        }
         Ok(())
     }
 
