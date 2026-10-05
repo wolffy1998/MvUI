@@ -152,6 +152,12 @@ mod cols {
     /// 状态图标列：16×16 的图 + 一点余量。
     pub const ICON: f32 = 22.0;
 
+    /// 名称列右侧的内边距。
+    ///
+    /// 没有它，长文件名会紧贴"拥有"（截图里 `p060-ep1  拥有` 像一个词）。
+    /// 12px 是"能看出是两列"又不浪费横向空间的量。
+    pub const NAME_PAD: f32 = 12.0;
+
     /// 名称列之外**全部固定列的宽度之和**。
     ///
     /// 任何一段只要画到状态 / 图标，就必须用这个值来定位名称列宽度，
@@ -252,10 +258,12 @@ fn gap(ui: &mut egui::Ui, w: f32) {
 fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
     let color = state_color(r.state);
     ui.horizontal(|ui| {
-        // 名称：缺失时整行标红，所以名称本身也吃这个颜色
+        // 名称：缺失时整行标红，所以名称本身也吃这个颜色。
+        // 列宽减去 `NAME_PAD` —— 内边距放在**列宽里**而不是画在右侧，
+        // 这样"名称列起点"和"状态列起点"都不受影响，栅格照样严丝合缝。
         cell(
             ui,
-            cols::name_width(ui.available_width()),
+            (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
             egui::Label::new(egui::RichText::new(&r.name).monospace().color(color)),
         );
         // 状态词
@@ -330,7 +338,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
                 ui.horizontal(|ui| {
                     cell(
                         ui,
-                        cols::name_width(ui.available_width()),
+                        (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
                         egui::Label::new(
                             egui::RichText::new(&d.file_name).monospace().color(color),
                         ),
@@ -376,7 +384,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
             ui.horizontal(|ui| {
                 cell(
                     ui,
-                    cols::name_width(ui.available_width()),
+                    (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
                     egui::Label::new(egui::RichText::new(&b.name).monospace().strong().color(color)),
                 );
                 cell(
@@ -412,7 +420,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
             ui.horizontal(|ui| {
                 cell(
                     ui,
-                    cols::name_width(ui.available_width()),
+                    (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
                     egui::Label::new(egui::RichText::new(&d.name).monospace().color(color)),
                 );
                 cell(
@@ -436,6 +444,9 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
                     }
                     tail.push_str(&format!("({tag})"));
                 }
+                // 前导空格：这一列紧跟在16px 图标后面，不留的话描述会贴着
+                // 图标看成一团
+                let tail = format!(" {tail}");
                 cell(
                     ui,
                     cols::CRC + cols::REGION,
@@ -560,7 +571,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
                 ui.horizontal(|ui| {
                     cell(
                         ui,
-                        cols::name_width(ui.available_width()),
+                        (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
                         egui::Label::new(egui::RichText::new(&s.name).monospace().color(color)),
                     );
                     cell(
