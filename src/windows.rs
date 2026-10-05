@@ -1209,7 +1209,6 @@ fn draw_rom_audit(app: &mut MameApp, ctx: &egui::Context) {
         return;
     };
     let title = format!("{} — {}", app.tr("Audit ROM"), game);
-    let note = app.tr("just re-audited").to_string();
     let close_label = app.tr("Close").to_string();
     let bar_h = title_bar_height(ctx);
     let mut show = true;
@@ -1231,7 +1230,7 @@ fn draw_rom_audit(app: &mut MameApp, ctx: &egui::Context) {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    crate::rompanel::render(ui, app, &view, Some(note.clone()));
+                    crate::rompanel::render(ui, app, &view);
                 });
             ui.separator();
             ui.horizontal(|ui| {

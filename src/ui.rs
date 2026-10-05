@@ -1412,9 +1412,6 @@ impl MameApp {
             ui.weak(self.tr("Select a game to see its roms."));
             return;
         }
-        // 审计正在跑：这一轮的结论马上会变，但显示旧的更糟——用户会以为
-        // 刚跑完的审计没生效。所以明说。
-        let auditing = self.game_audit.is_some();
         if !self.rom_views.contains_key(game) {
             let view = {
                 let Some(lib) = self.lib.clone() else { return };
@@ -1436,14 +1433,9 @@ impl MameApp {
             self.rom_views.insert(game.to_string(), view);
         }
         let Some(view) = self.rom_views.get(game).cloned() else { return };
-        let note = if auditing {
-            Some(self.tr("auditing ROM..."))
-        } else {
-            Some(self.tr("from audit cache"))
-        };
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| crate::rompanel::render(ui, self, &view, note));
+            .show(ui, |ui| crate::rompanel::render(ui, self, &view));
     }
 
     pub fn documents_content(&mut self, ui: &mut egui::Ui, tab: usize) {

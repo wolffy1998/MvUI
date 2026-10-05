@@ -74,13 +74,20 @@ fn ui_weak_color() -> egui::Color32 {
 ///
 /// **不画 `separator()`** —— 面板窄，横向分隔线会把本来就窄的一行截成
 /// 两半，段头下面直接接行更紧凑。用户明确要求去掉这条线。
+/// 段头：`Rom:` / `Disks:` / `Bios:` / `引用设备:`……
+///
+/// **段头下面画一条横线**（之前删过，用户要加回来——没有它，段与段之间
+/// 只有 3px 的间距，一眼看不出哪里是一段的开始）。
+/// **段与段之间空一行**：`SECTION_GAP` 是"一行"的高度，跟在段头**上面**，
+/// 于是每个新段都先空一行再写标题 —— 视觉上段与段就分开了。
 fn section(ui: &mut egui::Ui, app: &MameApp, label: &str) {
-    ui.add_space(3.0);
+    // 顶部那行说明已经去掉了（见 `render`），所以这里只画标题和横线
     ui.label(
         egui::RichText::new(app.tr(label))
             .strong()
             .size(14.0),
     );
+    ui.separator();
 }
 
 /// 状态词的 i18n key。
@@ -162,6 +169,9 @@ mod cols {
     /// 就剩 98px，而 `10239811.u86` 这种 12 字符等宽名约需 100px —— 差2px
     /// 就折行。4px 足够看出是两列，又不把长文件名挤到第二行。
     pub const NAME_PAD: f32 = 4.0;
+
+    /// 段与段之间的空行高度（约一行文字）。
+    pub const SECTION_GAP: f32 = 18.0;
 
     /// 名称列之外**全部固定列的宽度之和**。
     ///
@@ -377,11 +387,10 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
 /// 一眼就看得见，重复一遍只是噪音；缺失与否在 Rom 段里每行都写着。
 ///
 /// **行与行之间一律不缩进。** 曾经这里每行都套一层 `ui.indent("rom_rows", …)`，而 `ui.indent` 是**按 id 存状态的**：同一个 id 在循环里反复调用，缩进会逐行累加（第二行起每行往右挪一点）。更糟的是缩进会吃掉 `available_width()`，于是 `cols::name_width()` 算出来的名称列宽度逐行变小、状态词起点逐行左移 —— 用户看到的"每到下一行就额外缩进、根本没对齐"就是这个。对齐由 `cols` 栅格保证，缩进只会碍事。
-pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_note: Option<String>) {
-    // 顶部只剩一行淡灰的说明（面板 / 弹窗的数据来源），其余全删。
-    if let Some(note) = header_note {
-        ui.label(egui::RichText::new(note).small().color(ui_weak_color()));
-    }
+pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
+    // **顶部不要那行"数据来源于审计缓存"。**
+    // 旧版写的是"数据来源"这类元信息，用户不要：面板里每一行的状态词已经
+    // 把结论说完了，顶部再写一遍"这数据是哪来的"是纯噪音。
 
     if view.is_empty() {
         ui.weak(app.tr("This game has no roms or disks."));
@@ -399,6 +408,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     // CHD 段：文件名 / 状态 / sha1。它只画到 crc 列，**剩下两列必须补空占位**，
     // 否则这段的状态词会比Rom 段靠右，整面板的"拥有"对不齐（历史 bug）。
     if !view.disks.is_empty() {
+        ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Disks:");
         for d in &view.disks {
             let color = state_color(d.state);
@@ -441,6 +451,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     // 集标题行也走栅格——用 `ui.label` 自然宽度的话，集名一长就把状态词
     // 推到右边，看起来又是错位的。
     if !view.bios.is_empty() {
+        ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Bios:");
         for b in &view.bios {
             let color = state_color(b.state);
@@ -476,6 +487,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     // 引用设备段：先列设备机种 + 状态 + 图标，再缩进列它们的 rom 文件。
     // rom 文件走 `rom_line`，所以设备的文件明细与 Rom 段列宽完全一致。
     if !view.devices.is_empty() || !view.device_roms.is_empty() {
+        ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Referenced devices:");
         for d in &view.devices {
             let color = state_color(d.state);
@@ -541,6 +553,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     // 那些段落的名称列落在同一条竖线上（行不再缩进，所以这里补的正是
     // 状态列那60px）。
     if !view.slots.is_empty() {
+        ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Device slots:");
         for s in &view.slots {
             tight_horizontal(ui, |ui, _row_width| {
@@ -576,6 +589,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     //与上面那段并存 —— 实测 `nes` 同时有 9 个 `<device>` 和 12 个 `<slot>`，
     //前者说"这台机器带什么设备"，后者说"这里能插什么"。同样没有状态列。
     if !view.slot_decls.is_empty() {
+        ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Slots:");
         for s in &view.slot_decls {
             tight_horizontal(ui, |ui, _row_width| {
@@ -615,6 +629,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     // Samples 段：样本机种名 + 拥有数 / 总数 + 状态 + 图标。
     // 列宽与 Rom 段共用，让整面板的状态词、图标落在同一条竖线上。
     if !view.samples.is_empty() {
+        ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Samples:");
         for s in &view.samples {
             let color = state_color(s.state);
