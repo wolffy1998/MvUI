@@ -104,6 +104,9 @@ pub fn parse_from_reader<R: BufRead>(
     // deviceInfo persists across machines in the original (no stack); we scope
     // it per machine but keep the "instance requires preceding device" rule
     let mut cur_device: Option<DeviceInfo> = None;
+    // 当前正在解析的 `<slot>`。`<slotoption>` 是它的子元素，得靠这个跨事件
+    // 挂回去；`<slot>` 本身是 START/END 成对的，END 时收尾。
+    let mut cur_slot: Option<SlotInfo> = None;
     let mut buf = Vec::with_capacity(8192);
     let mut count = 0usize;
 
@@ -130,6 +133,7 @@ pub fn parse_from_reader<R: BufRead>(
                         }
                     }
                     cur_device = None;
+                    cur_slot = None;
                     cur = Some(m);
                 }
                 b"device" => {
@@ -145,28 +149,12 @@ pub fn parse_from_reader<R: BufRead>(
                     }
                     cur_device = Some(d);
                 }
-                b"instance" => {
-                    if let Some(d) = cur_device.as_mut() {
-                        for a in e.attributes() {
-                            let a = a.map_err(|er| er.to_string())?;
-                            if a.key.as_ref() == b"name" {
-                                d.instance = attr_str(&a.value);
-                            }
-                        }
-                    }
-                    skip_subtree(&mut reader)?;
-                }
-                b"extension" => {
-                    if let Some(d) = cur_device.as_mut() {
-                        for a in e.attributes() {
-                            let a = a.map_err(|er| er.to_string())?;
-                            if a.key.as_ref() == b"name" {
-                                d.extensions.push(attr_str(&a.value));
-                            }
-                        }
-                    }
-                    skip_subtree(&mut reader)?;
-                }
+                // 注意：`<instance>` / `<extension>` 在 DTD 里都是 EMPTY
+                // （`<!ELEMENT instance EMPTY>`），**只**会走 Empty 事件。
+                // 这里原来有同名的 Start 分支，是死代码，导致 `instance` 永远
+                // 读不到 → End 分支的 `!d.instance.is_empty()` 守卫把整个
+                // `<device>` 丢掉（实测全库 `<device>` 收不到一条）。已挪到
+                // Empty 分支，别挪回来。
                 b"description" => {
                     if let Some(m) = cur.as_mut() {
                         m.description = read_text(&mut reader)?;
@@ -205,6 +193,19 @@ pub fn parse_from_reader<R: BufRead>(
                 }
                 b"version" => {
                     read_text(&mut reader)?; // header, ignored (version from -help)
+                }
+                b"slot" => {
+                    // `<slot name="ctrl1"> ... <slotoption .../> ... </slot>`
+                    //
+                    // 槽位本身只是个名字，真正有信息量的是里面的 option
+                    // （可选设备）。这里只**开**槽位，收到 `</slot>` 时才挂回
+                    // 机种（见 End 分支）；自闭合的 `<slot/>` 走 Empty 分支。
+                    //
+                    // 注意 DTD 里 `<slotoption>` 是 EMPTY（`<!ELEMENT slotoption
+                    // EMPTY>`），所以它**永远**走 Empty 事件，Start 分支里那个
+                    // 同名分支是死代码 —— 而且它调`skip_subtree` 会一路吃到下一
+                    // 个 End，把后面的 slotoption 吞掉。别加回来。
+                    cur_slot = Some(read_slot(e)?);
                 }
                 b"feature" | b"configuration" | b"dipswitch" | b"port" => {
                     skip_subtree(&mut reader)?;
@@ -311,6 +312,11 @@ pub fn parse_from_reader<R: BufRead>(
                     // （`"igs023:sprcol"`）保留后段。
                     if let Some(m) = cur.as_mut() {
                         let mut d = DeviceInfo::default();
+                        // 标记这是 `<device_ref>` 而非 `<device>`。判别依据是
+                        // XML 元素本身，不能靠 `kind == instance` 猜（见
+                        // `DeviceInfo::is_ref` 的注释：nes 的 9 个 `<device>`
+                        // 全会被猜错）。
+                        d.is_ref = true;
                         for a in e.attributes() {
                             let a = a.map_err(|er| er.to_string())?;
                             match a.key.as_ref() {
@@ -330,6 +336,44 @@ pub fn parse_from_reader<R: BufRead>(
                             }
                         }
                         m.devices.push(d);
+                    }
+                }
+                b"slot" => {
+                    // 自闭合的空槽位：`<slot name="nes_slot"/>`。它走 Empty
+                    // 事件而不是 Start+End，**只**在 Start 分支收尾会被静默
+                    // 丢掉 —— 实测 `nes.xml` 的 12 个 slot 里就有这种形态。
+                    if let Some(m) = cur.as_mut() {
+                        m.slots.push(read_slot(e)?);
+                    }
+                }
+                b"slotoption" => {
+                    // 理论上不会发生在 Empty 上（`slotoption` 总在 `<slot>` 里），
+                    // 但真出现了也不该 panic 或丢数据。
+                    if let Some(s) = cur_slot.as_mut() {
+                        s.options.push(read_slotoption(e)?);
+                    }
+                }
+                b"instance" => {
+                    // `<instance name="cartridge" briefname="cart"/>` —— DTD 标
+                    // EMPTY，所以只在 Empty 分支处理（见 Start 分支的注释）。
+                    if let Some(d) = cur_device.as_mut() {
+                        for a in e.attributes() {
+                            let a = a.map_err(|er| er.to_string())?;
+                            if a.key.as_ref() == b"name" {
+                                d.instance = attr_str(&a.value);
+                            }
+                        }
+                    }
+                }
+                b"extension" => {
+                    // `<extension name="nes"/>`，同样EMPTY（见上）。
+                    if let Some(d) = cur_device.as_mut() {
+                        for a in e.attributes() {
+                            let a = a.map_err(|er| er.to_string())?;
+                            if a.key.as_ref() == b"name" {
+                                d.extensions.push(attr_str(&a.value));
+                            }
+                        }
                     }
                 }
                 b"display" => {
@@ -448,6 +492,13 @@ pub fn parse_from_reader<R: BufRead>(
                         }
                     }
                 }
+                b"slot" => {
+                    // `</slot>`：收尾挂回机种。空槽位走的是 Empty 事件（见下），
+                    // 这里只处理 START/END 成对的那种。
+                    if let (Some(s), Some(m)) = (cur_slot.take(), cur.as_mut()) {
+                        m.slots.push(s);
+                    }
+                }
                 _ => {}
             },
             Ok(Event::Eof) => break,
@@ -564,6 +615,37 @@ fn read_text<R: BufRead>(reader: &mut Reader<R>) -> Result<String, String> {
 
 fn skip_subtree<R: BufRead>(reader: &mut Reader<R>) -> Result<(), String> {
     skip_subtree_buf(reader, &mut Vec::with_capacity(4096))
+}
+
+/// 从 `<slot name="...">` 的属性里读出槽位。
+///
+/// 单独抽出来是因为这个元素有两种事件形态（带 `slotoption` 时是 Start+End，
+/// 空槽位时是自闭合的 Empty），两处都要用同一份读取逻辑，否则改一处忘另一处
+/// 就会出现"带选项的槽位有名字、空槽位没名字"这种半截数据。
+fn read_slot(e: &quick_xml::events::BytesStart) -> Result<SlotInfo, String> {
+    let mut s = SlotInfo::default();
+    for a in e.attributes() {
+        let a = a.map_err(|er| er.to_string())?;
+        if a.key.as_ref() == b"name" {
+            s.name = attr_str(&a.value);
+        }
+    }
+    Ok(s)
+}
+
+/// 从 `<slotoption name="..." devname="..." default="yes"/>` 读出一个选项。
+fn read_slotoption(e: &quick_xml::events::BytesStart) -> Result<SlotOption, String> {
+    let mut o = SlotOption::default();
+    for a in e.attributes() {
+        let a = a.map_err(|er| er.to_string())?;
+        match a.key.as_ref() {
+            b"name" => o.name = attr_str(&a.value),
+            b"devname" => o.devname = attr_str(&a.value),
+            b"default" => o.default = a.value.as_ref() == b"yes",
+            _ => {}
+        }
+    }
+    Ok(o)
 }
 
 fn skip_subtree_buf<R: BufRead>(reader: &mut Reader<R>, buf: &mut Vec<u8>) -> Result<(), String> {
@@ -725,5 +807,59 @@ mod tests {
         assert!(!g.is_horz);
         let pi = lib.get_idx("pacmana").unwrap();
         assert!(lib.games[pi].clones.contains("pacman"));
+    }
+
+    /// `<slot>` 的两种写法都要解析：带 `<slotoption>` 的（START…END）和
+    /// 自闭合的空槽位（`<slot name="nes_slot"/>`，走 Empty 事件）。
+    ///
+    /// 片段逐字取自 `mame nes -listxml`。
+    #[test]
+    fn slots_are_parsed_in_both_the_paired_and_the_self_closing_form() {
+        let xml = br#"<mame build="x">
+<machine name="nes" sourcefile="nes.cpp">
+<description>Nintendo Entertainment System</description>
+<device_ref tag=":maincpu" name="rp2a03g"/>
+<device type="cartridge" tag="nes_slot" mandatory="1" interface="nes_cart">
+<instance name="cartridge" briefname="cart"/>
+<extension name="nes"/>
+<extension name="unf"/>
+</device>
+<slot name="ctrl1">
+<slotoption name="vboy" devname="nes_vboyctrl"/>
+<slotoption name="powerpad" devname="nes_powerpad" default="yes"/>
+</slot>
+<slot name="nes_slot">
+</slot>
+<slot name="empty_slot"/>
+</machine>
+</mame>"#;
+        let mut lib = parse_from_reader(&xml[..], false, &mut |_| {}).unwrap();
+        lib.complete_data();
+        let g = lib.get("nes").unwrap();
+
+        assert_eq!(g.slots.len(), 3, "带 option 的 + 成对空槽位 + 自闭合槽位");
+        assert_eq!(g.slots[0].name, "ctrl1");
+        assert_eq!(g.slots[0].options.len(), 2);
+        assert_eq!(g.slots[0].options[0].name, "vboy");
+        assert_eq!(g.slots[0].options[0].devname, "nes_vboyctrl");
+        assert!(!g.slots[0].options[0].default);
+        assert_eq!(g.slots[0].options[1].name, "powerpad");
+        assert!(g.slots[0].options[1].default, "default=\"yes\"");
+        assert_eq!(g.slots[1].name, "nes_slot");
+        assert!(g.slots[1].options.is_empty());
+        assert_eq!(g.slots[2].name, "empty_slot", "自闭合的也要留下");
+
+        // device_ref 与 device 必须能区分开：前者 is_ref，后者不是
+        assert_eq!(g.devices.len(), 2);
+        let r = g.devices.iter().find(|d| d.is_ref).expect("device_ref");
+        assert_eq!(r.kind, "rp2a03g");
+        let d = g
+            .devices
+            .iter()
+            .find(|d| !d.is_ref)
+            .expect("<device> 不是 device_ref");
+        assert_eq!(d.kind, "cartridge");
+        assert_eq!(d.instance, "cartridge", "instance 名恰好等于 type");
+        assert_eq!(d.extensions, vec!["nes".to_string(), "unf".to_string()]);
     }
 }

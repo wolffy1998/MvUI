@@ -51,23 +51,44 @@ pub enum RomState {
     /// 一个"永远不会有"的条目显示成绿色对勾是对的，但用户看到它时应当
     /// 知道原因。UI 决定用哪一种绿色。
     NoDump,
+    /// `baddump`：条目**有**，但内容是坏的（MAME 自己都标了坏 dump）。
+    ///
+    /// 必须和 `NoDump` 分开：一个是"永远不会有"（MAME 说得很清楚），一个是
+    /// "有但不能用"（真的坏文件）。用户拿到一份 baddump 的 rom 时该去重新
+    /// 下载，而不是等着它自己变好——所以它不能显示成绿色。
+    BadDump,
 }
 
 impl RomState {
     /// `available` 布尔 + `status` 字符串 → 展示状态。
     ///
-    /// `nodump` 的判定在**前**：审计把 nodump 一律置成 `available = true`
-    /// （`core/audit.rs` 的重置循环），所以只看 `available` 会把它并进
-    /// `Good`，而它其实压根不会被校验。
+    /// MAME 的 `status` 属性只有三个合法值（`-listxml` 的 DTD 写死了
+    /// `(baddump|nodump|good)`），所以这里穷举而不是猜子串。
+    ///
+    /// `nodump` / `baddump` 的判定都在**前**：审计把 nodump 一律置成
+    /// `available = true`（`core/audit.rs` 的重置循环），所以只看
+    /// `available` 会把它并进 `Good`，而它其实压根不会被校验。
     pub fn of(rom: &RomInfo) -> Self {
         if rom.is_nodump() {
             return RomState::NoDump;
+        }
+        if rom.is_baddump() {
+            return RomState::BadDump;
         }
         if rom.available {
             RomState::Good
         } else {
             RomState::Missing
         }
+    }
+
+    /// 这个状态算不算「这套文件齐了」。
+    ///
+    /// nodump 与 baddump 都算**有**（文件在盘上，只是 MAME 对它的评价不好），
+    /// 缺失和未审计才算不齐。BIOS 段 / 设备段 / 样本段的整体判定都走这里，
+    /// 免得三处各写一遍 `all()` 而在某处忘了排除 baddump。
+    pub fn counts_as_present(&self) -> bool {
+        matches!(self, RomState::Good | RomState::NoDump | RomState::BadDump)
     }
 }
 
@@ -113,6 +134,9 @@ impl RomState {
         if disk.is_nodump() {
             return RomState::NoDump;
         }
+        if disk.is_baddump() {
+            return RomState::BadDump;
+        }
         if disk.available {
             RomState::Good
         } else {
@@ -135,23 +159,63 @@ pub struct BiosRow {
     /// 从**这个 BIOS 自己的 `GameMeta`** 取，而不是从引用它的游戏取——一个
     /// BIOS 集在库里是独立一条记录（`is_bios`），审计已经单独标记过它。
     pub state: RomState,
+    /// 这一套底下的**实际 rom 文件**。
+    ///
+    /// 之前 BIOS 段只有"集名 + 描述"一行，用户看不到 BIOS 到底要哪些文件，
+    /// 而这些文件又因为带 `bios=` 属性被排除在 Rom 段之外——等于凭空
+    /// 消失。BIOS 集不是独立 machine（见 [`default_bios_names`]），它的
+    /// 文件就躺在这台机种自己的 `roms` 里，所以从这里筛出来。
+    pub roms: Vec<RomRow>,
 }
 
-/// 一个被引用设备（`DeviceInfo`）的展示行。
+/// 一行"引用设备"（`<device_ref name="..." tag="..."/>`，一引用一行）。
 ///
-/// 参考样式里"引用设备"段是 `m68000` / `timer` / `z80` 这种设备 ROM 集，
-/// 不是 `<device>` 标签本身。设备在库里同样是独立的 `GameMeta`
-/// （`is_device`），所以状态取自那条记录自己的 roms。
+/// 参考样式里这一段**不去重**：同一设备被多个槽引用就出现多行
+/// （`pgm2_memcard` 四个槽四行），顺序与引用顺序一致。状态取设备机种
+/// 自己的 roms——无 rom 的纯设备（screen / palette / nvram…）直接算
+/// "全部获得"。
 #[derive(Debug, Clone)]
 pub struct DeviceRow {
-    /// 设备机种名（`m68000` / `timer` / `igs023`）。
+    /// 设备机种名（`igs036` / `timer` / `pgm2_memcard`）。
     pub name: String,
-    /// 描述（`Device` / `Z80 CPU` 之类）。
+    /// 设备机种自己的描述（`IGS036` / `Z80 CPU`）。
+    ///
+    /// 从库里那条设备机种记录取（`is_device` 的独立 `GameMeta`），所以设备
+    /// 不在库里时这里是空串——但那一行仍要显示，否则用户以为没引用设备。
     pub description: String,
     /// 引用它的设备标签（`maincpu` / `igs023:sprcol`）。
     pub tag: String,
-    /// 该设备rom 的整体状态：全齐 / 缺东西 / 没审计。
+    /// 该设备 rom 的整体状态：全齐 / 缺东西 / 没审计。
     pub state: RomState,
+}
+
+/// 一行"设备"（`<device>` 槽位：可挂载的设备实例）。
+///
+/// 参考样式三列：设备类型（`memcard`）/ 实例名（`memcard1`）/ 扩展名
+/// （`pg2,bin,mem`，逗号连接）。
+#[derive(Debug, Clone)]
+pub struct DeviceSlotRow {
+    /// 设备类型（`<device type="...">`）。
+    pub kind: String,
+    /// 实例名（`<instance name="...">`，命令行 `-<instance>` 用的就是它）。
+    pub instance: String,
+    /// 扩展名，逗号连接（`pg2,bin,mem`）。
+    pub extensions: String,
+}
+
+/// `<slot>` 的一行：槽位名 + 可选设备数。
+///
+/// 与 `DeviceSlotRow` 的分工：那条是 `<device>`（本机自带的槽位设备），
+/// 这条是 `<slot>`（MAME 的槽位声明 + `<slotoption>` 可选设备列表）。
+/// 两者在同一台机器上并存 —— 实测 `nes` 有 9 个 `<device>` 与 12 个 `<slot>`。
+#[derive(Debug, Clone)]
+pub struct SlotRow {
+    /// 槽位名（`ctrl1`、`nes_slot`…）。
+    pub name: String,
+    /// 可选设备数（`<slotoption>` 条数）。
+    pub option_count: usize,
+    /// 逗号连接的选项名，空槽位则为空串。
+    pub options: String,
 }
 
 /// 一段样本音频（`sampleof` 指向的那个机种）。
@@ -183,15 +247,19 @@ pub struct RomInfoView {
     pub disks: Vec<DiskRow>,
     /// 依赖的 BIOS 集。
     pub bios: Vec<BiosRow>,
-    /// 引用设备。
+    /// 引用设备（`<device_ref>`，一引用一行、不去重）。
     pub devices: Vec<DeviceRow>,
     /// 被引用设备的 rom 明细。
     ///
-    /// 单独于 `devices` 是因为参考样式的版式：段头列设备机种名，段内的行
-    /// 是**设备自己的 rom 文件**（`mc68000.bin` / `igs023.rom` …），tag
-    /// 跟在行尾（`igs023:sprcol`）。两段在 UI 上拼起来读才顺，拆成两个
-    /// 数组比在渲染时重新遍历设备机种更省事。
+    /// 单独于 `devices` 是因为版式：段头列设备机种名，段内的行是**设备自己
+    /// 的 rom 文件**（`mc68000.bin` / `igs023.rom`…），tag 跟在行尾
+    /// （`igs023:sprcol`）。两段在 UI 上拼起来读才顺，拆成两个数组比在
+    /// 渲染时重新遍历设备机种更省事。
     pub device_roms: Vec<RomRow>,
+    /// 可挂载槽位（`<device>`：类型 / 实例 / 扩展名）。
+    pub slots: Vec<DeviceSlotRow>,
+    /// MAME 槽位（`<slot>`：槽位名 / 可选设备数）。
+    pub slot_decls: Vec<SlotRow>,
     /// 样本音频。
     pub samples: Vec<SampleRow>,
     /// 依赖的主 ROM 文件（`romof` 父集 / 祖父集）里那些**本机种没有**的
@@ -238,6 +306,7 @@ impl RomInfoView {
             && self.disks.is_empty()
             && self.bios.is_empty()
             && self.devices.is_empty()
+            && self.slots.is_empty()
             && self.samples.is_empty()
             && self.inherited.is_empty()
     }
@@ -301,38 +370,78 @@ fn default_bios_names(game: &GameMeta) -> Vec<String> {
     }
 }
 
-/// 该机种引用的设备机种名（去重、保持引用顺序）。
+/// 把 `game.devices` 拆成"引用设备"与"可挂载槽位"两摊。
 ///
-/// 设备机种名在 `DeviceInfo::kind` / `instance` 上（`core/listxml.rs` 的
-/// `device_ref` 解析把 `name` 属性填进这两处），而 `tag` 是**父机种里的标签
-/// 全名**（`maincpu` / `igs023:sprcol`）——两者语义不同，**不能**拿 tag 去查
-/// 库。读错会让整段"引用设备"永远空着。
-fn device_names(game: &GameMeta) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for d in &game.devices {
-        let name = if !d.kind.is_empty() {
-            d.kind.as_str()
-        } else if !d.instance.is_empty() {
-            d.instance.as_str()
+/// 这个列表里混着两种来源的条目，靠 `DeviceInfo::is_ref` 区分：
+///
+/// * `<device_ref name="igs036" tag=":maincpu"/>` —— "引用设备"段的行
+///   （一引用一行，**按机种名去重**：实测 `kov3` 的 `palette` 被 `sp_palette`/
+///   `tx_palette`/`bg_palette` 引用 3 次，不去重会刷出三行一样的）。
+/// * `<device type="memcard" tag="memcard_p1"><instance name="memcard1">`
+///   —— "设备"段的槽位行。
+///
+/// **别再用 `kind == instance` 判别**：解析器给 `device_ref` 同时填了
+/// `kind` 和 `instance`，而 `<device>` 的 `instance` 名字常常**恰好**等于
+/// `type`（`nes` 的 9 个 `<device>` 全是 `type="cartridge"` +
+/// `instance name="cartridge"`），判别式会把这些槽位全当成引用设备 ——
+/// 实测结果：引用设备段混进假设备，设备段全空。
+fn split_devices(
+    g: &GameMeta,
+) -> (
+    Vec<&crate::core::model::DeviceInfo>,
+    Vec<&crate::core::model::DeviceInfo>,
+) {
+    let mut refs = Vec::new();
+    let mut slots = Vec::new();
+    for d in &g.devices {
+        if d.is_ref {
+            refs.push(d);
         } else {
-            d.tag.split(':').next().unwrap_or(&d.tag).trim()
-        };
-        if name.is_empty() {
-            continue;
-        }
-        if seen.insert(name.to_string()) {
-            out.push((name.to_string(), d.tag.clone()));
+            slots.push(d);
         }
     }
-    out
+    (refs, slots)
 }
 
-/// 收集一台机种依赖的设备 rom 条目（不聚合，展开成行）。
+/// 引用设备行里要显示的**设备机种名**。
 ///
-/// 参考样式的"引用设备"段列的是 `m68000` / `timer` / `igs023:sprcol` 这样的
-/// **设备 rom 文件**，不是设备机种名本身。所以这里把设备机种的 `roms` 摊开
-/// 带上 `tag`，行内 `tag` 列就显示成 `igs023:sprcol`。
+/// `device_ref` 有 `name` 与 `instance` 两个属性，`split_devices` 判定
+/// "引用"用的就是 `kind == instance`；这里取 `kind`（它才是设备机种名），
+/// 兜底才用 `instance`，再兜底用 tag 的第一段。
+fn device_name_of(d: &crate::core::model::DeviceInfo) -> String {
+    if !d.kind.is_empty() {
+        d.kind.clone()
+    } else if !d.instance.is_empty() {
+        d.instance.clone()
+    } else {
+        d.tag.split(':').next().unwrap_or(&d.tag).trim().to_string()
+    }
+}
+
+/// 引用设备行的状态：设备机种自己的 roms 全齐（或本来就没有 rom）即
+/// "全部获得"。
+fn device_state(dev: Option<&GameMeta>, audited: bool) -> RomState {
+    let Some(d) = dev else {
+        // 设备机种不在库里（裁剪过的 dat）——仍要列出来，标成未知
+        return RomState::Unknown;
+    };
+    if !audited {
+        RomState::Unknown
+    } else if d.roms.is_empty() || d.roms.iter().all(|r| RomState::of(r).counts_as_present()) {
+        // 没有 rom 的设备（纯外部设备）不算缺失
+        RomState::Good
+    } else {
+        RomState::Missing
+    }
+}
+
+/// 引用设备段里，**设备自己那些 rom 文件**的行。
+///
+/// 段头列设备机种名（`m68000` / `igs036`），段内的行是设备机的真实 rom
+/// （`mc68000.bin`…）——用户要看到"这台游戏还要哪些设备的文件"，光有设备名
+/// 是不够的。
+///
+/// 按设备机种名分组：每行 `from` 放设备机种名，UI 拿它 match 回段头。
 fn device_rom_rows(
     lib: &GameLibrary,
     names: &[(String, String)],
@@ -343,10 +452,11 @@ fn device_rom_rows(
         let Some(gi) = lib.get_idx(dev_name) else {
             continue;
         };
-        let dev = &lib.games[gi];
-        for r in &dev.roms {
-            let mut row = row_of(r, Some(dev.name.clone()), Some(tag.clone()));
-            row.state = if audited { row.state } else { RomState::Unknown };
+        for r in &lib.games[gi].roms {
+            let mut row = row_of(r, Some(dev_name.clone()), Some(tag.clone()));
+            if !audited {
+                row.state = RomState::Unknown;
+            }
             out.push(row);
         }
     }
@@ -455,7 +565,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
         } else if members.is_empty() {
             // 声明了这一套却没有属于它的 rom（裁剪过的 dat）
             RomState::Unknown
-        } else if members.iter().all(|r| r.is_nodump() || r.available) {
+        } else if members.iter().all(|r| RomState::of(r).counts_as_present()) {
             RomState::Good
         } else {
             RomState::Missing
@@ -465,6 +575,19 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
             description: desc.description.clone(),
             is_default: true,
             state,
+            // 这一套实际要的文件。列出来是为了"BIOS 段和 CHD / Samples /
+            // 设备一个待遇"——用户能在同一个版式里看到每一段的明细，
+            // 而不是只看到一个集名就猜它要什么。
+            roms: members
+                .iter()
+                .map(|r| {
+                    let mut row = row_of(r, Some(g.name.clone()), Some(bname.clone()));
+                    if !audited {
+                        row.state = RomState::Unknown;
+                    }
+                    row
+                })
+                .collect(),
         });
     }
     // BIOS 的文件本身不该在 Rom 段里重复出现：`bios="v2"` 的条目归 BIOS 段。
@@ -486,40 +609,48 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
         own
     };
 
-    // 5) 引用设备：段头列设备机种名，段内列它们的 rom
-    let dev_names = device_names(g);
-    for (dev_name, tag) in &dev_names {
-        let Some(di) = lib.get_idx(dev_name) else {
-            // 设备机种不在库里（裁剪过的 dat）——仍要列出来，否则用户看到
-            // 一段空白以为没引用设备
-            view.devices.push(DeviceRow {
-                name: dev_name.clone(),
-                description: String::new(),
-                tag: tag.clone(),
-                state: RomState::Unknown,
-            });
+    // 5) 引用设备 + 设备槽位。两种来源见 `split_devices` 的注释。
+    let (dev_refs, dev_slots) = split_devices(g);
+    // 设备机种名去重（`palette` 在 kov3 里被引用三次），设备 rom 明细按它分组
+    let mut dev_names: Vec<(String, String)> = Vec::new();
+    let mut seen_dev: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for d in &dev_refs {
+        let dev_name = device_name_of(d);
+        if dev_name.is_empty() || !seen_dev.insert(dev_name.clone()) {
             continue;
-        };
-        let d = &lib.games[di];
-        let state = if !audited {
-            RomState::Unknown
-        } else if d.roms.is_empty() {
-            // 没有 rom 的设备（纯外部设备）不算缺失
-            RomState::Good
-        } else if d.roms.iter().all(|r| r.is_nodump() || r.available) {
-            RomState::Good
-        } else {
-            RomState::Missing
-        };
+        }
+        let state = device_state(lib.get(&dev_name), audited);
         view.devices.push(DeviceRow {
-            name: d.name.clone(),
-            description: d.description.clone(),
-            tag: tag.clone(),
+            name: dev_name.clone(),
+            description: lib
+                .get(&dev_name)
+                .map(|g| g.description.clone())
+                .unwrap_or_default(),
+            tag: d.tag.clone(),
             state,
         });
+        dev_names.push((dev_name, d.tag.clone()));
     }
-    // 设备 rom 明细挂在 devices 之外单独给：参考样式是"段头=设备名，
-    // 行=rom 文件"，两段拼起来读起来才顺
+    for d in dev_slots {
+        view.slots.push(DeviceSlotRow {
+            kind: d.kind.clone(),
+            instance: d.instance.clone(),
+            extensions: d.extensions.join(","),
+        });
+    }
+    // `<slot>` 是独立于 `<device>` 的另一种表达，只在真有槽位声明时出行。
+    for s in &g.slots {
+        view.slot_decls.push(SlotRow {
+            name: s.name.clone(),
+            option_count: s.options.len(),
+            options: s
+                .options
+                .iter()
+                .map(|o| o.name.clone())
+                .collect::<Vec<_>>()
+                .join(","),
+        });
+    }
     view.device_roms = device_rom_rows(lib, &dev_names, audited);
 
     // 6) 样本
@@ -593,6 +724,37 @@ mod tests {
         assert_eq!(RomState::of(&r), RomState::Missing);
         r.available = true;
         assert_eq!(RomState::of(&r), RomState::Good);
+    }
+
+    /// `baddump` 必须单独成一个状态，不能被并进 `Good`。
+    ///
+    /// MAME 的 `status` 只有 `good|baddump|nodump` 三值（`-listxml` 的 DTD
+    /// 写死的）。baddump 的文件**在盘上但内容是坏的**——审计会把它算成
+    /// `available`，所以如果只按 `available` 判，它会显示成绿色对勾，用户
+    /// 以为没问题，而实际跑起来是花的。必须显示成黄色「坏 dump」。
+    #[test]
+    fn a_baddump_is_not_reported_as_owned() {
+        let mut r = rom("bad.rom", 1, "maincpu");
+        r.status = "baddump".into();
+        // 审计把 baddump 算成"文件在"（available = true）
+        r.available = true;
+        assert_eq!(
+            RomState::of(&r),
+            RomState::BadDump,
+            "baddump 哪怕 available 也不能显示成拥有"
+        );
+        assert_ne!(
+            RomState::of(&r),
+            RomState::Good,
+            "并进 Good 会让用户以为坏文件能用"
+        );
+        // 但它**算文件在**——整体判定（BIOS 段 / 设备段）不能因此报缺失
+        assert!(
+            RomState::BadDump.counts_as_present(),
+            "baddump 的文件在盘上，整体判定要算齐"
+        );
+        assert!(!RomState::Missing.counts_as_present());
+        assert!(!RomState::Unknown.counts_as_present());
     }
 
     /// 没审计过时，缺失必须降级成 Unknown——否则冷启动后一屏红色。
@@ -675,12 +837,14 @@ mod tests {
                 kind: "m68000".into(),
                 instance: "m68000".into(),
                 tag: "maincpu".into(),
+                is_ref: true,
                 ..Default::default()
             },
             DeviceInfo {
                 kind: "igs023".into(),
                 instance: "igs023".into(),
                 tag: "igs023:sprcol".into(),
+                is_ref: true,
                 ..Default::default()
             },
             // 同一设备被引用两次（maincpu + aux）——只列一次
@@ -688,6 +852,7 @@ mod tests {
                 kind: "m68000".into(),
                 instance: "m68000".into(),
                 tag: "aux".into(),
+                is_ref: true,
                 ..Default::default()
             },
         ];
@@ -707,6 +872,97 @@ mod tests {
         assert_eq!(v.devices[1].tag, "igs023:sprcol", "tag 本身留着");
         assert_eq!(v.device_roms.len(), 1, "设备 rom 明细只一条");
         assert_eq!(v.device_roms[0].name, "mc68000.bin");
+    }
+
+    /// `<device>` 的 `instance` 名字**常常恰好等于** `type`，不能因此被当成
+    /// 引用设备。
+    ///
+    /// 真实样本（`mame nes -listxml`）：
+    /// ```xml
+    /// <device type="cartridge" tag="nes_slot" mandatory="1">
+    ///   <instance name="cartridge" briefname="cart"/>
+    /// </device>
+    /// ```
+    /// 判别式若写成 `kind == instance`，这条会被归进引用设备段 —— 实测 `nes`
+    /// 的 9 个 `<device>` **全部**命中，结果是引用设备段混进 cartridge /
+    /// floppydisk / midiin 这些假设备，而真正的设备段永远是空的。
+    #[test]
+    fn a_device_whose_instance_matches_its_type_is_not_a_device_ref() {
+        let mut g = meta("nes");
+        g.devices = vec![
+            // 真引用设备
+            DeviceInfo {
+                kind: "rp2a03g".into(),
+                instance: "rp2a03g".into(),
+                tag: "maincpu".into(),
+                is_ref: true,
+                ..Default::default()
+            },
+            // 可挂载槽位：type 与 instance 同名，正是判别式的坑
+            DeviceInfo {
+                kind: "cartridge".into(),
+                instance: "cartridge".into(),
+                tag: "nes_slot".into(),
+                extensions: vec!["nes".into(), "unf".into()],
+                ..Default::default()
+            },
+            DeviceInfo {
+                kind: "floppydisk".into(),
+                instance: "floppydisk".into(),
+                tag: "floppy0".into(),
+                extensions: vec!["fds".into()],
+                ..Default::default()
+            },
+        ];
+        let mut dev = meta("rp2a03g");
+        dev.is_device = true;
+        let lib = lib_with(vec![g, dev]);
+
+        let v = view_of(&lib, "nes", true);
+        assert_eq!(v.devices.len(), 1, "只有 rp2a03g 是引用设备");
+        assert_eq!(v.devices[0].name, "rp2a03g");
+        assert_eq!(v.slots.len(), 2, "两个 <device> 都要落到设备段");
+        assert_eq!(v.slots[0].kind, "cartridge");
+        assert_eq!(v.slots[0].extensions, "nes,unf");
+        assert_eq!(v.slots[1].kind, "floppydisk");
+    }
+
+    /// `<slot>` / `<slotoption>` 要能进面板，空槽位也保留一行。
+    #[test]
+    fn slot_declarations_carry_their_options() {
+        let mut g = meta("nes");
+        g.slots = vec![
+            crate::core::model::SlotInfo {
+                name: "ctrl1".into(),
+                options: vec![
+                    crate::core::model::SlotOption {
+                        name: "vboy".into(),
+                        devname: "nes_vboyctrl".into(),
+                        default: false,
+                    },
+                    crate::core::model::SlotOption {
+                        name: "powerpad".into(),
+                        devname: "nes_powerpad".into(),
+                        default: true,
+                    },
+                ],
+            },
+            // 空槽位：`<slot name="nes_slot"/>`，自闭合
+            crate::core::model::SlotInfo {
+                name: "nes_slot".into(),
+                options: Vec::new(),
+            },
+        ];
+        let lib = lib_with(vec![g]);
+
+        let v = view_of(&lib, "nes", true);
+        assert_eq!(v.slot_decls.len(), 2);
+        assert_eq!(v.slot_decls[0].name, "ctrl1");
+        assert_eq!(v.slot_decls[0].option_count, 2);
+        assert_eq!(v.slot_decls[0].options, "vboy,powerpad");
+        assert_eq!(v.slot_decls[1].name, "nes_slot");
+        assert_eq!(v.slot_decls[1].option_count, 0);
+        assert!(v.slot_decls[1].options.is_empty());
     }
 
     /// 默认 BIOS 从 `bios_sets[].is_default` 取，缺标记时退回第一套。

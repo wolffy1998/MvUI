@@ -4,7 +4,7 @@
 //! 可用性存在数据模型里（每个 rom/disk 的 `available` + 游戏的
 //! `available`），与原版 GameInfo 的字段对应。
 
-use crate::core::archive::{self, is_7z, is_zip};
+use crate::core::archive::{self, is_7z, is_archive, is_zip};
 use crate::core::library::GameLibrary;
 use crate::core::model::*;
 use crate::dlog;
@@ -595,6 +595,74 @@ pub fn audit_scope(lib: &GameLibrary, game: &str) -> Option<AuditScope> {
     Some(scope)
 }
 
+/// 按名字在 rompath 里直接定位归档，**不做整目录枚举**。
+///
+/// 单游戏审计的旧写法是对每个 rompath 做一次 `read_dir`，把 4.4 万个
+/// 条目逐个 `is_dir()` 一遍，只为了挑出其中 2~5 个。实测冷盘 13.3 s、
+/// 热缓存 5.8 s——这就是「审一个游戏要等 20 秒」的全部原因，而代价里
+/// 没有一分钱是花在真正读归档上的。
+///
+/// 这里换成**已知名字、反查路径**：范围里每台机种试
+/// `dir/<名>`（松散目录形态）、`dir/<名>.zip`、`dir/<名>.7z` 三种候选，
+/// 大约 30 次 `stat` 取代 44387 次，命中范围完全等价。
+///
+/// 保留的两条旧语义：
+/// - 同一台机种在**多个 rompath** 下都有包时都算数（去重按完整路径）。
+/// - 目录形态取整个 `file_name` 当名字，归档形态取 `file_stem`——与
+///   1.8.2 枚举时的取值口径一致。
+///
+/// 大小写：Windows/macOS 文件系统不敏感，磁盘上是 `GTMRUSA.ZIP` 用小写拼
+/// 也能找到。但正因为不敏感，**两种拼法会命中同一个文件**——所以去重必须
+/// 比路径而不是比字符串，否则同一个包会被扫两遍（白读一遍归档，还让
+/// `audit_cache` 里多一条一模一样的记录）。这里用 `canonicalize` 把两条
+/// 路径收敛成同一个再比。
+pub fn find_units_for(lib: &GameLibrary, gis: &[usize], rom_paths: &[PathBuf]) -> Vec<(PathBuf, usize)> {
+    let mut units: Vec<(PathBuf, usize)> = Vec::new();
+    // 见过哪些**真实文件**——Windows 上大小写不敏感，两种拼法会撞上同一个
+    // 包，按路径字符串去重是去不掉的，必须先 canonicalize 再比。
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for &gi in gis {
+        // 越界的 gi 要挡住而不是 panic：`audit_scope` 给的是合法下标，但
+        // 这个函数是 pub 的，headless 例子与将来的调用方未必都守约。
+        let Some(g) = lib.games.get(gi) else {
+            continue;
+        };
+        let name = &g.name;
+        // 库名可能已经是小写，也可能不是（`1943` / `PCB` 之类）。
+        // 两种拼法各试一遍，在不敏感的文件系统上只是多几次 stat。
+        let mut spellings: Vec<String> = vec![name.to_lowercase()];
+        let exact = name.clone();
+        if !spellings.iter().any(|s| *s == exact) {
+            spellings.push(exact);
+        }
+        for dir in rom_paths {
+            for sp in &spellings {
+                // 松散目录形态：`roms/game/gtmr/`
+                let as_dir = dir.join(sp);
+                if as_dir.is_dir() && seen.insert(real_path(&as_dir)) {
+                    units.push((as_dir, gi));
+                }
+                // 归档形态：`gtmr.zip` / `gtmr.7z`
+                for p in [dir.join(format!("{sp}.zip")), dir.join(format!("{sp}.7z"))] {
+                    if p.is_file() && is_archive(&p) && seen.insert(real_path(&p)) {
+                        units.push((p, gi));
+                    }
+                }
+            }
+        }
+    }
+    units
+}
+
+/// 用来做去重的"真实路径"。
+///
+/// `canonicalize` 会解析 `..`、大小写（Windows 上）和符号链接，所以
+/// `GTMRUSA.zip` 与 `gtmrusa.zip` 收敛成同一个值。失败（文件刚被删、
+/// 无权限）时退回原路径：宁可漏一次去重，也不要把整个查找变成失败。
+fn real_path(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 /// 只审计一台机种 + 它的依赖（右键/菜单「审计 ROM」）。
 ///
 /// 与 [`audit_all`] 的差别不只是范围小，有三处必须不同：
@@ -660,40 +728,8 @@ pub fn audit_game(
     }
 
     // 3) 找相关归档。范围外的包一个都不打开。
-    let wanted: std::collections::HashSet<String> = scope
-        .all()
-        .iter()
-        .map(|&gi| lib.games[gi].name.to_lowercase())
-        .collect();
-    let mut units: Vec<(PathBuf, usize)> = Vec::new();
-    for dir in rom_paths {
-        let Ok(rd) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            let p = e.path();
-            let stem = if p.is_dir() {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().to_lowercase())
-                    .unwrap_or_default()
-            } else if is_zip(&p) || is_7z(&p) {
-                p.file_stem()
-                    .map(|n| n.to_string_lossy().to_lowercase())
-                    .unwrap_or_default()
-            } else {
-                continue;
-            };
-            if !wanted.contains(&stem) {
-                continue;
-            }
-            if let Some(gi) = lib.get_idx(&stem) {
-                // 同一台机种可能在多个 rompath 下都有包，都算数
-                if !units.iter().any(|(up, _)| up == &p) {
-                    units.push((p, gi));
-                }
-            }
-        }
-    }
+    let gis = scope.all();
+    let units = find_units_for(lib, &gis, rom_paths);
     handle.set_total(units.len());
     dlog!(
         "单游戏审计: {} 待扫 {} 个归档（枚举 {:?}）",
@@ -1133,6 +1169,102 @@ mod tests {
         handle.set_enumerating(2, 5, 13824);
         let (_, _, cur) = handle.snapshot();
         assert_eq!(cur, "enum 2/5 dirs, 13824 units");
+    }
+
+    /// `find_units_for` 是 `read_dir` 全量枚举的**等价替换**，不是简化。
+    ///
+    /// 三种形态都要认（松散目录 / `.zip` / `.7z`），同一台机种在多个
+    /// rompath 下都有包时都要算数，去重要按完整路径（同一目录里
+    /// `pacman.zip` 和 `pacman` 目录是两个不同单元，都该收）。
+    /// 少收一个单元 = 那盘游戏的一部分永远显示成"缺失"，而且不报错。
+    #[test]
+    fn direct_lookup_finds_every_archive_shape_the_enumeration_would() {
+        let base = std::env::temp_dir().join("mvui-find-units-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let roms_a = base.join("roms_a");
+        let roms_b = base.join("roms_b");
+        std::fs::create_dir_all(&roms_a).unwrap();
+        std::fs::create_dir_all(&roms_b).unwrap();
+        // A：pacman 是松散目录；A：dkong 是 zip；B：dkong 是 7z（同机种，
+        // 两个 rompath 各一份，都算数）；qbert 谁都没有；还有一个无关的 zip
+        std::fs::create_dir_all(roms_a.join("pacman")).unwrap();
+        std::fs::write(roms_a.join("dkong.zip"), b"x").unwrap();
+        std::fs::write(roms_b.join("dkong.7z"), b"x").unwrap();
+        std::fs::write(roms_a.join("unrelated.zip"), b"x").unwrap();
+
+        let mut lib = GameLibrary::new("test".into());
+        for n in ["pacman", "dkong", "qbert", "unrelated"] {
+            lib.games.push(GameMeta {
+                name: n.into(),
+                ..Default::default()
+            });
+        }
+        lib.rebuild_indexes();
+
+        let gis = vec![lib.get_idx("pacman").unwrap(), lib.get_idx("dkong").unwrap()];
+        let units = find_units_for(&lib, &gis, &[roms_a.clone(), roms_b.clone()]);
+
+        let mut got: Vec<String> = units.iter().map(|(p, _)| p.display().to_string()).collect();
+        got.sort();
+        let mut want = vec![
+            roms_a.join("pacman").display().to_string(),
+            roms_a.join("dkong.zip").display().to_string(),
+            roms_b.join("dkong.7z").display().to_string(),
+        ];
+        want.sort();
+        assert_eq!(got, want, "目录形态 / zip / 7z / 多 rompath 都要收齐");
+        // 库下标也要对：单元是"哪个机种的包"，错了就是把 A 的结论写到 B 上
+        for (_, gi) in &units {
+            let n = lib.games[*gi].name.as_str();
+            assert!(n == "pacman" || n == "dkong", "不该扫到 {n}");
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 大小写：磁盘上是大写 `GTMRUSA.ZIP`、库里是 `GtmrUsa`。
+    ///
+    /// Windows/macOS 上不敏感所以必然命中，但 Linux 上不会——而写错时的
+    /// 症状是"明明有 rom 却说缺失"。所以两种拼法都得试。
+    ///
+    /// 同时钉住**只找到一个**：不敏感的文件系统上两种拼法指向同一个文件，
+    /// 按路径字符串去重是去不掉的，会把同一个包收两遍（白读一遍归档）。
+    #[test]
+    fn direct_lookup_tries_both_the_exact_and_the_lower_case_spelling() {
+        let base = std::env::temp_dir().join("mvui-find-units-case");
+        let _ = std::fs::remove_dir_all(&base);
+        let roms = base.join("roms");
+        std::fs::create_dir_all(&roms).unwrap();
+        std::fs::write(roms.join("GTMRUSA.zip"), b"x").unwrap();
+
+        let mut lib = GameLibrary::new("test".into());
+        lib.games.push(GameMeta {
+            name: "GtmrUsa".into(),
+            ..Default::default()
+        });
+        lib.rebuild_indexes();
+
+        let gis = vec![0];
+        let units = find_units_for(&lib, &gis, &[roms]);
+        assert_eq!(units.len(), 1, "两种拼法在 Windows 上撞同一个文件，只能收一次");
+        assert!(units[0].0.to_string_lossy().to_uppercase().contains("GTMRUSA.ZIP"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 空的 / 不存在的 rompath 不能 panic，也不能凭空造出单元。
+    ///
+    /// 顺带钉住越界的 `gi`：`find_units_for` 是 `pub` 的，调用方未必都像
+    /// `audit_scope` 那样给出合法下标。
+    #[test]
+    fn direct_lookup_tolerates_missing_rompaths_and_out_of_range_indexes() {
+        let lib = GameLibrary::new("test".into());
+        let units = find_units_for(
+            &lib,
+            &[0, 7], // 库是空的，两个下标都越界
+            &[std::env::temp_dir().join("mvui-definitely-not-here")],
+        );
+        assert!(units.is_empty());
     }
 
     /// 造一个真 zip，让单游戏审计跑在真的解析器上而不是桩上。

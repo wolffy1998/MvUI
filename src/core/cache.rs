@@ -17,7 +17,25 @@ use std::path::Path;
 
 /// 缓存文件魔数。9 字节，改了就会让所有旧缓存失效。
 pub const MAGIC: &[u8; 9] = b"MVUICACHE";
-pub const FORMAT_VERSION: u16 = 2;
+
+/// 缓存格式版本。
+///
+/// **每给 `GameMeta` / `DeviceInfo` / `RomInfo` 加一个字段就要 +1。**
+///
+/// 这不是形式主义：`bincode` 反序列化时**不认识新增的字段**，而它对"文件
+/// 结尾还有多余字节"是宽容的——所以旧缓存会**静默地**读出来，只是新增字段
+/// 全部留空。实测踩过：`device_ref` 的解析加上以后，全库 49676 台机器的
+/// `GameMeta::devices` 都是空的，"引用设备"面板永远空着，而没有任何报错。
+/// 用户看到的现象是"面板缺一段"，不是"缓存坏了"。
+///
+/// 换 MAME 版本本来就会让缓存重建（版本串变了），但那只在升级 MAME 时发生；
+/// 字段变更必须靠这个号，否则同一个 MAME 版本下改代码就永远读旧缓存。
+///
+/// 3 → 4：`DeviceInfo::is_ref` + `GameMeta::slots`。加 `is_ref` 尤其必须
+/// bump —— 判别式从"猜 `kind == instance`"换成读标记位，而旧缓存里这个位
+/// 全是false，于是**所有** `<device>` 都会被当成引用设备（正好把上一版刚
+/// 修对的东西又弄坏），比留空更难查。
+pub const FORMAT_VERSION: u16 = 4;
 
 /// [`save_library`] 的写缓冲大小。
 ///
@@ -467,6 +485,54 @@ mod tests {
             u16::from_le_bytes([buffered_bytes[MAGIC.len()], buffered_bytes[MAGIC.len() + 1]]),
             FORMAT_VERSION
         );
+    }
+
+    /// 给 `GameMeta` 加了字段之后，**旧缓存必须读不出来**（而不是静默地
+    /// 读出空字段）。
+    ///
+    /// 这是本文件最容易踩且最难发现的坑：`bincode` 对"结构体多了字段"
+    /// 完全宽容——反序列化读完已知字段就停，剩下没读掉的字节被忽略，
+    /// 新字段留空。实测踩过：`device_ref` 解析加上以后，全库 49676 台的
+    /// `devices` 全是空的，"引用设备"面板永远空着，而**没有任何报错**。
+    ///
+    /// 所以这个测试不能只断言"写出去的版本号等于常量"（换号它照样过），
+    /// 必须断言**换掉版本号真的会作废旧文件**。
+    #[test]
+    fn a_stale_format_version_is_rejected_not_silently_accepted() {
+        let dir = std::env::temp_dir().join("mvui-cache-ver-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("gamelist.cache");
+
+        let mut lib = GameLibrary::new("0.261".into());
+        lib.push(GameMeta {
+            name: "pacman".into(),
+            devices: vec![crate::core::model::DeviceInfo {
+                kind: "z80".into(),
+                instance: "z80".into(),
+                tag: "maincpu".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        save_library(&p, "0.261", &lib, true).unwrap();
+
+        // 现行版本读得回来，且字段没丢
+        let back = load(&p, "0.261").expect("现行版本应当可读");
+        assert_eq!(back.library.games[0].devices.len(), 1);
+
+        // 伪造一份"上一个版本号"的缓存：只改文件头那两字节，载荷一模一样
+        let mut bytes = fs::read(&p).unwrap();
+        bytes[MAGIC.len()..MAGIC.len() + 2].copy_from_slice(&(FORMAT_VERSION - 1).to_le_bytes());
+        let stale = dir.join("stale.cache");
+        fs::write(&stale, &bytes).unwrap();
+
+        assert!(
+            load(&stale, "0.261").is_err(),
+            "旧格式版本必须被拒绝：读成功意味着新增字段会被静默留空"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 造一个足够大的库，让两种写策略的差距肉眼可见。上面几个测试共用。

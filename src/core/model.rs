@@ -49,6 +49,14 @@ impl RomInfo {
     pub fn is_nodump(&self) -> bool {
         self.status.eq_ignore_ascii_case("nodump")
     }
+    /// `baddump`：条目有，但 MAME 标了内容是坏的。
+    ///
+    /// 与 `is_nodump` 成对存在，两个都不是 `good`——但含义相反：nodump 是
+    /// "永远不会有这个文件"，baddump 是"文件在，但是坏的"。用户拿到 baddump
+    /// 该去重下，拿到 nodump 只需要知道没辙。
+    pub fn is_baddump(&self) -> bool {
+        self.status.eq_ignore_ascii_case("baddump")
+    }
     pub fn effective_name(&self) -> &str {
         if self.merge.is_empty() { &self.name } else { &self.merge }
     }
@@ -69,6 +77,10 @@ pub struct DiskInfo {
 impl DiskInfo {
     pub fn is_nodump(&self) -> bool {
         self.status.eq_ignore_ascii_case("nodump")
+    }
+    /// `baddump` 的 CHD：文件在，但内容是坏的。与 `RomInfo::is_baddump` 同义。
+    pub fn is_baddump(&self) -> bool {
+        self.status.eq_ignore_ascii_case("baddump")
     }
 }
 
@@ -120,6 +132,37 @@ pub struct DeviceInfo {
     pub mounted_path: String,
     pub is_const: bool,
     pub extensions: Vec<String>,
+    /// 来自 `<device_ref>`（引用一个**设备机种**）还是 `<device>`（本机自带的
+    /// 可挂载设备 / 槽位）。
+    ///
+    /// 必须显式记，不能靠 `kind == instance` 猜：`<device type="cartridge">` 里
+    /// 的 `<instance name="cartridge">` 名字恰好与 `type` 相同，猜法会把 cartridge
+    /// 槽位误判成"引用设备"（实测 nes 的 9 个 `<device>` 全中），结果是引用设备
+    /// 段混进一堆假设备，而真正的设备段永远是空的。
+    pub is_ref: bool,
+}
+
+/// `<slot name="ctrl1">` —— 一个可插拔槽位（如 NES 的手柄口、卡带口）。
+///
+/// 这是 `<device>`（本机自带的槽位设备）之外的另一种表达：`<slot>` 只给槽位
+/// 名和**可选**设备列表，不含instance / extension。MAME 里两者并存，
+/// `nes` 同时有 9 个 `<device>` 和 12 个 `<slot>`。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlotInfo {
+    /// 槽位名（命令行 `<machine>:<slot>=<devname>` 用的就是它）。
+    pub name: String,
+    /// `<slotoption>`：可选设备。空槽位（只有 name 没有 option）也照样记一条。
+    pub options: Vec<SlotOption>,
+}
+
+/// `<slotoption name="vboy" devname="nes_vboyctrl" default="no"/>`。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SlotOption {
+    /// 选项名（显示用）。
+    pub name: String,
+    /// 设备机种名，可拿去 `GameLibrary::get` 查它的 rom。
+    pub devname: String,
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -153,6 +196,8 @@ pub struct GameMeta {
     pub controls: Vec<ControlInfo>,
     pub softwarelists: Vec<SoftwareListRef>,
     pub devices: Vec<DeviceInfo>,
+    /// `<slot>` 槽位（含 `<slotoption>` 可选设备）。
+    pub slots: Vec<SlotInfo>,
     pub driver: DriverStatus,
     pub palettesize: u32,
     pub ram_options: Vec<u32>,

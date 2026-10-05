@@ -391,11 +391,10 @@ impl MameApp {
                 image_dock_visible[i] = v == "1";
             }
         }
-// Rom 信息面板默认**不**开：它是新增的第 6 个文档面板，老用户升级后布局里
-        // 没有它，突然多一个标签会挤掉现有面板的位置。老 ini 里的 `text_docks`
-        // 只有 5 段，循环的 `.take` 正好把第 6 位留给这个默认值。
+// 文本面板（含第 6 个 Rom 信息）默认**全开**。用户要过 Rom 信息
+        // 默认勾选：它是审计结果的直接视图，面板本身只读缓存、不占后台线程，
+        // 没有理由藏着。ini 里存过的开关照旧优先（用户手动关掉就尊重它）。
         let mut text_dock_visible = [true; crate::core::dat::TEXT_DOCK_COUNT];
-        text_dock_visible[crate::core::dat::TEXT_DOCK_COUNT - 1] = false;
         if let Some(csv) = gui.get("text_docks") {
             // 必须按 `TEXT_DOCK_COUNT` 截断而不是写死 5：写死的话，用户开过
             // Rom 信息面板 → 存盘 6 段 → 下次启动又被截掉，开关根本存不住。
