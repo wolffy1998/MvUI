@@ -48,6 +48,13 @@ pub struct AuditHandle {
     /// 当前正在扫什么的尽力而为的标签。天生有竞态——同时有多个单元
     /// 在飞——所以故意和计数器分开，不塞进同一把锁里。
     current: Arc<Mutex<String>>,
+    /// Test-only：观察 `set_enumerating` 的每次调用。
+    ///
+    /// 不用它就测不到枚举阶段——`audit_all` 返回前那行
+    /// `set_progress(0, 0, "")` 会把标签清空（那是故意的，好让转发线程最后
+    /// 观察到"已完成"），所以跑完之后句柄里只剩空串。
+    #[cfg(test)]
+    enum_observer: Arc<std::sync::OnceLock<Box<dyn Fn(usize, usize, usize)>>>,
 }
 
 impl AuditHandle {
@@ -57,7 +64,15 @@ impl AuditHandle {
             finished: Arc::new(AtomicBool::new(false)),
             progress: Arc::new((AtomicUsize::new(0), AtomicUsize::new(0))),
             current: Arc::new(Mutex::new(String::new())),
+            #[cfg(test)]
+            enum_observer: Arc::new(std::sync::OnceLock::new()),
         }
+    }
+
+    /// Test-only：装上枚举阶段的观察者。
+    #[cfg(test)]
+    fn on_enumerating(&self, f: impl Fn(usize, usize, usize) + 'static) {
+        let _ = self.enum_observer.set(Box::new(f));
     }
     pub fn snapshot(&self) -> (usize, usize, String) {
         let (done, total) = &*self.progress;
@@ -88,6 +103,25 @@ impl AuditHandle {
     fn unit_done(&self, label: &str) {
         self.progress.0.fetch_add(1, Ordering::Relaxed);
         *self.current.lock().unwrap() = label.to_string();
+    }
+    /// 报"正在枚举待扫单元"，即 `total` 还不存在的那一段。
+    ///
+    /// 这是一个**独立于 `progress` 的阶段**，不是把 `total` 提前设成 1：
+    /// 枚举期间把分母设成任何猜测值都会让 UI 画出一个假的百分比，而
+    /// 百分比一旦出现又消失，比没有更糟。所以这里只报"第几个 rompath、
+    /// 已经收到多少单元"这种**绝对计数**，让状态栏在分母出现之前也有
+    /// 东西在动。
+    ///
+    /// 不用新原子量：这段是纯串行的（枚举就在 `audit_all` 的主线程上），
+    /// 而 `current` 本来就是"尽力而为的标签"、天生有竞态也不影响正确性。
+    /// 复用它零成本，且不必让 `AuditProgress` 事件多带一个字段。
+    pub fn set_enumerating(&self, done_dirs: usize, total_dirs: usize, units: usize) {
+        #[cfg(test)]
+        if let Some(obs) = self.enum_observer.get() {
+            obs(done_dirs, total_dirs, units);
+        }
+        *self.current.lock().unwrap() =
+            format!("enum {done_dirs}/{total_dirs} dirs, {units} units");
     }
     /// Stage-level progress for the console (MESS) pass, which is sequential.
     fn set_progress(&self, done: usize, total: usize, current: &str) {
@@ -198,7 +232,7 @@ fn scan_units(units: &[(PathBuf, usize)], lib: &GameLibrary, handle: &AuditHandl
                 }
             }
         }
-        handle.unit_done(&format!("{cur}/"));
+        handle.unit_done(&cur);
         results.push(marks);
     }
     results
@@ -274,7 +308,10 @@ pub fn audit_all(
     // 而是一次审计里"前若干秒没有百分比"的全部原因。
     let enum_t0 = std::time::Instant::now();
     let mut units: Vec<(PathBuf, usize)> = Vec::new();
-    for dir in rom_paths {
+    for (di, dir) in rom_paths.iter().enumerate() {
+        // 每个 rompath 报一次：分母还不存在，但"第几个目录 / 已收多少单元"
+        // 是真的，状态栏靠它证明自己还在动。
+        handle.set_enumerating(di, rom_paths.len(), units.len());
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => continue,
@@ -714,4 +751,78 @@ fn x(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::model::GameMeta;
+
+    /// 枚举阶段必须真的往句柄上报，否则状态栏在分母出现之前只能显示
+    /// "正在审计"——那正是这次要修的东西。
+    ///
+    /// 难点：`audit_all` **返回时**标签必然已被清空（结尾那行
+    /// `set_progress(0, 0, "")` 是故意的，好让转发线程最后观察到的是
+    /// "已完成"）。所以不能在跑完之后断言。
+    ///
+    /// 办法是把 `set_enumerating` 换成"记录调用序列"的版本：既验证它被
+    /// 调用过，也验证报的数是对的。这里用一个真实目录 + 一个不存在目录：
+    /// 前者让 `read_dir` 成功（枚举真的走了一遍），后者验证跳过分支也
+    /// 会上报。
+    #[test]
+    fn the_enumeration_stage_is_reported() {
+        let mut lib = GameLibrary::new("test".into());
+        lib.games.push(GameMeta {
+            name: "pacman".into(),
+            ..Default::default()
+        });
+        lib.rebuild_indexes();
+
+        let base = std::env::temp_dir().join("mvui-audit-enum-test");
+        let _ = std::fs::remove_dir_all(&base);
+        let real_dir = base.join("roms");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        let handle = AuditHandle::new();
+        // 枚举阶段每次上报都记下来
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        {
+            let seen = Arc::clone(&seen);
+            handle.on_enumerating(move |d, t, u| {
+                seen.lock().unwrap().push((d, t, u));
+            });
+        }
+        audit_all(
+            &mut lib,
+            &[real_dir, base.join("does-not-exist")],
+            &HashMap::new(),
+            &handle,
+        );
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "两个 rompath 各上报一次；拿到 {seen:?}");
+        assert_eq!(seen[0].0, 0, "第一个目录的序号");
+        assert_eq!(seen[0].1, 2, "rompath 总数");
+        assert_eq!(seen[0].2, 0, "还没收到任何单元");
+        assert_eq!(seen[1].0, 1, "第二个目录的序号");
+        // 第一个目录存在但空 -> 0 单元；第二个不存在 -> 跳过
+        assert_eq!(seen[1].2, 0, "两个目录都没有可扫单元");
+
+        // 分母在枚举之后才确定，而这两个目录里没有可扫单元
+        let (done, total, _) = handle.snapshot();
+        assert_eq!(total, 0, "没有可扫单元时分母是 0");
+        assert_eq!(done, 0, "没有单元被扫过");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 标签格式与 `ui::parse_enumerating` 是对偶的：那边改格式这边不改，
+    /// 状态栏会安静地退化成纯文案（不报错，所以必须两边都有测试）。
+    #[test]
+    fn the_enumeration_label_has_the_shape_the_ui_expects() {
+        let handle = AuditHandle::new();
+        handle.set_enumerating(2, 5, 13824);
+        let (_, _, cur) = handle.snapshot();
+        assert_eq!(cur, "enum 2/5 dirs, 13824 units");
+    }
 }

@@ -689,13 +689,11 @@ impl MameApp {
         //
         // `self.mame` is the authority on a *validated* binary, so write it back
         // when the map has dropped it. Doing this here fixes the loop at the
-        // write side, which covers every caller of `save_settings`.
-        if let Some(m) = &self.mame {
-            let path = m.path.to_string_lossy().to_string();
-            if self.gui.get("mame_binary") != Some(path.as_str()) {
-                self.gui.set("mame_binary", path);
-            }
-        }
+        // write side, which covers every caller of `save_settings`. The rule
+        // itself lives in `settings::ensure_mame_binary` so it can be tested
+        // without a disk-backed settings table.
+        let validated = self.mame.as_ref().map(|m| m.path.to_string_lossy().to_string());
+        crate::core::settings::ensure_mame_binary(&mut self.gui.map, validated.as_deref());
         self.gui.set("list_mode", self.list_mode.key());
         self.gui.set_bool("sort_reverse", self.sort_reverse);
         self.gui.set("sort_column", self.sort_column.to_string());

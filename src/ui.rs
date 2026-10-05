@@ -19,6 +19,32 @@ pub(crate) fn percent(done: usize, total: usize) -> f32 {
     (done as f32 / total as f32 * 100.0).clamp(0.0, 100.0)
 }
 
+/// 解析审计"枚举中"阶段的标签，认出 `core::audit::AuditHandle::
+/// set_enumerating` 写的 `enum 2/5 dirs, 13824 units`。
+///
+/// 返回 `(已扫目录数, 目录总数, 已收单元数)`，任何一段认不出来就是
+/// `None` —— 调用方据此退回纯文案。**认不出必须安全失败**：这个标签走
+/// 的是一把 `Mutex<String>`，格式万一变了，状态栏该退化成"正在审计"，
+/// 而不是把一段原始英文 `enum 2/5 dirs` 甩给用户看。
+pub(crate) fn parse_enumerating(cur: &str) -> (Option<usize>, Option<usize>, Option<usize>) {
+    // `?` 只能用在返回 Option 的函数里，所以内部先算一个 Option，
+    // 再摊成三元组返回。
+    let parsed: Option<(usize, usize, usize)> = (|| {
+        let rest = cur.strip_prefix("enum ")?;
+        let (dirs, rest) = rest.split_once(" dirs")?;
+        // 没有 '/' 就是格式不对，整体认不出——不返回"半个结果"。
+        let (d, t) = dirs.split_once('/')?;
+        let done = d.trim().parse::<usize>().ok()?;
+        let total = t.trim().parse::<usize>().ok()?;
+        let rest = rest.trim_start().strip_prefix(", ")?;
+        let units = rest.strip_suffix(" units")?.trim().parse::<usize>().ok()?;
+        Some((done, total, units))
+    })();
+    // `cur` 不是我们写的那个标签（空串、某个游戏名、格式漂移后的串）
+    // 时安静地退化：调用方据此显示纯文案。
+    parsed.map_or((None, None, None), |(d, t, u)| (Some(d), Some(t), Some(u)))
+}
+
 /// where Help ▸ Documentation points
 const HELP_URL: &str = "https://bbs.xqemu.cn/";
 
@@ -1506,7 +1532,7 @@ impl MameApp {
                     if !self.running.is_empty() {
                         ui.colored_label(icons::GREEN, "▶ MAME");
                     }
-                    let (done, total, _cur) = if let Some(h) = &self.audit_handle {
+                    let (done, total, cur) = if let Some(h) = &self.audit_handle {
                         h.snapshot()
                     } else if self.boot_auditing {
                         self.audit_stage.clone()
@@ -1527,7 +1553,23 @@ impl MameApp {
                             self.tr("Auditing")
                         ));
                     } else if self.boot_auditing || self.audit_handle.is_some() {
-                        ui.weak(self.tr("Auditing"));
+                        // 分母还不存在的那一段：正在枚举待扫单元
+                        // （`set_total` 排在全量 `read_dir` 之后，见
+                        // `core/audit.rs`）。这段过去只打"正在审计"四个
+                        // 字，在冷盘上十几秒到几十秒看起来像卡死。
+                        // `cur` 形如 `enum 2/5 dirs, 13824 units`。
+                        let (dirs_done, dirs_total, units) = parse_enumerating(&cur);
+                        // 目录数已知就报"第几个/共几个 + 已收单元"，
+                        // 认不出（空串、格式漂移）就退回纯文案。
+                        let label = match (dirs_done, dirs_total, units) {
+                            (Some(d), Some(t), Some(u)) if t > 0 => format!(
+                                "{} {} {d}/{t} · {u}",
+                                self.tr("Auditing"),
+                                self.tr("scanning"),
+                            ),
+                            _ => self.tr("Auditing"),
+                        };
+                        ui.weak(label);
                     }
                     // No cancel affordance: the audit runs in the background and
                     // is not something the user should have to babysit. It is
@@ -1633,6 +1675,45 @@ mod tests {
         assert_eq!(percent(1, 0), 0.0);
         // 计数冲过总数（并发下的常见抖动）不能显示 100% 以上
         assert_eq!(percent(999, 100), 100.0);
+    }
+
+    /// `parse_enumerating` 必须认出 `set_enumerating` 写的格式。
+    ///
+    /// 两侧是对偶的：`core/audit.rs` 改格式而这里没跟上，状态栏就会
+    /// 静默退化成"正在审计"（这正是它认不出时的行为，不报错）。
+    #[test]
+    fn parse_enumerating_reads_the_audit_label() {
+        let (d, t, u) = parse_enumerating("enum 2/5 dirs, 13824 units");
+        assert_eq!(d, Some(2));
+        assert_eq!(t, Some(5));
+        assert_eq!(u, Some(13824));
+        // 第一个目录、还没收到单元
+        assert_eq!(
+            parse_enumerating("enum 0/3 dirs, 0 units"),
+            (Some(0), Some(3), Some(0))
+        );
+    }
+
+    /// 认不出就干净地退化成 `None`，**绝不把原始标签甩给用户**。
+    ///
+    /// 这个标签走的是一把 `Mutex<String>`，格式一旦漂移（比如有人把
+    /// "units" 改成 "romsets"），状态栏必须安静地退回纯文案。
+    #[test]
+    fn parse_enumerating_rejects_anything_else() {
+        for s in [
+            "",
+            "pacman.zip",
+            "enum 2/5 dirs",              // 少了单元段
+            "enum 2/5 dirsets, 10 units", // 段名变了
+            "scan 2/5 dirs, 10 units",    // 前缀变了
+            "enum x/y dirs, 10 units",    // 不是数字
+        ] {
+            assert_eq!(
+                parse_enumerating(s),
+                (None, None, None),
+                "{s:?} 不该被认成枚举进度"
+            );
+        }
     }
 
     fn line(t: &str) -> crate::core::dat::DatLine {

@@ -166,6 +166,39 @@ impl GuiSettings {
     }
 }
 
+/// 键名：已校验通过的 MAME 主程序路径。
+pub const KEY_MAME_BINARY: &str = "mame_binary";
+
+/// 把**已校验通过**的 MAME 路径补回设置表，返回是否需要补写。
+///
+/// `GuiSettings::save` 是整表覆盖写：表里**缺**的键落盘后就是永久缺失。
+/// `mame_binary` 曾经就这样丢过一次——某次启动没读到它（ini 不存在或
+/// 不可读），周期保存又照着这张空表把文件重写了一遍，于是之后每次启动
+/// 都没有 `mame_binary`，回退到 `mamep.exe`、校验失败、**又弹出选择框**。
+/// 用户看到的现象是"程序每次都忘我的 MAME 路径"。
+///
+/// 所以写盘前必须拿**已校验的**那份权威（`app` 里的 `self.mame`）把它
+/// 补回去。抽成独立函数是为了能测：以前这段逻辑埋在 `write_settings`
+/// 里，而那张表和磁盘路径都难在单测里搭出来。
+///
+/// 返回 `true` 表示表里原本没有、现已补上，调用方可以据此记账。
+pub fn ensure_mame_binary(
+    map: &mut std::collections::BTreeMap<String, String>,
+    validated: Option<&str>,
+) -> bool {
+    let Some(path) = validated else { return false };
+    if path.is_empty() {
+        return false;
+    }
+    match map.get(KEY_MAME_BINARY) {
+        Some(cur) if cur == path => false,
+        _ => {
+            map.insert(KEY_MAME_BINARY.to_string(), path.to_string());
+            true
+        }
+    }
+}
+
 /// 缓存目录助手，挂在配置根目录下。
 impl GuiSettings {
     /// `<配置根>/cache`。清单缓存、审计缓存、boot.log 都住这里。
@@ -173,5 +206,74 @@ impl GuiSettings {
         let p = GuiSettings::cfg_prefix().join("cache");
         let _ = std::fs::create_dir_all(&p);
         p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map_of(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// 事故回归：`mame_binary` 曾从 ini 里消失，之后每次启动都弹出选择框。
+    ///
+    /// 触发路径是 `save` 整表覆盖写 —— 表里缺键 = 落盘后永久缺失。
+    /// 写盘前拿已校验的路径补回去，本测试钉住这一步。
+    #[test]
+    fn missing_mame_binary_is_restored_from_the_validated_one() {
+        let mut m = map_of(&[("language", "zh_CN")]);
+        assert!(
+            ensure_mame_binary(&mut m, Some("D:/mame/mame.exe")),
+            "表里没有 mame_binary 时必须补上并报告改动"
+        );
+        assert_eq!(
+            m.get(KEY_MAME_BINARY).map(String::as_str),
+            Some("D:/mame/mame.exe")
+        );
+        // 别的键一个都不能少——这张表是整表写出去的
+        assert_eq!(m.get("language").map(String::as_str), Some("zh_CN"));
+    }
+
+    /// 值已经一致时不许报改动，否则每次保存都记一条无意义的变化。
+    #[test]
+    fn an_unchanged_mame_binary_is_left_alone() {
+        let mut m = map_of(&[(KEY_MAME_BINARY, "D:/mame/mame.exe")]);
+        assert!(
+            !ensure_mame_binary(&mut m, Some("D:/mame/mame.exe")),
+            "同一个路径不该算作改动"
+        );
+        assert_eq!(m.len(), 1);
+    }
+
+    /// 用户换了 MAME 路径时必须跟着更新，不能因为"已经有值了"就跳过。
+    #[test]
+    fn a_changed_mame_binary_overwrites_the_old_one() {
+        let mut m = map_of(&[(KEY_MAME_BINARY, "D:/old/mame.exe")]);
+        assert!(ensure_mame_binary(&mut m, Some("D:/new/mame.exe")));
+        assert_eq!(
+            m.get(KEY_MAME_BINARY).map(String::as_str),
+            Some("D:/new/mame.exe")
+        );
+    }
+
+    /// 没有已校验的二进制时**不许动表**。
+    ///
+    /// 这条最容易写错：`None`（还没选）不等于"路径为空"，把空串写进
+    /// `mame_binary` 会让下一次启动读到一个非空但无效的路径。
+    #[test]
+    fn an_unvalidated_binary_never_touches_the_table() {
+        let mut m = map_of(&[(KEY_MAME_BINARY, "D:/mame/mame.exe")]);
+        assert!(!ensure_mame_binary(&mut m, None), "None 不该改表");
+        assert!(!ensure_mame_binary(&mut m, Some("")), "空串不该改表");
+        assert_eq!(
+            m.get(KEY_MAME_BINARY).map(String::as_str),
+            Some("D:/mame/mame.exe"),
+            "已有的有效路径必须原样保留"
+        );
     }
 }
