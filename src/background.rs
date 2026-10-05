@@ -579,6 +579,11 @@ pub fn run_audit(
 ///
 /// 锁顺序照旧：先 `opts` 读 rompath（**不持锁**），再 `lib`。反过来的话会和
 /// `MameApp::ensure_chain`（opts → lib）死锁。
+///
+/// **当前没有菜单入口**（2026-10-05 用户要求把菜单里的审计项删掉，统一走
+/// 「刷新档案」）。整套保留：它是单游戏秒级审计的唯一实现，
+/// `core::audit::find_units_for` 的提速（5.8s → 0.002s）就是为它做的。
+#[allow(dead_code)]
 pub fn run_game_audit(
     lib: SharedLib,
     opts: SharedOpts,
@@ -966,6 +971,11 @@ fn is_xml(path: &std::path::Path) -> bool {
 }
 
 /// pump mame -verifyroms/-verifysamples output (origin: MameExeRomAuditor)
+///
+/// **当前没有菜单入口**（见 `run_game_audit` 的注释：菜单里的审计项已按
+/// 用户要求删除，统一走「刷新档案」）。这是 1.8.2 那条原样搬过来的输出泵，
+/// 保留以便将来接回 MAME 原生校验。
+#[allow(dead_code)]
 pub fn run_verify(mame: MameBinary, args: Vec<String>, tx: Sender<AppEvent>, ctx: egui::Context) {
     thread::spawn(move || {
         match mame.spawn_run(&args) {

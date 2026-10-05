@@ -545,6 +545,14 @@ impl MameApp {
         self.show_cmd = true;
     }
 
+    /// 跑MAME 自己的 `-verifyroms` / `-verifysamples`，把 stdout 收进
+    /// `verify_lines`。
+    ///
+    /// **当前没有菜单入口**（2026-10-05 用户要求删掉「审计 Rom」「审计全部
+    /// Rom」「审计全部样本」）。这三条路最后都等价于「刷新档案」(F5) 的
+    /// `refresh_all`，留两个入口只会让人以为是两件事。
+    /// 代码留着：要接回 MAME 原生校验输出（比审计缓存更权威）时直接启用。
+    #[allow(dead_code)]
     pub fn verify(&mut self, current_only: bool, samples: bool) {
         let Some(mame) = self.mame.clone() else { return };
         let mut args = vec![if samples { "-verifysamples".to_string() } else { "-verifyroms".to_string() }];
@@ -1421,22 +1429,9 @@ impl MameApp {
                             close = true;
                         }
                         ui.separator();
-                        // origin: `menuContext->addAction(win->actionAudit)`
-                        // between "remove from folder" and the two properties
-                        // entries — a top-level item, not inside the Audit
-                        // submenu, so that it reads as the row's own action
-                        let audit_rom = self.tr("Audit ROM");
-                        if ui
-                            .add_enabled(
-                                self.has_game() && self.can_audit(),
-                                crate::ui::button(audit_rom),
-                            )
-                            .clicked()
-                        {
-                            self.start_game_audit();
-                            close = true;
-                        }
-                        ui.separator();
+                        // 原来这里还有一项「审计 Rom」调 `start_game_audit()`，
+                        // 与文件菜单的「刷新档案」(F5) 同源（都走审计），
+                        // 用户要求删掉。下面直接是「导出列表」。
                         self.audit_submenu(ui);
                         ui.separator();
                         let src = self.src_properties_label();

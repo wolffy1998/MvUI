@@ -71,14 +71,16 @@ fn ui_weak_color() -> egui::Color32 {
 }
 
 /// 段头：`Rom:` / `Bios:` / `引用设备:`。
+///
+/// **不画 `separator()`** —— 面板窄，横向分隔线会把本来就窄的一行截成
+/// 两半，段头下面直接接行更紧凑。用户明确要求去掉这条线。
 fn section(ui: &mut egui::Ui, app: &MameApp, label: &str) {
-    ui.add_space(6.0);
+    ui.add_space(3.0);
     ui.label(
         egui::RichText::new(app.tr(label))
             .strong()
-            .size(15.0),
+            .size(14.0),
     );
-    ui.separator();
 }
 
 /// 状态词的 i18n key。
@@ -156,7 +158,10 @@ mod cols {
     ///
     /// 没有它，长文件名会紧贴"拥有"（截图里 `p060-ep1  拥有` 像一个词）。
     /// 12px 是"能看出是两列"又不浪费横向空间的量。
-    pub const NAME_PAD: f32 = 12.0;
+    /// **别设太大。** 面板只有 512px 宽时名称列只剩 110px，扣掉 12px 内边距
+    /// 就剩 98px，而 `10239811.u86` 这种 12 字符等宽名约需 100px —— 差2px
+    /// 就折行。4px 足够看出是两列，又不把长文件名挤到第二行。
+    pub const NAME_PAD: f32 = 4.0;
 
     /// 名称列之外**全部固定列的宽度之和**。
     ///
@@ -208,37 +213,58 @@ fn icon_cell(ui: &mut egui::Ui, state: RomState) -> egui::Response {
     resp
 }
 
-/// 画一个**左对齐**的定宽单元格。
+/// 画一个**左对齐的定宽单元格**。
 ///
-/// **不能用 `add_sized`——它会把内容居中。** 源码（egui 0.29 `ui.rs`）：
-/// ```ignore
-/// let layout = Layout::centered_and_justified(self.layout().main_dir());
-/// self.allocate_ui_with_layout(max_size.into(), layout, |ui| ui.add(widget))
-/// ```
-/// `centered_and_justified` 意味着文字在给定宽度里**居中**。于是名称列拿到
-/// 500px、文件名只有 70px 宽时，文字落在 215..285 而不是 0..70 —— 整列
-/// 看起来缩进了一大截（实测名称起点在面板左边缘右侧 237px 处）。
-/// 而且它对**同一段的所有列**都居中，短内容的列偏移各不相同，列与列之间
-/// 也就对不齐了。
+/// **不能用 `add_sized`** —— 它内部是 `Layout::centered_and_justified`，
+/// 文字在给定宽度里**居中**：名称列拿到 500px、文件名只有 70px 宽时，
+/// 文字落在 215..285 而不是 0..70，整列看起来缩进了一大截（实测名称起点
+/// 飘到面板左边缘右侧 237px 处）。而且它对同一段的所有列都居中，短内容的
+/// 列偏移各不相同，列与列之间也就对不齐了。
 ///
-/// `allocate_ui_with_layout` + `Layout::left_to_right(Horizontal)` 才是
-/// "占住w 像素、内容从左边开始"的语义。
-fn cell(ui: &mut egui::Ui, w: f32, label: egui::Label) {
+/// **`allocate_ui_with_layout` 同样不能用——它按内容撑开。** 它的文档写得很直白：
+///
+/// > Allocated the given space and then adds content to that space.
+/// > **If the contents overflow, more space will be allocated.**
+///
+/// 实现最后是 `advance_after_rects(child_ui.min_rect(), …)`，而 `min_rect`
+/// 会被里面的 `Label` 顶大。Rom 文件名短看不出来，设备名一长就现原形：
+/// `gfxdecode`（9 字符）把名称列顶宽 30px，"拥有"就比 `z80` 那行右移 30px，
+/// 整段状态词连成一条斜线（实测起点 437 / 399 / 463 / 425 / 477 / 437）。
+///
+/// **正确顺序：先 `allocate_space(w)` 死占 w 像素**（它只推进游标，
+/// 绝不回看之后画了什么，所以列宽是刚性的），**再在占好的 rect 里自己排版
+/// 画字**。内容超宽就在 `w` 内换行，绝不溢出到下一列。
+fn cell(ui: &mut egui::Ui, w: f32, text: egui::RichText) {
     if w <= 0.0 {
         return;
     }
-    // `Layout::left_to_right(Align)` 的 `main_align` 是 **`Align::Center`**，
-    // 主轴照样居中；参数只管交叉轴。所以这里直接改字段：主轴 `Min`（贴左）、
-    // 交叉轴 `Min`（贴顶）。这才是"占住 w 像素、内容从左上角开始"。
-    let layout = egui::Layout {
-        main_dir: egui::Direction::LeftToRight,
-        main_wrap: false,
-        main_align: egui::Align::Min,
-        main_justify: false,
-        cross_align: egui::Align::Min,
-        cross_justify: false,
-    };
-    ui.allocate_ui_with_layout(egui::vec2(w, 0.0), layout, |ui| ui.add(label));
+    // 1) 排版。`RichText` 的字段全是私有的，唯一能把样式带出来的公开
+    //    入口是 `append_to`（`Label` 内部也这么用）：把文字追加到一个
+    //    `LayoutJob` 上，字号 / 等宽 / 颜色 / 粗体都跟过去。
+    //    `max_width` = **列宽**：超宽就在列内换行。这是必须的——给
+    //    `f32::MAX`（不换行）时长文件名会直接压到状态列上，
+    //    `gambs2m_01.05.u3` 和 `10239811.u86` 都顶掉了"拥有"两个字。
+    let style = ui.style().clone();
+    let mut job = egui::text::LayoutJob::default();
+    text.append_to(
+        &mut job,
+        &style,
+        egui::FontSelection::default(),
+        egui::Align::Min,
+    );
+    job.wrap.max_width = w;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    // 2) 死占 `vec2(w, 本单元格的实际高度)`。
+    //    -宽度必须死占（否则 `gfxdecode` 这类长名字会把列顶开，后面全飘）。
+    //    - 高度必须是**内容高度**：名称折行时是 2 行、3 行，不报上去就会
+    //      压到下一行头上（实测 `10239811.u86` 折成两行正好糊在下一行）。
+    //
+    //    `allocate_space` 的契约是"你给多少就至少占多少"，所以这里把
+    //    `galley.size().y` 原样报上去，行高就由最"高"的那个单元格决定。
+    let (_id, rect) = ui.allocate_space(egui::vec2(w, galley.size().y));
+    // 3) 画在占位处的左上角，位置与内容长度无关。
+    ui.painter()
+        .galley(egui::pos2(rect.left(), rect.top()), galley, ui.visuals().text_color());
 }
 
 /// 画一个**空占位**，宽度给定的列，用来在"这一段没有这一列"时保持栅格。
@@ -252,25 +278,70 @@ fn gap(ui: &mut egui::Ui, w: f32) {
     }
 }
 
+/// 行内的 `horizontal` 布局：**上下贴紧**。
+///
+/// egui 的 `horizontal` 默认给每一行留 `item_spacing.y`（默认 6px）加字体
+/// 行高，40 个 rom 就是 40 × 多余的十几像素 —— 面板窄的时候，一屏能看的行数
+/// 被行距吃掉一半。这里把交叉轴对齐改成 `Min`，让行高由内容（16px 图标）
+/// 决定而不是由间距决定。
+fn tight_horizontal(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui, f32)) {
+    // **宽度在进布局之前就定下来**，这是全面板对齐的关键。
+    //
+    // 之前把 `cols::name_width(ui.available_width())` 写在行内。行内是个
+    // `LeftToRight` 的子 ui，它的 `cursor()` 带着**上一行遗留的 x 偏移**
+    // （实测 `cursor=163`，且逐行递增：子 ui 的 `min_rect` 被内容撑大后，
+    // 父 ui 的游标跟着右移）。于是名称列宽度一行比一行小/大，状态词
+    // 从第 1 行的 x 斜到第 8 行的 x+390——比不改之前更离谱。
+    //
+    // 行外量一次、每行传同一个值，各段的名称列宽度就与行序无关了。
+    let row_width = ui.available_width();
+    let layout = egui::Layout {
+        main_dir: egui::Direction::LeftToRight,
+        main_wrap: false,
+        main_align: egui::Align::Min,
+        main_justify: false,
+        cross_align: egui::Align::Min,
+        cross_justify: false,
+    };
+    // `max_rect` 必须是**这一行自己的可用矩形**（默认行为），不能用
+    // `ui.max_rect()`：后者是整个面板的矩形，行高就不再由内容决定，实测
+    // 所有行塌成同一条横线。
+    ui.scope_builder(egui::UiBuilder::new().layout(layout), |ui| {
+        // **横向间距也必须归零。** 栅格的每一步都已经算死了（名称列吃掉
+        // 剩余空间 + 固定列宽），再叠一层 `item_spacing.x`（默认 8px）就
+        //等于每行凭空多出 6 项 × 8px = 48px 的偏移。行布局把它算进子 ui 的
+        // `min_rect`，父 ui 游标跟着右移，于是状态词从第 1 行斜到第 9 行
+        // （实测右移约 250px）——斜率恒定正是这个的特征。
+        ui.spacing_mut().item_spacing.x = 0.0;
+        // 竖向同理：紧凑是这里的目的，行高由 16px 图标决定。
+        ui.spacing_mut().item_spacing.y = 0.0;
+        add_contents(ui, row_width);
+    });
+}
+
 /// Rom 段的一行：名称 / 状态 / 图标 / CRC / 区域(带 tag)。
 ///
 /// **所有列定宽且左对齐**，理由见 [`cols`] 与 [`cell`]。
+///
+/// **只有状态列上色**（用户要求）：名称 / CRC / 区域一律走默认前景色。
+/// 早先把整行都染成状态色，一屏几十行全是绿字，看着像报错；而且"缺一个
+/// 文件"和"这台机器有 40 个文件全是好的"用同一种满屏绿色表达，信息量是零。
+/// 状态词 + 图标已经足够定位，颜色只服务这两列。
 fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
     let color = state_color(r.state);
-    ui.horizontal(|ui| {
-        // 名称：缺失时整行标红，所以名称本身也吃这个颜色。
-        // 列宽减去 `NAME_PAD` —— 内边距放在**列宽里**而不是画在右侧，
+    tight_horizontal(ui, |ui, _row_width| {
+        // 名称：列宽减去 `NAME_PAD` —— 内边距放在**列宽里**而不是画在右侧，
         // 这样"名称列起点"和"状态列起点"都不受影响，栅格照样严丝合缝。
         cell(
             ui,
-            (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
-            egui::Label::new(egui::RichText::new(&r.name).monospace().color(color)),
+            (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
+            egui::RichText::new(&r.name).monospace(),
         );
-        // 状态词
+        // 状态词：唯一带状态色的文字
         cell(
             ui,
             cols::STATE,
-            egui::Label::new(egui::RichText::new(app.tr(state_word(r.state))).color(color)),
+            egui::RichText::new(app.tr(state_word(r.state))).color(color),
         );
         // 16×16 状态图标
         let _ = icon_cell(ui, r.state);
@@ -278,24 +349,20 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
         cell(
             ui,
             cols::CRC,
-            egui::Label::new(egui::RichText::new(crc_text(r.crc)).monospace().color(color)),
+            egui::RichText::new(crc_text(r.crc)).monospace(),
         );
         // 区域 + tag（`igs023:sprcol`）
         let region = match (&r.region, &r.tag) {
             (reg, Some(tag)) => format!("{reg}:{tag}"),
             (reg, None) => reg.clone(),
         };
-        cell(
-            ui,
-            cols::REGION,
-            egui::Label::new(egui::RichText::new(region).monospace().color(color)),
-        );
+        cell(ui, cols::REGION, egui::RichText::new(region).monospace());
         // 继承来的条目标一下来源，否则用户会以为这是本机种自己的文件
         let from = r.from.clone().map(|f| format!("({f})")).unwrap_or_default();
         cell(
             ui,
             cols::FROM,
-            egui::Label::new(egui::RichText::new(from).small().color(ui_weak_color())),
+            egui::RichText::new(from).small().color(ui_weak_color()),
         );
     });
 }
@@ -308,11 +375,12 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
 /// **只有数据，没有游戏名/描述/缺失计数。** 用户明确要求去掉顶部那一块
 /// （游戏名 + 描述 + 说明 + "全部齐全"）——面板挂在游戏列表旁边，选中哪台
 /// 一眼就看得见，重复一遍只是噪音；缺失与否在 Rom 段里每行都写着。
+///
+/// **行与行之间一律不缩进。** 曾经这里每行都套一层 `ui.indent("rom_rows", …)`，而 `ui.indent` 是**按 id 存状态的**：同一个 id 在循环里反复调用，缩进会逐行累加（第二行起每行往右挪一点）。更糟的是缩进会吃掉 `available_width()`，于是 `cols::name_width()` 算出来的名称列宽度逐行变小、状态词起点逐行左移 —— 用户看到的"每到下一行就额外缩进、根本没对齐"就是这个。对齐由 `cols` 栅格保证，缩进只会碍事。
 pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_note: Option<String>) {
     // 顶部只剩一行淡灰的说明（面板 / 弹窗的数据来源），其余全删。
     if let Some(note) = header_note {
         ui.label(egui::RichText::new(note).small().color(ui_weak_color()));
-        ui.separator();
     }
 
     if view.is_empty() {
@@ -324,7 +392,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     if !view.roms.is_empty() {
         section(ui, app, "Rom:");
         for r in &view.roms {
-            ui.indent("rom_rows", |ui| rom_line(ui, app, r));
+            rom_line(ui, app, r);
         }
     }
 
@@ -334,46 +402,41 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
         section(ui, app, "Disks:");
         for d in &view.disks {
             let color = state_color(d.state);
-            ui.indent("disk_rows", |ui| {
-                ui.horizontal(|ui| {
-                    cell(
-                        ui,
-                        (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
-                        egui::Label::new(
-                            egui::RichText::new(&d.file_name).monospace().color(color),
-                        ),
-                    );
-                    cell(
-                        ui,
-                        cols::STATE,
-                        egui::Label::new(
-                            egui::RichText::new(app.tr(state_word(d.state))).color(color),
-                        ),
-                    );
-                    let _ = icon_cell(ui, d.state);
-                    let short = if d.sha1.len() > 8 {
-                        d.sha1[..8].to_string()
-                    } else {
-                        d.sha1.clone()
-                    };
-                    cell(
-                        ui,
-                        cols::CRC,
-                        egui::Label::new(
-                            egui::RichText::new(format!("sha1({short})"))
-                                .monospace()
-                                .color(color),
-                        ),
-                    );
-                    // 补齐栅格后两列
-                    gap(ui, cols::REGION);
-                    gap(ui, cols::FROM);
-                });
+            tight_horizontal(ui, |ui, _row_width| {
+                cell(
+                    ui,
+                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
+                    
+                        egui::RichText::new(&d.file_name).monospace(),
+                );
+                cell(
+                    ui,
+                    cols::STATE,
+                    
+                        egui::RichText::new(app.tr(state_word(d.state))).color(color),
+                );
+                let _ = icon_cell(ui, d.state);
+                let short = if d.sha1.len() > 8 {
+                    d.sha1[..8].to_string()
+                } else {
+                    d.sha1.clone()
+                };
+                cell(
+                    ui,
+                    cols::CRC,
+                    
+                        egui::RichText::new(format!("sha1({short})"))
+                            .monospace()
+                            .color(color),
+                );
+                // 补齐栅格后两列
+                gap(ui, cols::REGION);
+                gap(ui, cols::FROM);
             });
         }
     }
 
-    // Bios 段：集名 + 描述 + 状态，**下面缩进列这一套实际的文件**。
+    // Bios 段：集名 + 描述 + 状态，**下面列这一套实际的文件**。
     // 文件用 `rom_line`（与 Rom 段同一套列宽），所以整段的图标/ crc 也对齐。
     // 集标题行也走栅格——用 `ui.label` 自然宽度的话，集名一长就把状态词
     // 推到右边，看起来又是错位的。
@@ -381,32 +444,31 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
         section(ui, app, "Bios:");
         for b in &view.bios {
             let color = state_color(b.state);
-            ui.horizontal(|ui| {
+            tight_horizontal(ui, |ui, _row_width| {
                 cell(
                     ui,
-                    (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
-                    egui::Label::new(egui::RichText::new(&b.name).monospace().strong().color(color)),
+                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
+                    egui::RichText::new(&b.name).monospace().strong().color(color),
                 );
                 cell(
                     ui,
                     cols::STATE,
-                    egui::Label::new(egui::RichText::new(app.tr(state_word(b.state))).color(color)),
+                    egui::RichText::new(app.tr(state_word(b.state))).color(color),
                 );
                 // 描述占 crc + region 两列的宽度（描述比 crc 长得多）
                 cell(
                     ui,
                     cols::CRC + cols::REGION,
-                    egui::Label::new(
+                    
                         egui::RichText::new(&b.description)
                             .small()
                             .color(ui_weak_color()),
-                    ),
                 );
                 gap(ui, cols::ICON);
                 gap(ui, cols::FROM);
             });
             for r in &b.roms {
-                ui.indent("bios_rom_rows", |ui| rom_line(ui, app, r));
+                rom_line(ui, app, r);
             }
         }
     }
@@ -417,18 +479,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
         section(ui, app, "Referenced devices:");
         for d in &view.devices {
             let color = state_color(d.state);
-            ui.horizontal(|ui| {
+            tight_horizontal(ui, |ui, _row_width| {
                 cell(
                     ui,
-                    (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
-                    egui::Label::new(egui::RichText::new(&d.name).monospace().color(color)),
+                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
+                    egui::RichText::new(&d.name).monospace(),
                 );
                 cell(
                     ui,
                     cols::STATE,
-                    egui::Label::new(
+                    
                         egui::RichText::new(app.tr(state_word(d.state))).color(color),
-                    ),
                 );
                 let _ = icon_cell(ui, d.state);
                 // 描述 + 引用它的 tag（`:maincpu` / `igs023:sprcol`）。tag
@@ -450,18 +511,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
                 cell(
                     ui,
                     cols::CRC + cols::REGION,
-                    egui::Label::new(
+                    
                         egui::RichText::new(tail)
                             .small()
                             .color(ui_weak_color()),
-                    ),
                 );
                 gap(ui, cols::FROM);
             });
             // 设备自己的 rom：按设备机种名匹配回去（`device_roms` 的
             // `from` 就是设备机种名）
             for r in view.device_roms.iter().filter(|r| r.from.as_deref() == Some(d.name.as_str())) {
-                ui.indent("device_rom_rows", |ui| rom_line(ui, app, r));
+                rom_line(ui, app, r);
             }
         }
         // 有 rom 但设备机种不在库里（裁剪过的 dat）——仍要把文件列出来
@@ -470,49 +530,44 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
             .iter()
             .filter(|r| !view.devices.iter().any(|d| Some(d.name.as_str()) == r.from.as_deref()))
         {
-            ui.indent("device_rom_orphan", |ui| rom_line(ui, app, r));
+            rom_line(ui, app, r);
         }
     }
 
     // 设备段：`<device type="memcard" tag="memcard_p1">` 这种**可挂载**的
     // 设备，跟上面的引用设备不是一回事——它没有 rom 要校验，用户关心的是
     // "这游戏支持插什么卡、插什么文件"。所以这一段没有状态列，只有
-    // 类型 / 实例 / 扩展名；**前面补一段空占位**，让名称列的起点与上面
-    // 那些段落在同一条竖线上（缩进已经保证了左边距，再补空列就成了双重
-    // 缩进，所以这里补的是状态+图标那两列的宽度）。
+    // 类型 / 实例 / 扩展名；**前面补一段空占位**，让类型列的起点与上面
+    // 那些段落的名称列落在同一条竖线上（行不再缩进，所以这里补的正是
+    // 状态列那60px）。
     if !view.slots.is_empty() {
         section(ui, app, "Device slots:");
         for s in &view.slots {
-            ui.indent("slot_rows", |ui| {
-                ui.horizontal(|ui| {
-                    // 让"类型"列的起点 = 名称列起点：先吃掉状态列的宽度
-                    gap(ui, cols::STATE);
-                    let avail = ui.available_width();
-                    // 类型：槽位的身份（`memcard`）
-                    cell(
-                        ui,
-                        avail * 0.3,
-                        egui::Label::new(
-                            egui::RichText::new(&s.kind).monospace().color(ui_weak_color()),
-                        ),
-                    );
-                    // 实例：命令行 `-memcard1` 用的就是它
-                    cell(
-                        ui,
-                        avail * 0.3,
-                        egui::Label::new(
-                            egui::RichText::new(&s.instance).monospace().color(ui_weak_color()),
-                        ),
-                    );
-                    // 扩展名：逗号连接
-                    cell(
-                        ui,
-                        avail * 0.4,
-                        egui::Label::new(
-                            egui::RichText::new(&s.extensions).monospace().color(ui_weak_color()),
-                        ),
-                    );
-                });
+            tight_horizontal(ui, |ui, _row_width| {
+                // 让"类型"列的起点 = 名称列起点：先吃掉状态列的宽度
+                gap(ui, cols::STATE);
+                let avail = _row_width;
+                // 类型：槽位的身份（`memcard`）
+                cell(
+                    ui,
+                    avail * 0.3,
+                    
+                        egui::RichText::new(&s.kind).monospace().color(ui_weak_color()),
+                );
+                // 实例：命令行 `-memcard1` 用的就是它
+                cell(
+                    ui,
+                    avail * 0.3,
+                    
+                        egui::RichText::new(&s.instance).monospace().color(ui_weak_color()),
+                );
+                // 扩展名：逗号连接
+                cell(
+                    ui,
+                    avail * 0.4,
+                    
+                        egui::RichText::new(&s.extensions).monospace().color(ui_weak_color()),
+                );
             });
         }
     }
@@ -523,40 +578,36 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
     if !view.slot_decls.is_empty() {
         section(ui, app, "Slots:");
         for s in &view.slot_decls {
-            ui.indent("slot_decl_rows", |ui| {
-                ui.horizontal(|ui| {
-                    // 与设备段一致：补状态列的宽度，让槽位名落在名称列起点上
-                    gap(ui, cols::STATE);
-                    let avail = ui.available_width();
-                    // 槽位名：命令行 `nes:ctrl1=<dev>` 用的就是它
-                    cell(
-                        ui,
-                        cols::FROM,
-                        egui::Label::new(
-                            egui::RichText::new(&s.name).monospace().color(ui_weak_color()),
-                        ),
-                    );
-                    // 可选设备数；空槽位（`nes_slot`）显示 0，不留空
-                    let count = egui::RichText::new(format!("{}", s.option_count))
-                        .monospace()
-                        .color(ui_weak_color());
-                    cell(ui, 40.0, egui::Label::new(count));
-                    // 选项名清单，空槽位给个明确的"—"而不是空白
-                    let text = if s.options.is_empty() {
-                        "-".to_string()
-                    } else {
-                        s.options.clone()
-                    };
-                    cell(
-                        ui,
-                        (avail - cols::FROM - 40.0).max(40.0),
-                        egui::Label::new(
-                            egui::RichText::new(text)
-                                .monospace()
-                                .color(ui_weak_color()),
-                        ),
-                    );
-                });
+            tight_horizontal(ui, |ui, _row_width| {
+                // 与设备段一致：补状态列的宽度，让槽位名落在名称列起点上
+                gap(ui, cols::STATE);
+                let avail = _row_width;
+                // 槽位名：命令行 `nes:ctrl1=<dev>` 用的就是它
+                cell(
+                    ui,
+                    cols::FROM,
+                    
+                        egui::RichText::new(&s.name).monospace().color(ui_weak_color()),
+                );
+                // 可选设备数；空槽位（`nes_slot`）显示 0，不留空
+                let count = egui::RichText::new(format!("{}", s.option_count))
+                    .monospace()
+                    .color(ui_weak_color());
+                cell(ui, 40.0, count);
+                // 选项名清单，空槽位给个明确的"—"而不是空白
+                let text = if s.options.is_empty() {
+                    "-".to_string()
+                } else {
+                    s.options.clone()
+                };
+                cell(
+                    ui,
+                    (avail - cols::FROM - 40.0).max(40.0),
+                    
+                        egui::RichText::new(text)
+                            .monospace()
+                            .color(ui_weak_color()),
+                );
             });
         }
     }
@@ -567,34 +618,28 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView, header_n
         section(ui, app, "Samples:");
         for s in &view.samples {
             let color = state_color(s.state);
-            ui.indent("sample_rows", |ui| {
-                ui.horizontal(|ui| {
-                    cell(
-                        ui,
-                        (cols::name_width(ui.available_width()) - cols::NAME_PAD).max(40.0),
-                        egui::Label::new(egui::RichText::new(&s.name).monospace().color(color)),
-                    );
-                    cell(
-                        ui,
-                        cols::STATE,
-                        egui::Label::new(
-                            egui::RichText::new(app.tr(state_word(s.state))).color(color),
-                        ),
-                    );
-                    let _ = icon_cell(ui, s.state);
-                    cell(
-                        ui,
-                        cols::CRC,
-                        egui::Label::new(
-                            egui::RichText::new(format!("{}/{}", s.have, s.total))
-                                .monospace()
-                                .color(color),
-                        ),
-                    );
-                    // 补齐栅格后两列
-                    gap(ui, cols::REGION);
-                    gap(ui, cols::FROM);
-                });
+            tight_horizontal(ui, |ui, _row_width| {
+                cell(
+                    ui,
+                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
+                    egui::RichText::new(&s.name).monospace(),
+                );
+                cell(
+                    ui,
+                    cols::STATE,
+                    
+                        egui::RichText::new(app.tr(state_word(s.state))).color(color),
+                );
+                let _ = icon_cell(ui, s.state);
+                cell(
+                    ui,
+                    cols::CRC,
+                    
+                        egui::RichText::new(format!("{}/{}", s.have, s.total)).monospace(),
+                );
+                // 补齐栅格后两列
+                gap(ui, cols::REGION);
+                gap(ui, cols::FROM);
             });
         }
     }
@@ -665,7 +710,7 @@ mod tests {
     /// 错开，肉眼一看就是"没对齐"。
     ///
     /// 现在名称列统一吃 `avail - GRID`，缺的列用 `gap()` 补占位，所以
-    /// 任何一段的状态列起点都等于 `name_width + 其缩进`。
+    /// 任何一段的状态列起点都等于 `name_width`（行不再缩进，见`render` 的注释）。
     #[test]
     fn the_name_column_is_identical_across_every_section() {
         // 面板宽度无关紧要：重要的是**各段用的是同一个函数**，而不是各自
@@ -687,5 +732,64 @@ mod tests {
         assert_eq!(cols::GRID, cols::STATE + cols::ICON + cols::CRC + cols::REGION + cols::FROM);
         // 面板拉窄时名称列不许变负——负宽度会把后面的列往回挤，比窄更糟
         assert!(cols::name_width(10.0) >= 60.0, "窄面板下要有下限");
+    }
+
+    /// **行与行之间不允许有 `ui.indent`。**
+    ///
+    /// `ui.indent` 的缩进量是**按 id 存在 `Memory.indentation` 里的有状态值**，
+    /// 同一个 id 在循环里每调用一次就累加一层。所以 `for r in &view.roms {
+    /// ui.indent("rom_rows", ..) }` 的第二行起会整体右移，而且缩进吃掉
+    /// `available_width()` 后 `cols::name_width()` 会逐行变小、状态词起点
+    /// 逐行左移——正是用户报的"每到下一行就额外缩进，根本没对齐"。
+    ///
+    /// 这种回归肉眼很难在改动里看出来（缩进本来就该存在），所以用测试钉住：
+    /// **行布局里 `item_spacing` 两个轴都必须归零。**
+    ///
+    /// 这条最贵：症状是"状态词从第 1 行斜到第 9 行"（实测右移约 250px，
+    /// 斜率恒定 ≈ 28px/行），而名称列起点、图标列起点看起来都正常，
+    /// 很容易误判成"名称列宽度算错了"。
+    ///
+    /// 机制：`LeftToRight` 行布局把 `item_spacing.x`（默认 8px）加在
+    /// **每一项之间**。一行有名称 + 状态 + 图标 + crc + 区域 + 来源 6 项，
+    /// 就是 5 个间隙 × 8px = 40px 的额外宽度。它被算进子 ui 的
+    /// `min_rect`，`allocate_new_ui` 再用它推进父 ui 的游标，于是
+    /// **每行都比上一行右移一整个行的间距**。
+    ///
+    /// 栅格已经把每一步都算死了（`cols::GRID`），再叠一层 spacing 就是
+    /// 双重计费。竖向同理，`item_spacing.y` 归零才能让行高由 16px 图标决定
+    /// 而不是由间距决定（用户要"每行间距紧凑一些"）。
+    #[test]
+    fn rows_have_no_item_spacing_at_all() {
+        let src = include_str!("rompanel.rs");
+        let body = src
+            .split("fn tight_horizontal(")
+            .nth(1)
+            .expect("找不到 tight_horizontal");
+        let body = body.split("\n}\n").next().unwrap_or(body);
+        assert!(
+            body.contains("item_spacing.x = 0.0"),
+            "行布局必须把 item_spacing.x 归零，否则每行递增右移"
+        );
+        assert!(
+            body.contains("item_spacing.y = 0.0"),
+            "行布局必须把 item_spacing.y 归零，否则行高被间距撑开"
+        );
+    }
+
+    /// `render` 的函数体里出现 `ui.indent(` 就失败。
+    #[test]
+    fn rows_are_never_indented() {
+        let src = include_str!("rompanel.rs");
+        let body = src
+            .split("pub fn render(")
+            .nth(1)
+            .expect("找不到 render");
+        // 只看 render 到下一个顶层项为止的部分
+        let body = body.split("\n}\n").next().unwrap_or(body);
+        assert!(
+            !body.contains("ui.indent("),
+            "行循环里不许用 ui.indent（缩进按 id 累加，会逐行右移）：\n{}",
+            body.lines().filter(|l| l.contains("ui.indent(")).collect::<Vec<_>>().join("\n")
+        );
     }
 }

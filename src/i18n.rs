@@ -46,9 +46,11 @@ pub const ZH_CN: &[(&str, &str)] = &[
     ("Root Folder [.]", "根目录 [.]"),
     ("Remove From This Folder", "从此文件夹移除"),
     ("Properties", "属性"),
-    ("Audit", "审计"),
-    ("Audit All Roms", "审计全部 ROM"),
-    ("Audit All Samples", "审计全部样本"),
+    // 「审计」入口已按用户要求改名为「导出列表」：单游戏审计与审计全部
+    // 都删掉了，只剩导出各类清单。原"Audit" / "Audit All Roms" /
+    // "Audit All Samples" 三条文案一并清掉（已无引用，留着会被"看起来
+    // 有这个功能"误导）。
+    ("Export List", "导出列表"),
     ("Export All Set Issues...", "导出全部问题集..."),
     ("Export Incomplete Sets Only...", "仅导出不完整集..."),
     ("Export Completely Missing Sets Only...", "仅导出完全缺失集..."),
@@ -71,7 +73,10 @@ pub const ZH_CN: &[(&str, &str)] = &[
     ("Language", "语言"),
     ("About", "关于"),
     ("Refresh", "刷新"),
-    ("MAME Extra Config", "MAME 额外配置"),
+    // key 保持英文原样（内部标识），只改译文：用户要求这个入口叫「模拟器」。
+    // 它打开的是MAME 自己的 per-machine / global 选项（写进 mame.ini），
+    // 叫"额外配置"确实让人以为是什么附加设置。
+    ("MAME Extra Config", "模拟器"),
     ("Refresh Database", "刷新档案"),
     ("MAME", "MAME"),
     ("MAME program", "MAME 程序"),
@@ -525,9 +530,7 @@ pub const ZH_TW: &[(&str, &str)] = &[
     ("Root Folder [.]", "根資料夾 [.]"),
     ("Remove From This Folder", "從此資料夾移除"),
     ("Properties", "屬性"),
-    ("Audit", "驗證"),
-    ("Audit All Roms", "驗證全部 ROM"),
-    ("Audit All Samples", "驗證全部樣本檔"),
+    ("Export List", "匯出列表"),
     ("Export All Set Issues...", "匯出全部有問題的集合..."),
     ("Export Incomplete Sets Only...", "匯出不完整的集合..."),
     ("Export Completely Missing Sets Only...", "匯出完全遺失的集合..."),
@@ -550,7 +553,7 @@ pub const ZH_TW: &[(&str, &str)] = &[
     ("Language", "語言"),
     ("About", "關於"),
     ("Refresh", "重新整理"),
-    ("MAME Extra Config", "MAME 額外設定"),
+    ("MAME Extra Config", "模擬器"),
     ("Refresh Database", "重新整理檔案"),
     ("MAME", "MAME"),
     ("MAME program", "MAME 程式"),

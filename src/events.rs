@@ -45,11 +45,15 @@ pub enum AppEvent {
     /// folder tree rebuilt after an audit changed availability
     FoldersReady(Arc<FolderCache>),
     AuditDone(Result<String, String>),
-    /// 单游戏审计跑完（右键/菜单「审计 ROM」）。
+    /// 单游戏审计跑完。
     ///
     /// 视图是**那一瞬间的快照**，不是"回头去库里读"——审计在后台线程上
     /// 改了共享的库，而用户可能在这期间点了别的游戏。带着快照回来，弹窗
     /// 讲的一定是它自己审的那个游戏。
+    ///
+    /// **当前没有菜单入口**（2026-10-05 用户要求把菜单里的审计项删掉，
+    /// 统一走「刷新档案」）。保留给 `start_game_audit` 复用。
+    #[allow(dead_code)]
     GameAuditDone {
         game: String,
         result: Result<crate::core::rominfo::RomInfoView, String>,
@@ -60,7 +64,13 @@ pub enum AppEvent {
     /// set — the inheritance is resolved by the loader (README §6.1③).
     IconReady { game: String, width: u32, height: u32, rgba: Vec<u8> },
     DatReady { dock: usize, game: String, text: Option<String> },
+    /// `-verifyroms` / `-verifysamples` 的逐行输出与结束标记。
+    ///
+    /// **当前没有菜单入口**（同 `GameAuditDone`）。来自 1.8.2 那条原样搬来的
+    /// 输出泵，保留以便接回 MAME 原生校验。
+    #[allow(dead_code)]
     VerifyLine(String),
+    #[allow(dead_code)]
     VerifyDone,
     MameExited { game: String, code: Option<i32> },
     Log(String),

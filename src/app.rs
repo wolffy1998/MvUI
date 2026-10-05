@@ -257,6 +257,11 @@ pub struct MameApp {
     /// 单游戏审计的进度句柄（非空 = 正在跑）。
     pub game_audit: Option<Arc<crate::core::audit::AuditHandle>>,
     /// 单游戏审计的目标游戏名，用来防止结果弹到别的游戏上。
+    ///
+    /// **当前没有菜单入口**（2026-10-05 用户要求删掉菜单里的审计项，统一走
+    /// 「刷新档案」）。字段与配套的 `GameAuditDone` 事件一并保留：
+    /// 它们是单游戏审计这条路的完整实现，`start_game_audit` 一接回菜单就能用。
+    #[allow(dead_code)]
     pub game_audit_target: String,
     /// 单游戏审计跑完的结果弹窗：`(游戏名, 视图)`。
     ///

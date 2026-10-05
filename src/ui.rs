@@ -614,32 +614,13 @@ impl MameApp {
         });
     }
 
+    /// 文件菜单里的 "导出列表" 二级菜单。
+    ///
+    /// **这里只剩导出项**：单游戏审计 / 审计全部 ROM / 审计全部样本三个按钮
+    /// 已按用户要求删掉——「刷新档案」(F5) 本来就做的是 re-audit + re-init，
+    /// 重复入口只会让人以为这是两件事。
     pub fn audit_submenu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(self.tr("Audit"), |ui| {
-            // The single-game re-audit sits at the top of this submenu rather
-            // than only on the row's right-click menu, because the File menu is
-            // the only one reachable by keyboard. Origin
-            // `on_actionAudit_triggered` (`-verifyroms <game>`).
-            let rom = self.tr("Audit ROM");
-            if ui
-                .add_enabled(self.has_game() && self.can_audit(), button(rom))
-                .clicked()
-            {
-                self.start_game_audit();
-                ui.close_menu();
-            }
-            ui.separator();
-            let ar = self.tr("Audit All Roms");
-            if ui.button(ar).clicked() {
-                self.verify(false, false);
-                ui.close_menu();
-            }
-            let asr = self.tr("Audit All Samples");
-            if ui.button(asr).clicked() {
-                self.verify(false, true);
-                ui.close_menu();
-            }
-            ui.separator();
+        ui.menu_button(self.tr("Export List"), |ui| {
             for (key, method) in [
                 ("Export All Set Issues...", crate::core::audit::AuditMethod::ExportAll),
                 ("Export Incomplete Sets Only...", crate::core::audit::AuditMethod::ExportIncomplete),
@@ -935,10 +916,9 @@ impl MameApp {
                 if ui.add_enabled(self.has_game(), egui::Button::new(play)).clicked() {
                     self.launch(RunMode::Normal, vec![]);
                 }
-                let audit = self.tr("Audit");
-                if ui.button(audit).clicked() {
-                    self.refresh_all();
-                }
+                // 原来这里还有一项「审计」调`refresh_all()`，与文件菜单的
+                // 「刷新档案」完全同源（同一个动作、同一份 F5 快捷键），
+                // 用户要求删掉。
             });
         });
     }
@@ -1371,19 +1351,29 @@ impl MameApp {
     /// 审计要占着库写 `available`，所以两个正在跑的审计都得让位：一个是它自己
     /// （`game_audit`），一个是全库那个（`audit_handle`）——两者同时跑出来的
     /// 结论是交集，谁最后落盘谁赢，用户看到的是"刚审完就又变了"。
+    ///
+    /// **当前没有菜单入口**（2026-10-05 用户要求：右键与文件菜单里的「审计
+    /// Rom」都删掉，全走「刷新档案」F5）。逻辑留着：它仍在
+    /// `start_game_audit` 内部做前置判断，且将来要恢复入口时不必重写。
+    #[allow(dead_code)]
     pub fn can_audit(&self) -> bool {
         self.game_audit.is_none() && self.audit_handle.is_none()
     }
 
-    /// 只审计当前选中的这一款游戏（右键 / File ▸ Audit ▸ Audit ROM）。
+    /// 只审计当前选中的这一款游戏。
     ///
     /// 范围是它自己 + 依赖的主 ROM 文件 + BIOS + 设备 + 样本 + CHD，见
     /// `core::audit::audit_scope`。**不**重扫全库，所以通常一秒内结束
-    /// （`audit_cache` 记着每个包的内容，包没变就只 stat 不重开）。
+    /// （`audit_cache` 记着每个包的内容，包没变就只stat 不重开）。
     ///
     /// 旧版 1.8.2 的 `actionAudit` 是把 `mame -verifyroms <game>` 的 stdout
     /// 显示在一个文本框里；这里改成读审计缓存的同一份结论（`audit_game`），
     /// 因此比 `-verifyroms` 快得多，而且拥有/缺失是结构化的、能直接显示状态色。
+    ///
+    /// **当前没有菜单入口**（同上，`can_audit` 的注释）。整套单游戏审计是
+    /// 有价值的实现——`core::audit::find_units_for` 的提速就是为它做的
+    /// （5.8s → 0.002s）——所以**不删**，留着备用。
+    #[allow(dead_code)]
     pub fn start_game_audit(&mut self) {
         if !self.can_audit() {
             return;
