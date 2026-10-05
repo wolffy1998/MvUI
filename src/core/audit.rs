@@ -504,6 +504,315 @@ pub fn audit_all(
     );
 }
 
+/// 一台机种在单游戏审计里的**审计范围**：它自己 + 它依赖的一切。
+///
+/// 用户口径：「就是此 ROM + 依赖的主 ROM 文件 + BIOS + Device + Samples
+/// + CHD」。这五类依赖在数据模型里落在五个不同地方，凑齐它们是
+/// [`audit_scope`] 唯一要解决的问题。
+#[derive(Debug, Clone, Default)]
+pub struct AuditScope {
+    /// 本机种。
+    pub game: usize,
+    /// `romof` 父集与祖父集（依赖的主 ROM 文件）。
+    pub parents: Vec<usize>,
+    /// 被引用的设备机种（BIOS 不是独立 machine，见 `core::rominfo`）。
+    pub devices: Vec<usize>,
+    /// 样本机种（`sampleof`）。
+    pub samples: Vec<usize>,
+}
+
+impl AuditScope {
+    /// 范围内的全部机种索引，本体在前。
+    pub fn all(&self) -> Vec<usize> {
+        let mut v = vec![self.game];
+        v.extend(self.parents.iter().copied());
+        v.extend(self.devices.iter().copied());
+        v.extend(self.samples.iter().copied());
+        v
+    }
+
+    pub fn len(&self) -> usize {
+        1 + self.parents.len() + self.devices.len() + self.samples.len()
+    }
+}
+
+/// 算出一台机种的审计范围。
+///
+/// **BIOS 不在这里**：查真实的 `mame pgm -listxml`，BIOS 集是同一个
+/// `<machine>` 上的 `<biosset>` 标签，它的 rom 带着 `bios="v2"` 属性**混在
+/// 本机种的 `<rom>` 列表里**——没有独立的机种可扫。审计本机种的归档时那些
+/// 条目自然一起被匹配到，所以 BIOS 不需要额外处理。
+///
+/// 设备机种名在 `DeviceInfo::kind` / `instance` 上（`core/listxml.rs` 的
+/// `device_ref` 解析把 `name` 属性填进这两处），`tag` 是父机种里的标签全名
+/// （`maincpu`），**不能**拿去查库。
+pub fn audit_scope(lib: &GameLibrary, game: &str) -> Option<AuditScope> {
+    let gi = lib.get_idx(game)?;
+    let g = &lib.games[gi];
+    let mut scope = AuditScope {
+        game: gi,
+        ..Default::default()
+    };
+
+    // 依赖的主 ROM 文件：romof 链，带防环（坏 dat 是外部输入）
+    let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    visited.insert(gi);
+    let mut cursor = g.romof.as_str();
+    let mut hops = 0;
+    while !cursor.is_empty() && hops < 8 {
+        let Some(pi) = lib.get_idx(cursor) else { break };
+        if !visited.insert(pi) {
+            break;
+        }
+        scope.parents.push(pi);
+        cursor = lib.games[pi].romof.as_str();
+        hops += 1;
+    }
+
+    // 引用设备
+    for d in &g.devices {
+        let name = if !d.kind.is_empty() {
+            d.kind.as_str()
+        } else if !d.instance.is_empty() {
+            d.instance.as_str()
+        } else {
+            continue;
+        };
+        let Some(di) = lib.get_idx(name) else { continue };
+        if di != gi && visited.insert(di) {
+            scope.devices.push(di);
+        }
+    }
+
+    // 样本
+    if !g.sampleof.is_empty() {
+        if let Some(si) = lib.get_idx(&g.sampleof) {
+            if si != gi && visited.insert(si) {
+                scope.samples.push(si);
+            }
+        }
+    }
+    Some(scope)
+}
+
+/// 只审计一台机种 + 它的依赖（右键/菜单「审计 ROM」）。
+///
+/// 与 [`audit_all`] 的差别不只是范围小，有三处必须不同：
+///
+/// 1. **只重置范围内的 `available`。** `audit_all` 那个重置循环扫 5 万台
+///    游戏，单游戏审计照抄它就把 4.9 万台没参与审计的游戏的"已拥有"全
+///    抹成"缺失"——那会直接毁掉整个审计缓存。范围外的状态必须原样保留。
+/// 2. **只枚举相关归档。** 按名字在 rompath 里找那几台机种的包，而不是
+///    `read_dir` 整目录收 4.4 万个条目。
+/// 3. **不动 MESS 主机扫描**，也不改别的游戏的定级。
+///
+/// 复用 [`audit_cache`]：包没变过就只 `stat` 不重开，所以这一轮通常在
+/// 一秒内结束——这正是"单独审一个游戏"该有的速度。
+///
+/// 返回实际扫过的归档数，供 UI 报"检查了 N 个文件"。
+pub fn audit_game(
+    lib: &mut GameLibrary,
+    game: &str,
+    rom_paths: &[PathBuf],
+    handle: &AuditHandle,
+) -> usize {
+    let _finish_guard = FinishOnDrop(handle.finished.clone());
+    let t0 = std::time::Instant::now();
+    let Some(scope) = audit_scope(lib, game) else {
+        dlog!("单游戏审计: 库里没有 {game}");
+        handle.finish();
+        return 0;
+    };
+    dlog!(
+        "单游戏审计: {} 范围 {} 台（本机 + {} 父集 + {} 设备 + {} 样本）",
+        game,
+        scope.len(),
+        scope.parents.len(),
+        scope.devices.len(),
+        scope.samples.len()
+    );
+
+    // 1) 载入归档清单缓存。和 audit_all 一样，读一次约 20 MB。
+    crate::core::audit_cache::load();
+
+    // 2) 只重置范围内这几台。范围外的一个字节都不碰——这是本函数和
+    //    audit_all 最要命的区别，写错会把全库审计成果抹掉。
+    //
+    //    旧值先留一份：与 audit_all 不同，本函数是**就地**改共享库（没有
+    //    快照可回滚），所以中途取消时只有靠这份备份才能还原。UI 不给取消
+    //    入口，但 headless 例子用得到，而"取消后把范围外的正确结论改成缺失
+    //    并落盘"是不能接受的下场。
+    let mut backup: Vec<(usize, Vec<bool>, Vec<bool>, u8)> = Vec::new();
+    for &gi in scope.all().iter() {
+        backup.push((
+            gi,
+            lib.games[gi].roms.iter().map(|r| r.available).collect(),
+            lib.games[gi].disks.iter().map(|d| d.available).collect(),
+            lib.games[gi].available,
+        ));
+        for r in &mut lib.games[gi].roms {
+            r.available = r.is_nodump();
+        }
+        for d in &mut lib.games[gi].disks {
+            d.available = d.is_nodump();
+        }
+        lib.games[gi].available = GAME_MISSING;
+    }
+
+    // 3) 找相关归档。范围外的包一个都不打开。
+    let wanted: std::collections::HashSet<String> = scope
+        .all()
+        .iter()
+        .map(|&gi| lib.games[gi].name.to_lowercase())
+        .collect();
+    let mut units: Vec<(PathBuf, usize)> = Vec::new();
+    for dir in rom_paths {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let stem = if p.is_dir() {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default()
+            } else if is_zip(&p) || is_7z(&p) {
+                p.file_stem()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default()
+            } else {
+                continue;
+            };
+            if !wanted.contains(&stem) {
+                continue;
+            }
+            if let Some(gi) = lib.get_idx(&stem) {
+                // 同一台机种可能在多个 rompath 下都有包，都算数
+                if !units.iter().any(|(up, _)| up == &p) {
+                    units.push((p, gi));
+                }
+            }
+        }
+    }
+    handle.set_total(units.len());
+    dlog!(
+        "单游戏审计: {} 待扫 {} 个归档（枚举 {:?}）",
+        game,
+        units.len(),
+        t0.elapsed()
+    );
+
+    // 4) 扫。scan_units 内部按"本机种 + 其克隆集"匹配 crc，对单游戏审计
+    //    正好合适：它只看得到传入的这台机种的 roms。
+    let results = scan_units(&units, lib, handle);
+
+    // 中途取消：`scan_units` 提前返回，只扫了一部分。此时上面刚做的重置
+    // 还没被下面的落标记抵消，不还原就等于把范围内那几台判成"全缺失"。
+    // 还原后直接返回，交给调用方决定不落盘。
+    if handle.cancelled() {
+        for (gi, roms, disks, grade) in backup {
+            for (r, av) in lib.games[gi].roms.iter_mut().zip(roms) {
+                r.available = av;
+            }
+            for (d, av) in lib.games[gi].disks.iter_mut().zip(disks) {
+                d.available = av;
+            }
+            lib.games[gi].available = grade;
+        }
+        handle.finish();
+        dlog!("单游戏审计: {game} 被取消，已还原范围内的旧结论");
+        return 0;
+    }
+
+    // 5) 落标记
+    let mut disk_marks: Vec<(usize, usize)> = Vec::new();
+    for marks in results {
+        for m in marks {
+            match m {
+                Mark::Rom(gi, ri, ok) => {
+                    lib.games[gi].roms[ri].available = ok || lib.games[gi].roms[ri].available;
+                }
+                Mark::Disk(gi, di) => disk_marks.push((gi, di)),
+            }
+        }
+    }
+    // CHD 由克隆家族共用——同 sha1 的一起标上（与 audit_all 同一理由）
+    let mut disk_index: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for &(gi, di) in &disk_marks {
+        let sha1 = lib.games[gi].disks[di].sha1.clone();
+        if sha1.is_empty() {
+            lib.games[gi].disks[di].available = true;
+        } else {
+            disk_index.entry(sha1).or_default().push((gi, di));
+        }
+    }
+    for same in disk_index.values() {
+        for (gi, di) in same {
+            lib.games[*gi].disks[*di].available = true;
+        }
+    }
+
+    // 6) romof 回填：克隆集缺失的条目可以从父集里找到同名 crc 的。
+    //    范围外的父集**不在 scope 里**也能读（只读不改），所以这里直接按
+    //    romof 名字查，不依赖 scope.parents。
+    for &gi in scope.all().iter() {
+        let romof = lib.games[gi].romof.clone();
+        if romof.is_empty() {
+            continue;
+        }
+        let Some(pi) = lib.get_idx(&romof) else { continue };
+        // 父集也要在范围内才回填：父集不在范围说明它没被重新审过，它的
+        // available 还是上一轮的结果，拿它当权威会写出错的结论。
+        if !scope.all().contains(&pi) {
+            continue;
+        }
+        let parent_crcs: std::collections::HashMap<u32, bool> = lib.games[pi]
+            .roms
+            .iter()
+            .map(|r| (r.crc, r.available))
+            .collect();
+        for ri in 0..lib.games[gi].roms.len() {
+            if lib.games[gi].roms[ri].available {
+                continue;
+            }
+            if let Some(&ok) = parent_crcs.get(&lib.games[gi].roms[ri].crc) {
+                if ok {
+                    lib.games[gi].roms[ri].available = true;
+                }
+            }
+        }
+    }
+
+    // 7) 只给范围内这几台重新定级
+    for &gi in scope.all().iter() {
+        let complete = lib.games[gi].roms.iter().all(|r| r.available)
+            && lib.games[gi].disks.iter().all(|d| d.available);
+        lib.games[gi].available = if complete { GAME_COMPLETE } else { GAME_MISSING };
+    }
+
+    // 8) 这轮动过的归档清单存回去（下次全库审计能直接命中）
+    let paths: Vec<PathBuf> = units.iter().map(|(p, _)| p.clone()).collect();
+    crate::core::audit_cache::prune(&paths, AUDIT_CACHE_LIMIT);
+    crate::core::audit_cache::save();
+
+    handle.set_progress(0, 0, "");
+    handle.finish();
+
+    let scanned = units.len();
+    dlog!(
+        "单游戏审计: {} 完成，扫了 {} 个归档，缺失 {} 条，总耗时 {:?}",
+        game,
+        scanned,
+        lib.games[scope.game]
+            .roms
+            .iter()
+            .filter(|r| !r.available)
+            .count(),
+        t0.elapsed()
+    );
+    scanned
+}
+
 /// origin: RomAuditor::auditConsole — creates ext roms with "dir+file[/zip]" keys
 fn audit_console(lib: &mut GameLibrary, console: &str, dirpath: &str) {
     let dir_path = dir_string_of(dirpath);
@@ -824,5 +1133,322 @@ mod tests {
         handle.set_enumerating(2, 5, 13824);
         let (_, _, cur) = handle.snapshot();
         assert_eq!(cur, "enum 2/5 dirs, 13824 units");
+    }
+
+    /// 造一个真 zip，让单游戏审计跑在真的解析器上而不是桩上。
+    fn make_zip(dir: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+        use std::io::Write;
+        let p = dir.join(name);
+        let f = std::fs::File::create(&p).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        let opts: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (n, data) in entries {
+            w.start_file(*n, opts).unwrap();
+            w.write_all(data).unwrap();
+        }
+        w.finish().unwrap();
+        p
+    }
+
+    /// 审计是**按 crc 匹配**的（`scan_units` 建 crc → 槽位的表），所以测试里
+    /// 造的 `RomInfo` 必须带**条目内容的真实 crc32**，不能编一个假的。
+    /// 编错时的症状很误导人：包明明在、文件名明明对，审计就是找不到。
+    fn crc32(data: &[u8]) -> u32 {
+        // 与 zip 里的 crc32 同算法（IEEE 反射多项式 0xEDB88320）
+        let mut table = [0u32; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+            *slot = c;
+        }
+        let mut crc = 0xFFFF_FFFFu32;
+        for b in data {
+            crc = table[((crc ^ *b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        crc ^ 0xFFFF_FFFF
+    }
+
+    fn rom_named(name: &str, data: &[u8]) -> RomInfo {
+        RomInfo {
+            name: name.into(),
+            crc: crc32(data),
+            size: data.len() as u64,
+            region: "maincpu".into(),
+            ..Default::default()
+        }
+    }
+
+    /// **单游戏审计最要命的不变量：范围外的游戏一个字节都不能被改。**
+    ///
+    /// `audit_all` 的重置循环会扫 5 万台游戏；单游戏审计照抄它就会把 4.9
+    /// 万台未参与审计的游戏的"已拥有"全抹成"缺失"，那等于毁掉整个审计
+    /// 缓存——而这个错误**不会报错**，只会让用户的收藏看起来全丢了。
+    #[test]
+    fn auditing_one_game_leaves_every_other_game_untouched() {
+        const TARGET_DATA: &[u8] = b"target data";
+        const BYSTANDER_DATA: &[u8] = b"bystander data";
+        let dir = std::env::temp_dir().join("mvui-auditgame-untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        make_zip(&dir, "target.zip", &[("t.rom", TARGET_DATA)]);
+
+        let mut lib = GameLibrary::new("test".into());
+        // 目标机种：包里那个文件在，第二个文件缺
+        let mut target = GameMeta {
+            name: "target".into(),
+            ..Default::default()
+        };
+        target.roms.push(rom_named("t.rom", TARGET_DATA));
+        target.roms.push(rom_named("missing.rom", b"never in the zip"));
+        // 旁观者：审计前先标成"已拥有"，审计后必须还是
+        let mut bystander = GameMeta {
+            name: "bystander".into(),
+            ..Default::default()
+        };
+        bystander.roms.push(rom_named("b.rom", BYSTANDER_DATA));
+        bystander.roms[0].available = true;
+        bystander.available = GAME_COMPLETE;
+        lib.games.push(target);
+        lib.games.push(bystander);
+        lib.rebuild_indexes();
+
+        let handle = AuditHandle::new();
+        audit_game(&mut lib, "target", &[dir.clone()], &handle);
+
+        // 目标：包里的那个找到了
+        assert!(
+            lib.games[0].roms[0].available,
+            "包里的 t.rom 必须被认出来"
+        );
+        assert!(
+            !lib.games[0].roms[1].available,
+            "不在包里的 missing.rom 必须仍然是缺失"
+        );
+        assert_eq!(lib.games[0].available, GAME_MISSING);
+
+        // 旁观者：一个字节都没动
+        let b = &lib.games[1];
+        assert!(b.roms[0].available, "范围外的游戏不能被重置");
+        assert_eq!(b.available, GAME_COMPLETE, "范围外的定级不能被改");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 范围要含 romof 父集：克隆集缺的条目能从父集的包里找到。
+    /// 范围要含 romof 父集：父集自己的包也要被扫到。
+    ///
+    /// 注意父集的包**不会**把条目记到克隆集头上——`scan_units` 建的
+    /// crc 表只含"本机种 + 其克隆集"（这是 1.8.2 的口径，也是全库审计
+    /// 不把 4.4 万个包的 crc 互相串起来的原因）。共享条目靠第 6 步的
+    /// romof 回填补上，而那一步要求父集在范围内。所以这里断言的是
+    /// "父集的包被打开过，且回填能功。
+    #[test]
+    fn the_scope_covers_the_romof_parent() {
+        const SHARED: &[u8] = b"from parent";
+        const OWN: &[u8] = b"from child";
+        let dir = std::env::temp_dir().join("mvui-auditgame-parent");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        make_zip(&dir, "parent.zip", &[("shared.rom", SHARED)]);
+        make_zip(&dir, "child.zip", &[("own.rom", OWN)]);
+
+        let mut lib = GameLibrary::new("test".into());
+        let mut child = GameMeta {
+            name: "child".into(),
+            romof: "parent".into(),
+            ..Default::default()
+        };
+        child.roms.push(rom_named("shared.rom", SHARED));
+        child.roms.push(rom_named("own.rom", OWN));
+        let mut parent = GameMeta {
+            name: "parent".into(),
+            ..Default::default()
+        };
+        parent.roms.push(rom_named("shared.rom", SHARED));
+        lib.games.push(child);
+        lib.games.push(parent);
+        lib.rebuild_indexes();
+
+        // 范围必须含父集，否则父集的包根本不会被打开、romof 回填也无从起谈
+        let scope = audit_scope(&lib, "child").expect("child 在库里");
+        assert_eq!(scope.game, 0);
+        assert_eq!(scope.parents, vec![1], "父集在范围内");
+        assert_eq!(scope.len(), 2);
+
+        let handle = AuditHandle::new();
+        let n = audit_game(&mut lib, "child", &[dir.clone()], &handle);
+        assert_eq!(n, 2, "child.zip 和 parent.zip 都被扫（父集在范围内）");
+        assert!(lib.games[0].roms[1].available, "own.rom 直接命中");
+        assert!(
+            lib.games[0].roms[0].available,
+            "shared.rom 通过 romof 回填从父集补上"
+        );
+        assert!(lib.games[0].roms.iter().all(|r| r.available));
+        assert_eq!(lib.games[0].available, GAME_COMPLETE);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 范围要含引用设备与样本。
+    #[test]
+    fn the_scope_covers_devices_and_samples() {
+        let mut lib = GameLibrary::new("test".into());
+        let mut g = GameMeta {
+            name: "game".into(),
+            sampleof: "ssample".into(),
+            ..Default::default()
+        };
+        g.devices.push(DeviceInfo {
+            kind: "m68000".into(),
+            instance: "m68000".into(),
+            tag: "maincpu".into(),
+            ..Default::default()
+        });
+        let mut cpu = GameMeta {
+            name: "m68000".into(),
+            is_device: true,
+            ..Default::default()
+        };
+        cpu.roms.push(rom_named("mc68000.bin", b"cpu data"));
+        let mut sample = GameMeta {
+            name: "ssample".into(),
+            ..Default::default()
+        };
+        sample.roms.push(rom_named("a.wav", b"a wave"));
+        lib.games.push(g);
+        lib.games.push(cpu);
+        lib.games.push(sample);
+        lib.rebuild_indexes();
+
+        let scope = audit_scope(&lib, "game").expect("game 在库里");
+        assert_eq!(scope.devices, vec![1], "设备在范围内");
+        assert_eq!(scope.samples, vec![2], "样本在范围内");
+        assert_eq!(scope.len(), 3);
+        assert_eq!(scope.all(), vec![0, 1, 2]);
+    }
+
+    /// 设备包的可用性要被这一轮更新（设备 rom 也是这盘游戏要的文件）。
+    #[test]
+    fn device_roms_get_audited_too() {
+        const CPU_DATA: &[u8] = b"cpu data";
+        let dir = std::env::temp_dir().join("mvui-auditgame-device");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        make_zip(&dir, "m68000.zip", &[("mc68000.bin", CPU_DATA)]);
+
+        let mut lib = GameLibrary::new("test".into());
+        let mut g = GameMeta {
+            name: "game".into(),
+            ..Default::default()
+        };
+        g.devices.push(DeviceInfo {
+            kind: "m68000".into(),
+            instance: "m68000".into(),
+            tag: "maincpu".into(),
+            ..Default::default()
+        });
+        let mut cpu = GameMeta {
+            name: "m68000".into(),
+            is_device: true,
+            ..Default::default()
+        };
+        cpu.roms.push(rom_named("mc68000.bin", CPU_DATA));
+        lib.games.push(g);
+        lib.games.push(cpu);
+        lib.rebuild_indexes();
+
+        let handle = AuditHandle::new();
+        let n = audit_game(&mut lib, "game", &[dir.clone()], &handle);
+        assert_eq!(n, 1, "设备的包被扫了");
+        assert!(
+            lib.games[1].roms[0].available,
+            "设备 rom 认出来了——它也是这盘游戏要的文件"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 库里没有这台游戏时不能 panic：静默返回 0 个归档。
+    #[test]
+    fn auditing_an_unknown_game_is_a_no_op() {
+        let mut lib = GameLibrary::new("test".into());
+        lib.rebuild_indexes();
+        let handle = AuditHandle::new();
+        assert_eq!(
+            audit_game(&mut lib, "nope", &[], &handle),
+            0,
+            "不存在的游戏不该炸，也不该扫任何东西"
+        );
+        assert!(handle.finished.load(Ordering::Relaxed), "句柄必须收尾");
+    }
+
+    /// romof 成环时范围计算必须终止。
+    #[test]
+    fn a_cyclic_scope_terminates() {
+        let mut lib = GameLibrary::new("test".into());
+        let mut a = GameMeta {
+            name: "a".into(),
+            romof: "b".into(),
+            ..Default::default()
+        };
+        a.roms.push(rom_named("a.rom", b"a data"));
+        let mut b = GameMeta {
+            name: "b".into(),
+            romof: "a".into(),
+            ..Default::default()
+        };
+        b.roms.push(rom_named("b.rom", b"b data"));
+        lib.games.push(a);
+        lib.games.push(b);
+        lib.rebuild_indexes();
+
+        let scope = audit_scope(&lib, "a").expect("a 在库里");
+        assert_eq!(scope.parents, vec![1], "b 进范围，a 不再进");
+    }
+
+    /// 取消必须把范围内的旧结论**原样还原**。
+    ///
+    /// 这是"就地改库"才有的风险：`audit_game` 先把范围内那几台的 `available`
+    /// 全清成 false，再去扫包。扫到一半取消的话，那次清零就成了最终结论——
+    /// 一台本来齐备的游戏被判成"全缺失"，而调用方还会把它当审计结果落盘。
+    /// 所以取消路径必须回滚，而 `audit_game` 手上只有它自己留的那份备份。
+    #[test]
+    fn cancelling_restores_the_previous_verdicts() {
+        let dir = std::env::temp_dir().join("mvui-auditgame-cancel");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        make_zip(&dir, "game.zip", &[("g.rom", b"g data")]);
+
+        let mut lib = GameLibrary::new("test".into());
+        let mut g = GameMeta {
+            name: "game".into(),
+            ..Default::default()
+        };
+        g.roms.push(rom_named("g.rom", b"g data"));
+        // 审计前的状态：齐备
+        g.roms[0].available = true;
+        g.available = GAME_COMPLETE;
+        lib.games.push(g);
+        lib.rebuild_indexes();
+
+        let handle = AuditHandle::new();
+        handle.cancel.store(true, Ordering::Relaxed);
+        let n = audit_game(&mut lib, "game", &[dir.clone()], &handle);
+
+        assert_eq!(n, 0, "取消的审计不报扫了几个");
+        assert!(
+            lib.games[0].roms[0].available,
+            "取消后 rom 的可用性必须回到审计前——不能停在「刚清零」那个中间态"
+        );
+        assert_eq!(
+            lib.games[0].available, GAME_COMPLETE,
+            "取消后整机的定级也必须回到审计前"
+        );
+        assert!(handle.finished.load(Ordering::Relaxed), "句柄必须收尾");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

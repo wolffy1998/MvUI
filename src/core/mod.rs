@@ -35,5 +35,6 @@ pub mod mameproc;
 pub mod model;
 pub mod options;
 pub mod paths;
+pub mod rominfo;
 pub mod settings;
 pub mod zip64;

@@ -10,6 +10,7 @@ mod events;
 mod fonts;
 mod i18n;
 mod icons;
+mod rompanel;
 mod views;
 mod windows;
 mod ui;

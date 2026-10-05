@@ -253,6 +253,9 @@ fn finish_boot_cached(
         lib: Arc::new(Mutex::new(library)),
         folders: folder_cache,
         from_cache: true,
+        // 这条路径只在 `data.audited` 为真时走到（boot_run 的三分支），
+        // 所以这里一定是已审计的库
+        audited: true,
     })));
     published.store(true, Ordering::Relaxed);
 }
@@ -348,6 +351,8 @@ fn finish_boot(
         lib: lib_shared.clone(),
         folders: folder_cache,
         from_cache: false,
+        // 审计**还没跑**（这一步就是为审计腾出界面），所以是 false
+        audited: false,
     })));
     published.store(true, Ordering::Relaxed);
 
@@ -558,6 +563,94 @@ pub fn run_audit(
             audit_t0.elapsed()
         );
         let _ = tx.send(AppEvent::AuditDone(msg));
+        ctx.request_repaint();
+    });
+}
+
+/// 单游戏审计（右键/菜单「审计 ROM」）。
+///
+/// 与 [`run_audit`] 的关键差别：**就地改共享库，不做快照**。全库审计要动
+/// 5 万台游戏，所以宁可克隆一份再换回去；单游戏只碰 3~5 台，就地改的窗口是
+/// 毫秒级，而克隆一份 5 万台 `GameMeta`（每个带几十条 rom）要几百毫秒——
+/// 为了这一秒的操作付那个代价不划算。
+///
+/// 代价是审计期间 UI 那条线程会被 `lib` 锁挡住几毫秒。那点卡顿比"克隆半秒"
+/// 好，而且这期间用户唯一能做的就是等弹窗。
+///
+/// 锁顺序照旧：先 `opts` 读 rompath（**不持锁**），再 `lib`。反过来的话会和
+/// `MameApp::ensure_chain`（opts → lib）死锁。
+pub fn run_game_audit(
+    lib: SharedLib,
+    opts: SharedOpts,
+    game: String,
+    handle: Arc<AuditHandle>,
+    tx: Sender<AppEvent>,
+    ctx: egui::Context,
+) {
+    dlog!("单游戏审计: 后台线程启动（{game}）");
+    thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // 与 run_audit 同一个锁序：opts 在前、lib 在后，且读路径时不持锁
+            let rom_paths = {
+                let core = opts.lock().unwrap();
+                match core.opts.get("rompath") {
+                    Some(o) => core.resolve_dir_list(&o.currvalue),
+                    None => Vec::new(),
+                }
+            };
+            let (view, scanned) = {
+                let mut guard = lib.lock().unwrap();
+                let scanned = audit::audit_game(&mut guard, &game, &rom_paths, &handle);
+                // 视图在锁内算：它要读的就是刚改完的这份库
+                let view = crate::core::rominfo::view_of(&guard, &game, true);
+                (view, scanned)
+            };
+            // 落盘：单游戏审计改了 available，缓存必须跟着更新，否则重启
+            // 后又变回旧结论。用 audited=true——它确实是一次完整审计的局部。
+            //
+            // 两种情况不能落：
+            // - **被取消**：`audit_game` 已把范围内的旧结论原样还原，这一步
+            //   一个字节都没改，落盘只会把 `audited` 置真——那等于告诉下次
+            //   启动"别审计了"。
+            // - **库里没这个游戏**：`audit_game` 直接返回，同样什么都没改。
+            //
+            // 注意 `scanned == 0` 本身**不是**不能落的理由：包一个都没找到
+            // 恰恰是有效结论（把过期的"完整"纠正成"缺失"），必须落下去。
+            let known = lib.lock().unwrap().get_idx(&game).is_some();
+            if !handle.cancelled() && known {
+                let cache_path = GuiSettings::cache_dir().join("gamelist.cache");
+                let guard = lib.lock().unwrap();
+                if let Err(e) = cache::save_library(&cache_path, &guard.mame_version, &guard, true)
+                {
+                    dlog!("单游戏审计: 缓存落盘失败：{e}");
+                }
+            } else {
+                dlog!(
+                    "单游戏审计: 未落盘（取消={} 已知={} 扫了 {} 个归档）",
+                    handle.cancelled(),
+                    known,
+                    scanned
+                );
+            }
+            Ok::<_, String>(view)
+        }));
+        let msg = match result {
+            Ok(v) => v,
+            // `panic!("literal")` 交过来的是 `&str` 不是 `String`：只 match
+            // String 那半边会让一半的 panic 报不出原因（与 run_audit 同理）
+            Err(e) => Err(format!("audit panicked: {}", panic_text(e.as_ref()))),
+        };
+        dlog!(
+            "单游戏审计: {} 结束（{}），耗时 {:?}",
+            game,
+            match &msg {
+                Ok(_) => "ok",
+                Err(m) => m.as_str(),
+            },
+            t0.elapsed()
+        );
+        let _ = tx.send(AppEvent::GameAuditDone { game, result: msg });
         ctx.request_repaint();
     });
 }

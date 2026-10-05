@@ -19,16 +19,34 @@ pub const DOCK_MAMEINFO: usize = 8;
 pub const DOCK_DRIVERINFO: usize = 9;
 pub const DOCK_STORY: usize = 10;
 pub const DOCK_COMMAND: usize = 11;
-pub const DOCK_LAST: usize = 12;
+/// 第六个文档面板：Rom 信息。
+///
+/// **它不在旧版的 `DOCK_*` 段里，也不是 `DOCK_*`。** 前 12 个编号是 1.8.2
+/// 的 `DOCK_*` 枚举，照搬是为了让 `dock_file_option` / `DOCK_NAMES` /
+/// `get_history` 那一整套索引继续对齐；Rom 信息是新增的面板，硬插进那个
+/// 段里会让后面所有编号都平移一位，而那些编号已经被存进用户的布局配置
+/// （`dock_state` 序列化在 ini 里）——平移等于让所有老用户的面板错位。
+///
+/// 所以它单独占 12，并且 [`TEXT_DOCKS`]（**面板顺序**，另一个索引空间）
+/// 里的第 6 位指向它。两个空间各司其职，别混。
+pub const DOCK_ROMINFO: usize = 12;
+pub const DOCK_LAST: usize = 13;
 
-/// The five document docks, in the order the tab bar and the visibility
+/// 文档面板的个数。
+///
+/// UI 侧的 `text_dock_visible: [bool; N]` 和 `(0..N)` 的循环都用它，不要
+/// 再写死 `5` —— 写死过一次，加面板时就漏了三处（`default_docks_filtered`、
+/// `expected_tabs`、`info_panels_submenu`），而漏掉的表现是"勾上了但不出现"。
+pub const TEXT_DOCK_COUNT: usize = 6;
+
+/// The document docks, in the order the tab bar and the visibility
 /// checkboxes list them.
 ///
 /// **A text tab index is not a `DOCK_*` value.** The UI stores document tabs as
-/// `MainTab::Text(0..5)` — a compact index into the checkbox array — while
+/// `MainTab::Text(0..6)` — a compact index into the checkbox array — while
 /// everything below this module (`dock_file_option`, `DOCK_NAMES`, the `method`
-/// parameter threaded through `get_history`) speaks `DOCK_*`, where the same
-/// five start at [`DOCK_HISTORY`] = 7.
+/// parameter threaded through `get_history`) speaks `DOCK_*`, where they start
+/// at [`DOCK_HISTORY`] = 7.
 ///
 /// Passing a tab index where a `DOCK_*` is expected fails silently and
 /// everywhere at once: `dock_file_option` returns `None`, so the lookup
@@ -37,15 +55,16 @@ pub const DOCK_LAST: usize = 12;
 /// `dock == DOCK_COMMAND` test in the renderer never fires, so even a record
 /// that *was* found would print as plain text with no command icons. Use
 /// [`text_dock`] at the boundary rather than doing the arithmetic inline.
-pub const TEXT_DOCKS: [usize; 5] = [
+pub const TEXT_DOCKS: [usize; TEXT_DOCK_COUNT] = [
     DOCK_HISTORY,
     DOCK_MAMEINFO,
     DOCK_DRIVERINFO,
     DOCK_STORY,
     DOCK_COMMAND,
+    DOCK_ROMINFO,
 ];
 
-/// Translate a document tab index (`0..5`) into its `DOCK_*` value.
+/// Translate a document tab index (`0..6`) into its `DOCK_*` value.
 ///
 /// Returns `DOCK_HISTORY` for an out-of-range index so a malformed saved layout
 /// degrades to a real dock instead of indexing the DAT arrays out of bounds.
@@ -54,8 +73,7 @@ pub fn text_dock(tab: usize) -> usize {
 }
 
 pub const DOCK_NAMES: [&str; DOCK_LAST] = [
-    "Snapshot",
-    "Flyer",
+    "Snapshot",    "Flyer",
     "Cabinet",
     "Marquee",
     "Title",
@@ -66,6 +84,7 @@ pub const DOCK_NAMES: [&str; DOCK_LAST] = [
     "DriverInfo",
     "Story",
     "Command",
+    "RomInfo",
 ];
 
 /// archive/dir names searched per image dock (origin: getScreenshot)
@@ -561,6 +580,10 @@ mod tests {
             (DOCK_DRIVERINFO, "DriverInfo", Some("mameinfo_file")),
             (DOCK_STORY, "Story", Some("story_file")),
             (DOCK_COMMAND, "Command", Some("command_file")),
+            // Rom 信息面板没有外部文档：`dock_file_option` 必须是 `None`，
+            // 否则 `documents_content` 会去等一个永远不会来的文件（而 dat
+            // 面板那些入口全靠这个返回值决定要不要弹选择框）。
+            (DOCK_ROMINFO, "RomInfo", None),
         ];
         for (tab, (dock, name, opt)) in expected.iter().enumerate() {
             assert_eq!(text_dock(tab), *dock, "tab {tab}");
@@ -578,10 +601,33 @@ mod tests {
     #[test]
     fn command_tab_reaches_the_command_renderer() {
         assert_eq!(text_dock(4), DOCK_COMMAND);
+        assert_eq!(text_dock(5), DOCK_ROMINFO);
         assert!(TEXT_DOCKS.contains(&DOCK_COMMAND));
         // and no *other* tab may claim to be the command dock
         for tab in 0..4 {
             assert_ne!(text_dock(tab), DOCK_COMMAND, "tab {tab}");
+        }
+    }
+
+    /// `DOCK_ROMINFO` 必须单独占编号 12，不能把旧的往后挤。
+    ///
+    /// 前 12 个 `DOCK_*` 是 1.8.2 的枚举，已经序列化进用户 ini 的
+    /// `dock_layout`（标签名和 `MainTab::Text(i)` 都按这个编号空间存的）。
+    /// 平移旧编号会让老用户升级后每一个文档面板都变成隔壁那个——不报错，
+    /// 只是内容全错位，而用户只会觉得"程序坏了"。
+    #[test]
+    fn the_new_dock_does_not_renumber_the_old_ones() {
+        // 旧编号原样不变（1.8.2 的枚举顺序）
+        assert_eq!(DOCK_HISTORY, 7);
+        assert_eq!(DOCK_MAMEINFO, 8);
+        assert_eq!(DOCK_DRIVERINFO, 9);
+        assert_eq!(DOCK_STORY, 10);
+        assert_eq!(DOCK_COMMAND, 11);
+        // 新面板接在末尾，且不与任何旧编号相撞
+        assert_eq!(DOCK_ROMINFO, 12);
+        assert_eq!(DOCK_LAST, 13);
+        for old in 7..DOCK_ROMINFO {
+            assert_ne!(text_dock(old - 7), DOCK_ROMINFO, "dock {old} 被顶掉了");
         }
     }
 

@@ -217,7 +217,7 @@ pub struct MameApp {
     pub font_zoom: f32,
     pub image_dock_visible: [bool; 7],
     pub image_dock_tab: usize,
-    pub text_dock_visible: [bool; 5],
+    pub text_dock_visible: [bool; crate::core::dat::TEXT_DOCK_COUNT],
     pub show_folder_dock: bool,
     pub dock_state: egui_dock::DockState<crate::ui::MainTab>,
 
@@ -240,6 +240,30 @@ pub struct MameApp {
     /// rate, so the result is memoized (see `ui::MameApp::cached_lines`)
     /// instead of being recomputed every frame.
     pub doc_parsed: HashMap<(usize, String), Arc<Vec<crate::core::dat::DatLine>>>,
+
+    // ---- Rom 信息（面板 + 单游戏审计）--------------------------------
+    /// 缓存的 Rom 信息视图，键是游戏名。
+    ///
+    /// egui 在**每帧**调这个渲染器，而 `rominfo::view_of` 要扫库（父集链、
+    /// 设备、样本），5 万台游戏的库上一帧 60 次是白烧 CPU。审计结果只在一轮
+    /// 审计结束时变一次，所以按游戏名缓存、审计完清空。
+    pub rom_views: HashMap<String, crate::core::rominfo::RomInfoView>,
+    /// 全库审计过没有（= `gamelist.cache` 的 `audited` 标志）。
+    ///
+    /// false 时 `rominfo::view_of` 把所有缺失降级成"未审计"——冷启动后审计还
+    /// 没跑，此时 `available` 全是默认值，一律显示"缺失"会让用户以为自己的
+    /// 盘是空的。
+    pub lib_audited: bool,
+    /// 单游戏审计的进度句柄（非空 = 正在跑）。
+    pub game_audit: Option<Arc<crate::core::audit::AuditHandle>>,
+    /// 单游戏审计的目标游戏名，用来防止结果弹到别的游戏上。
+    pub game_audit_target: String,
+    /// 单游戏审计跑完的结果弹窗：`(游戏名, 视图)`。
+    ///
+    /// 用**视图**而不是裸数据，是因为弹窗要和 dock 面板同款渲染（复用
+    /// `rompanel::render`）。跑完的视图是那一瞬间的快照，不受之后切换游戏
+    /// 影响——这正是"单独审一次然后看结果"要的语义。
+    pub game_audit_result: Option<(String, crate::core::rominfo::RomInfoView)>,
 
     // dialogs
     pub show_options_win: Option<usize>,
@@ -367,9 +391,15 @@ impl MameApp {
                 image_dock_visible[i] = v == "1";
             }
         }
-        let mut text_dock_visible = [true; 5];
+// Rom 信息面板默认**不**开：它是新增的第 6 个文档面板，老用户升级后布局里
+        // 没有它，突然多一个标签会挤掉现有面板的位置。老 ini 里的 `text_docks`
+        // 只有 5 段，循环的 `.take` 正好把第 6 位留给这个默认值。
+        let mut text_dock_visible = [true; crate::core::dat::TEXT_DOCK_COUNT];
+        text_dock_visible[crate::core::dat::TEXT_DOCK_COUNT - 1] = false;
         if let Some(csv) = gui.get("text_docks") {
-            for (i, v) in csv.split(';').enumerate().take(5) {
+            // 必须按 `TEXT_DOCK_COUNT` 截断而不是写死 5：写死的话，用户开过
+            // Rom 信息面板 → 存盘 6 段 → 下次启动又被截掉，开关根本存不住。
+            for (i, v) in csv.split(';').enumerate().take(crate::core::dat::TEXT_DOCK_COUNT) {
                 text_dock_visible[i] = v == "1";
             }
         }
@@ -493,6 +523,12 @@ impl MameApp {
             dat_texts: HashMap::new(),
             dat_requested: HashSet::new(),
             doc_parsed: HashMap::new(),
+            rom_views: HashMap::new(),
+            // 引导流程会按缓存里的 `audited` 标志纠正它（`LibraryReady`）
+            lib_audited: false,
+            game_audit: None,
+            game_audit_target: String::new(),
+            game_audit_result: None,
             show_options_win: None,
             opt_level: 1,
             opt_category: "Core Video".into(),
@@ -1091,7 +1127,7 @@ impl MameApp {
                     dlog!("事件: LibraryReady 到达");
                     match res {
                         Ok(payload) => {
-                            let ReadyPayload { lib, folders, from_cache, .. } = payload;
+                            let ReadyPayload { lib, folders, from_cache, audited } = payload;
                             let machine_count = {
                                 let mut guard = lib.lock().unwrap();
                                 // the localized list is applied here, not during the
@@ -1109,6 +1145,10 @@ impl MameApp {
                             self.lib = Some(lib);
                             self.folder_cache = Some(folders);
                             self.boot_auditing = !from_cache;
+                            // 审计前发布的那一次 `audited == false`：Rom 信息
+                            // 面板这时把所有条目显示成"未审计"而不是"缺失"
+                            self.lib_audited = audited;
+                            self.rom_views.clear();
                             self.lib_status = LibStatus::Ready;
                             self.progress_open = false;
                             self.load_ext_folders();
@@ -1122,6 +1162,7 @@ impl MameApp {
                                 machine_count,
                                 from_cache
                             );
+                            dlog!("事件: 库审计标志 audited={audited}");
                         }
                         Err(e) => {
                             self.lib_status = LibStatus::Error;
@@ -1173,6 +1214,11 @@ impl MameApp {
                 AppEvent::AuditDone(res) => {
                     self.audit_handle = None;
                     self.boot_auditing = false;
+                    // 全库审计结束：每条 rom 的 available 都变了，而面板缓存的正是那些
+                    // 旧结论。清掉，下一帧按当前游标重算。同时把 `lib_audited`
+                    // 置真：之前面板把一切缺失都降级成"未审计"显示，现在该让它说真话了。
+                    self.lib_audited = true;
+                    self.rom_views.clear();
                     match res {
                         Ok(m) => self.log(m),
                         Err(m) => self.log(format!("audit: {m}")),
@@ -1184,6 +1230,20 @@ impl MameApp {
                         self.export_target = None;
                     }
                     self.needs_refilter = true;
+                }
+                AppEvent::GameAuditDone { game, result } => {
+                    self.game_audit = None;
+                    match result {
+                        Ok(view) => {
+                            // 面板缓存里的是旧结论，先把这次的新结论放进去——用户正好在看
+                            // 这款游戏的面板，不该还看到旧的
+                            if let Some(slot) = self.rom_views.get_mut(&game) {
+                                *slot = view.clone();
+                            }
+                            self.game_audit_result = Some((game, view));
+                        }
+                        Err(m) => self.poplog(m),
+                    }
                 }
                 AppEvent::SnapReady { dock, game, width, height, rgba } => {
                     // the reply means the request is no longer in flight: drop the

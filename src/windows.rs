@@ -66,6 +66,73 @@ pub fn draw_app_logo(ui: &mut egui::Ui, size: f32) -> bool {
     true
 }
 
+/// Height of the band `egui::Window` reserves for its title bar, which is where
+/// [`paint_title_logo`] puts the mark. Computed the same way `Window` does it.
+pub fn title_bar_height(ctx: &egui::Context) -> f32 {
+    let style = ctx.style();
+    ctx.fonts(|f| f.row_height(&style.text_styles[&egui::TextStyle::Heading]))
+        + style.spacing.window_margin.top
+        + style.spacing.window_margin.bottom
+}
+
+/// Paint the MvUI mark into the window's own title bar, left of the title text.
+///
+/// egui 0.29's `Window` has no `title_bar(|ui| …)` hook (that arrived in 0.30),
+/// and the mark cannot be added as an ordinary widget: the title bar is drawn by
+/// `Window` itself *above* the closure's rectangle, while `Ui::painter` is
+/// clipped to that rectangle, so a shape drawn up there is discarded without
+/// warning. Cloning the painter and replacing the clip rect with the title bar's
+/// own bounds lifts that restriction.
+///
+/// Painting from inside the `show()` closure is deliberate and is what makes it
+/// visible: `Window` reserves the title-bar background as a placeholder *before*
+/// running the closure (`window.rs:523`) and fills it in afterwards
+/// (`window.rs:592`). Because `Painter::set` replaces a shape in place, that
+/// background keeps its early index and every shape added from here lands on top.
+///
+/// `bar_h` should come from [`title_bar_height`] with the same `ctx`.
+pub fn paint_title_logo(ui: &egui::Ui, ctx: &egui::Context, bar_h: f32) {
+    let style = ctx.style();
+    let content = ui.max_rect();
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(ui.clip_rect().min.x, content.min.y - bar_h),
+        egui::pos2(ui.clip_rect().max.x, content.min.y),
+    );
+    let size = (bar_h - 8.0).clamp(12.0, 20.0);
+    let mark = egui::Rect::from_center_size(
+        egui::pos2(
+            bar.min.x + style.spacing.window_margin.left + size * 0.5,
+            bar.center().y,
+        ),
+        egui::vec2(size, size),
+    );
+    // `Image::paint_at` needs a `Ui`, and the `Ui` we have is clipped away up
+    // here, so go straight to the painter and address the texture by hand.
+    // `SizedTexture` carries the id and the source size but no UV rect, so the
+    // whole texture is addressed directly.
+    let texture = match app_logo().load(
+        ctx,
+        egui::TextureOptions::LINEAR,
+        egui::SizeHint::Scale(egui::emath::OrderedFloat(size)),
+    ) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => texture,
+        _ => {
+            // Not decoded yet. **Ask for another frame**: `load` kicks the
+            // decode off and answers `Pending`, so this is the normal state on
+            // the first frame that touches the logo. Without the repaint
+            // request nothing else would ever redraw this window, the texture
+            // would finish decoding into an atlas nobody repaints, and the mark
+            // would stay missing until the user happened to click something.
+            // (`draw_app_logo` does the same, for the same reason.)
+            ctx.request_repaint();
+            return;
+        }
+    };
+    let mut p = ui.painter().clone();
+    p.set_clip_rect(bar);
+    p.image(texture.id, mark, crate::icons::full_uv(), egui::Color32::WHITE);
+}
+
 pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_options(app, ctx);
     draw_dirs(app, ctx);
@@ -73,6 +140,7 @@ pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_cmd(app, ctx);
     draw_about(app, ctx);
     draw_verify(app, ctx);
+    draw_rom_audit(app, ctx);
     draw_filter(app, ctx);
 }
 
@@ -728,13 +796,10 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
     let browse_label = app.tr("Browse...").to_string();
     let ok_label = app.tr("OK").to_string();
     let title = app.tr("Directories").to_string();
-    // egui 0.29's `Window` has no `title_bar(|ui| …)` hook (that arrived in
-    // 0.30), so the mark is painted into the window's own title bar by hand —
-    // see below for why the closure's own painter cannot be used directly.
-    let style = ctx.style();
-    let bar_h = ctx.fonts(|f| f.row_height(&style.text_styles[&egui::TextStyle::Heading]))
-        + style.spacing.window_margin.top
-        + style.spacing.window_margin.bottom;
+    // egui 0.29's `Window` has no `title_bar(|ui| …)` hook, so the mark is
+    // painted into the window's own title bar by hand — see
+    // `paint_title_logo` for why the closure's own painter cannot be used.
+    let bar_h = title_bar_height(ctx);
 
     // the response is not needed: the title-bar mark is painted from inside the
     // closure (see below), and every value it carried is read back out of
@@ -752,46 +817,8 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
         // text, so switching language would otherwise reset the placement.
         .id(egui::Id::new("mvui_dirs"))
         .show(ctx, |ui| {
-            // The MvUI mark, at the left of the title bar. It cannot be added as
-            // a widget: the title bar is drawn by `Window` itself *above* this
-            // closure's rectangle, and `Ui::painter` is clipped to that
-            // rectangle, so a shape drawn up there is discarded without warning.
-            // Cloning the painter and replacing the clip rect with the title
-            // bar's own bounds lifts that restriction.
-            //
-            // Painting here rather than after `show()` returns is deliberate and
-            // is what makes it visible: `Window` reserves the frame background
-            // (`Shape::Noop`, `frame.rs:247`) and the title-bar background
-            // (`window.rs:523`) as placeholders *before* running this closure and
-            // fills them in afterwards (`frame.rs:339`, `window.rs:592`). Because
-            // `Painter::set` replaces a shape in place, those backgrounds keep
-            // their early indices and every shape added from here lands on top.
-            let content = ui.max_rect();
-            let bar = egui::Rect::from_min_max(
-                egui::pos2(ui.clip_rect().min.x, content.min.y - bar_h),
-                egui::pos2(ui.clip_rect().max.x, content.min.y),
-            );
-            let size = (bar_h - 8.0).clamp(12.0, 20.0);
-            let mark = egui::Rect::from_center_size(
-                egui::pos2(
-                    bar.min.x + style.spacing.window_margin.left + size * 0.5,
-                    bar.center().y,
-                ),
-                egui::vec2(size, size),
-            );
-            // `Image::paint_at` needs a `Ui`, and the `Ui` we have is clipped
-            // away up here, so go straight to the painter and address the texture
-            // by hand. `SizedTexture` carries the id and the source size but no UV
-            // rect, so the whole texture is addressed directly.
-            if let Ok(egui::load::TexturePoll::Ready { texture }) = app_logo().load(
-                ctx,
-                egui::TextureOptions::LINEAR,
-                egui::SizeHint::Scale(egui::emath::OrderedFloat(size)),
-            ) {
-                let mut p = ui.painter().clone();
-                p.set_clip_rect(bar);
-                p.image(texture.id, mark, crate::icons::full_uv(), egui::Color32::WHITE);
-            }
+            // The MvUI mark, at the left of the title bar.
+            paint_title_logo(ui, ctx, bar_h);
             ui.label(note);
             ui.label(
                 egui::RichText::new(exe_note.clone()).small().weak(),
@@ -1155,8 +1182,7 @@ fn draw_about(app: &mut MameApp, ctx: &egui::Context) {
     app.show_about = show;
 }
 
-fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {
-    let mut show = app.show_verify;
+fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {    let mut show = app.show_verify;
     egui::Window::new(app.tr("Checking..."))
         .open(&mut show)
         .resizable(true)
@@ -1171,4 +1197,50 @@ fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {
             });
         });
     app.show_verify = show;
+}
+
+/// 单游戏审计的结果弹窗（右键 / File ► Audit ROM）。
+///
+/// 版式与 Rom 信息面板**完全一致**（同一个 `rompanel::render`）——用户只需学习
+/// 一种样式。区别只在顶部那行说明：面板写"来自审计缓存"，弹窗写
+/// "刚刚重新审计"——后者是现场重审的结论，不是缓存里的。
+fn draw_rom_audit(app: &mut MameApp, ctx: &egui::Context) {
+    let Some((game, view)) = app.game_audit_result.clone() else {
+        return;
+    };
+    let title = format!("{} — {}", app.tr("Audit ROM"), game);
+    let note = app.tr("just re-audited").to_string();
+    let close_label = app.tr("Close").to_string();
+    let bar_h = title_bar_height(ctx);
+    let mut show = true;
+    let mut close = false;
+    let _ = egui::Window::new(title)
+        .open(&mut show)
+        .resizable(true)
+        .default_width(760.0)
+        .default_height(520.0)
+        // same reason as the dirs dialog: one job, one full-height list
+        .collapsible(false)
+        .frame(opaque_frame(ctx))
+        // the title carries the game name, which changes with the selection —
+        // pin the id so the window does not jump when another game is audited
+        .id(egui::Id::new("mvui_rom_audit"))
+        .show(ctx, |ui| {
+            paint_title_logo(ui, ctx, bar_h);
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    crate::rompanel::render(ui, app, &view, Some(note.clone()));
+                });
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(close_label).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if close || !show {
+        app.game_audit_result = None;
+    }
 }

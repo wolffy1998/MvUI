@@ -182,7 +182,7 @@ mod tests {
                 "image dir {rel} escaped the exe dir"
             );
         }
-        for dock in 0..5 {
+        for dock in 0..crate::core::dat::DOCK_LAST {
             let p = dat_file(None, dock);
             assert!(p.starts_with(exe.join(DAT_SUBDIR)), "dat escaped: {p:?}");
         }

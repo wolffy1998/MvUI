@@ -1421,6 +1421,22 @@ impl MameApp {
                             close = true;
                         }
                         ui.separator();
+                        // origin: `menuContext->addAction(win->actionAudit)`
+                        // between "remove from folder" and the two properties
+                        // entries — a top-level item, not inside the Audit
+                        // submenu, so that it reads as the row's own action
+                        let audit_rom = self.tr("Audit ROM");
+                        if ui
+                            .add_enabled(
+                                self.has_game() && self.can_audit(),
+                                crate::ui::button(audit_rom),
+                            )
+                            .clicked()
+                        {
+                            self.start_game_audit();
+                            close = true;
+                        }
+                        ui.separator();
                         self.audit_submenu(ui);
                         ui.separator();
                         let src = self.src_properties_label();

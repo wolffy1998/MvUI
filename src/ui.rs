@@ -6,6 +6,7 @@ use crate::icons;
 use egui_dock::{DockArea, DockState, NodeIndex};
 use crate::core::folders::{self, FolderChild, FolderKind};
 use crate::core::launcher::RunMode;
+use std::sync::{Arc, Mutex};
 
 /// `done / total` 的百分比，**值域 0..100**。
 ///
@@ -89,7 +90,7 @@ fn split_below(state: &mut DockState<MainTab>, parent: NodeIndex, fraction: f32,
 
 pub fn default_docks_filtered(
     images: &[bool; 7],
-    texts: &[bool; 5],
+    texts: &[bool; crate::core::dat::TEXT_DOCK_COUNT],
     folders: bool,
 ) -> DockState<MainTab> {
     // The machine tree is a normal dock tab in the left strip (origin: the
@@ -102,7 +103,10 @@ pub fn default_docks_filtered(
         (DockState::new(vec![MainTab::List]), NodeIndex::root())
     };
     let img_tabs: Vec<MainTab> = (0..7).filter(|&i| images[i]).map(MainTab::Image).collect();
-    let txt_tabs: Vec<MainTab> = (0..5).filter(|&i| texts[i]).map(MainTab::Text).collect();
+    let txt_tabs: Vec<MainTab> = (0..crate::core::dat::TEXT_DOCK_COUNT)
+        .filter(|&i| texts[i])
+        .map(MainTab::Text)
+        .collect();
     if !img_tabs.is_empty() {
         let [list_node, _] = split_right(&mut state, root, 0.68, img_tabs);
         if !txt_tabs.is_empty() {
@@ -125,13 +129,21 @@ fn tab_key(t: &MainTab) -> (u8, usize) {
 }
 
 /// the exact tab set the View-menu visibility checkboxes imply
-pub fn expected_tabs(images: &[bool; 7], texts: &[bool; 5], folders: bool) -> Vec<MainTab> {
+pub fn expected_tabs(
+    images: &[bool; 7],
+    texts: &[bool; crate::core::dat::TEXT_DOCK_COUNT],
+    folders: bool,
+) -> Vec<MainTab> {
     let mut v = vec![MainTab::List];
     if folders {
         v.push(MainTab::Folders);
     }
     v.extend((0..7).filter(|&i| images[i]).map(MainTab::Image));
-    v.extend((0..5).filter(|&i| texts[i]).map(MainTab::Text));
+    v.extend(
+        (0..crate::core::dat::TEXT_DOCK_COUNT)
+            .filter(|&i| texts[i])
+            .map(MainTab::Text),
+    );
     v
 }
 
@@ -141,7 +153,7 @@ pub fn expected_tabs(images: &[bool; 7], texts: &[bool; 5], folders: bool) -> Ve
 pub fn restore_docks(
     saved: &str,
     images: &[bool; 7],
-    texts: &[bool; 5],
+    texts: &[bool; crate::core::dat::TEXT_DOCK_COUNT],
     folders: bool,
 ) -> Option<DockState<MainTab>> {
     if saved.is_empty() {
@@ -214,7 +226,7 @@ impl egui_dock::TabViewer for DockTabs<'_> {
             MainTab::Folders => self.app.tr("Folders"),
             MainTab::Image(d) => self.app.tr(crate::core::dat::DOCK_NAMES[*d]),
             // index `DOCK_NAMES` through `text_dock` instead of a private
-            // five-element array: same names, but a malformed saved layout
+            // per-panel array: same names, but a malformed saved layout
             // yields a valid dock instead of an out-of-bounds panic
             MainTab::Text(d) => {
                 let dock = crate::core::dat::text_dock(*d);
@@ -604,8 +616,19 @@ impl MameApp {
 
     pub fn audit_submenu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button(self.tr("Audit"), |ui| {
-            // the single-game audit moved to View ▸ Refresh (F5); the batch
-            // audits and the exports stay here
+            // The single-game re-audit sits at the top of this submenu rather
+            // than only on the row's right-click menu, because the File menu is
+            // the only one reachable by keyboard. Origin
+            // `on_actionAudit_triggered` (`-verifyroms <game>`).
+            let rom = self.tr("Audit ROM");
+            if ui
+                .add_enabled(self.has_game() && self.can_audit(), button(rom))
+                .clicked()
+            {
+                self.start_game_audit();
+                ui.close_menu();
+            }
+            ui.separator();
             let ar = self.tr("Audit All Roms");
             if ui.button(ar).clicked() {
                 self.verify(false, false);
@@ -662,12 +685,13 @@ impl MameApp {
                 }
             }
             ui.separator();
-            for (i, name) in ["History", "MAMEInfo", "DriverInfo", "Story", "Command"]
-                .iter()
-                .enumerate()
-            {
+            // 文档面板的名字直接取 `DOCK_NAMES`：菜单、tab 标题、存档里的布局
+            // 三处用的是同一张表，加面板时不会漏掉某一处（漏掉的表现是
+            // "勾上了但 tab 上是另一个名字"）。
+            for i in 0..crate::core::dat::TEXT_DOCK_COUNT {
                 let mut v = self.text_dock_visible[i];
-                let label = self.tr(name);
+                let label = self.tr(crate::core::dat::DOCK_NAMES
+                    [crate::core::dat::text_dock(i)]);
                 if ui.checkbox(&mut v, label).changed() {
                     self.text_dock_visible[i] = v;
                     self.dock_state = default_docks_filtered(
@@ -1342,12 +1366,109 @@ impl MameApp {
         parsed
     }
 
+    /// 该不该让「审计 Rom」可点。
+    ///
+    /// 审计要占着库写 `available`，所以两个正在跑的审计都得让位：一个是它自己
+    /// （`game_audit`），一个是全库那个（`audit_handle`）——两者同时跑出来的
+    /// 结论是交集，谁最后落盘谁赢，用户看到的是"刚审完就又变了"。
+    pub fn can_audit(&self) -> bool {
+        self.game_audit.is_none() && self.audit_handle.is_none()
+    }
+
+    /// 只审计当前选中的这一款游戏（右键 / File ▸ Audit ▸ Audit ROM）。
+    ///
+    /// 范围是它自己 + 依赖的主 ROM 文件 + BIOS + 设备 + 样本 + CHD，见
+    /// `core::audit::audit_scope`。**不**重扫全库，所以通常一秒内结束
+    /// （`audit_cache` 记着每个包的内容，包没变就只 stat 不重开）。
+    ///
+    /// 旧版 1.8.2 的 `actionAudit` 是把 `mame -verifyroms <game>` 的 stdout
+    /// 显示在一个文本框里；这里改成读审计缓存的同一份结论（`audit_game`），
+    /// 因此比 `-verifyroms` 快得多，而且拥有/缺失是结构化的、能直接显示状态色。
+    pub fn start_game_audit(&mut self) {
+        if !self.can_audit() {
+            return;
+        }
+        let game = self.current_game.clone();
+        if game.is_empty() {
+            return;
+        }
+        let Some(lib) = self.lib.clone() else { return };
+        let handle = Arc::new(crate::core::audit::AuditHandle::new());
+        self.game_audit = Some(handle.clone());
+        self.game_audit_target = game.clone();
+        self.log(format!("auditing rom: {game}"));
+        crate::background::run_game_audit(
+            lib,
+            self.opts
+                .clone()
+                .unwrap_or_else(|| Arc::new(Mutex::new(crate::core::options::OptionCore::default()))),
+            game,
+            handle,
+            self.events_tx.clone(),
+            self.ctx(),
+        );
+    }
+
+    /// Rom 信息面板（View ▸ 自定义信息栏 ▸ RomInfo）。
+    ///
+    /// 数据来自**审计缓存**：`gamelist.cache` 里的每条 `RomInfo::available`。
+    /// 所以切游戏立刻就有内容，不需要碰磁盘、不需要等 dat 文件。
+    ///
+    /// 整份视图按游戏名缓存（`rom_views`）：egui 每帧都调这个函数，而
+    /// `rominfo::view_of` 要扫库（父集链 + 设备 + 样本）。审计结束时清空
+    /// 缓存（`lib_audited` 的写入点都在那儿）。
+    pub fn rom_info_content(&mut self, ui: &mut egui::Ui, game: &str) {
+        if game.is_empty() || self.lib.is_none() {
+            ui.weak(self.tr("Select a game to see its roms."));
+            return;
+        }
+        // 审计正在跑：这一轮的结论马上会变，但显示旧的更糟——用户会以为
+        // 刚跑完的审计没生效。所以明说。
+        let auditing = self.game_audit.is_some();
+        if !self.rom_views.contains_key(game) {
+            let view = {
+                let Some(lib) = self.lib.clone() else { return };
+                let guard = lib.lock().unwrap();
+                // 缓存容量：用户快速点过 50 款游戏就该有 50 份视图，每份
+                // 几 KB。上限比 dat 缓存小，因为一个游戏一份、且切回来看时
+                // 大概率已经审计完了（要最新的可以按 F5 或右键重审）。
+                //
+                // 超限就**整体清空**，不做逐出记账：一个游戏一份、几 KB，
+                // 64 份还超了说明用户在一轮审计前点了 64 款以上——而那轮审计
+                // 一结束本来就要清空一次。为这点流量维护 LRU 链表不值得，
+                // 而且逐出写错的表现是"面板偶发空白"，很难查。
+                const VIEW_CACHE_CAP: usize = 64;
+                if self.rom_views.len() >= VIEW_CACHE_CAP {
+                    self.rom_views.clear();
+                }
+                crate::core::rominfo::view_of(&guard, game, self.lib_audited)
+            };
+            self.rom_views.insert(game.to_string(), view);
+        }
+        let Some(view) = self.rom_views.get(game).cloned() else { return };
+        let note = if auditing {
+            Some(self.tr("auditing ROM..."))
+        } else {
+            Some(self.tr("from audit cache"))
+        };
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| crate::rompanel::render(ui, self, &view, note));
+    }
+
     pub fn documents_content(&mut self, ui: &mut egui::Ui, tab: usize) {
-        // `tab` is a document-tab index (0..5); everything below speaks `DOCK_*`,
-        // where these five live at 7..11. Converting once here keeps the lookup
-        // key, the cache key and the renderer all in the same index space.
+        // `tab` is a document-tab index; everything below speaks `DOCK_*`,
+        // where the document docks live at 7..12. Converting once here keeps
+        // the lookup key, the cache key and the renderer in one index space.
         let dock = crate::core::dat::text_dock(tab);
         let game = self.current_game.clone();
+        // Rom 信息面板**不走外部 dat**：它要的是审计结果，而审计结果躺在
+        // 游戏库里（`RomInfo::available`，随 `gamelist.cache` 落盘）。所以在
+        // `request_dat` 之前就分出去——否则 `dock_file_option(DOCK_ROMINFO)`
+        // 返回 `None`，面板会一直等一个永远不会来的文件。
+        if dock == crate::core::dat::DOCK_ROMINFO {
+            return self.rom_info_content(ui, &game);
+        }
         let text = self
             .dat_texts
             .get(&(dock, game.clone()))

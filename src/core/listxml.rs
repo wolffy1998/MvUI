@@ -206,7 +206,7 @@ pub fn parse_from_reader<R: BufRead>(
                 b"version" => {
                     read_text(&mut reader)?; // header, ignored (version from -help)
                 }
-                b"feature" | b"configuration" | b"dipswitch" | b"port" | b"device_ref" => {
+                b"feature" | b"configuration" | b"dipswitch" | b"port" => {
                     skip_subtree(&mut reader)?;
                 }
                 _ => {}
@@ -293,6 +293,43 @@ pub fn parse_from_reader<R: BufRead>(
                             }
                         }
                         m.softwarelists.push(s);
+                    }
+                }
+                b"device_ref" => {
+                    // `<device_ref tag=":maincpu" name="m68000"/>`
+                    //
+                    // 1.8.2 也把 device_ref 归进忽略分支（`utils.cpp`），所以
+                    // 这里没有旧版可抄；但"引用设备"面板要显示设备 rom，而设备
+                    // 引用**只**在这里出现过——不解析它，`GameMeta::devices`
+                    // 永远是空的（`audit.rs` 的 MESS 主机扫描也依赖它来认出一
+                    // 台主机）。反向依赖：console 扫描靠 `!devices.is_empty()`
+                    // 挑出主机机种。
+                    //
+                    // 2. `tag` 形如 `":maincpu"`（**前导冒号**），是标签在父机种
+                    // 里的全名；`name` 才是设备机种名。冒号前缀留着会让
+                    // "按 tag 查设备"永远查不到，所以在这里剥掉，多级标签
+                    // （`"igs023:sprcol"`）保留后段。
+                    if let Some(m) = cur.as_mut() {
+                        let mut d = DeviceInfo::default();
+                        for a in e.attributes() {
+                            let a = a.map_err(|er| er.to_string())?;
+                            match a.key.as_ref() {
+                                b"tag" => {
+                                    let t = attr_str(&a.value);
+                                    d.tag = t.strip_prefix(':').unwrap_or(&t).to_string();
+                                }
+                                b"name" => {
+                                    let n = attr_str(&a.value);
+                                    // 设备机种名放在 `kind`：它是唯一能拿去查库
+                                    // 的键（`get_idx(name)`），而 `instance` 是
+                                    // 标签侧的旧版 map key，语义不同。
+                                    d.kind = n.clone();
+                                    d.instance = n;
+                                }
+                                _ => {}
+                            }
+                        }
+                        m.devices.push(d);
                     }
                 }
                 b"display" => {
