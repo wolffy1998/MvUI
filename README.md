@@ -1,6 +1,6 @@
-# MxUI
+# MvUI
 
-MxUI 是一个原生 Windows 的 [MAME](https://www.mamedev.org/) 前端，使用 Rust +
+MvUI 是一个原生 Windows 的 [MAME](https://www.mamedev.org/) 前端，使用 Rust +
 [egui](https://github.com/emilk/egui) 编写。它把 MAME 的游戏列表管理、素材浏览、
 文档查阅与 ROM 审计装进一个现代渲染的单一窗口：
 
