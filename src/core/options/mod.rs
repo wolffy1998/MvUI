@@ -136,8 +136,8 @@ pub const CORE_CATEGORIES: [&str; 7] = [
 ];
 
 /// The one copy of the template lives at the workspace root, next to the icon
-/// set `mamegui-app/build.rs` embeds. It used to be duplicated under
-/// `crates/mamegui-core/assets/` for this `include_str!`, and two copies of a
+/// set `the legacy app crate/build.rs` embeds. It used to be duplicated under
+/// `crates/the legacy core crate/assets/` for this `include_str!`, and two copies of a
 /// 20 KB hand-edited file silently drift out of sync — editing one changes
 /// nothing at all for the user.
 const TEMPLATE_XML: &str = include_str!("../../../assets/optiontemplate.xml");

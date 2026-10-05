@@ -1,12 +1,95 @@
-//! Streaming parser for `mame -listxml` (origin: prototype.cpp XmlDatHandler).
+//! `mame -listxml` 的解析。
+//!
+//! 分两个阶段走，见 [`buffer_and_count`]：先把子进程的整份输出收进内存缓冲并
+//! 顺手数出机种总数，再从缓冲里解析——这样解析阶段第一帧就有真分母。
 
 use crate::core::library::GameLibrary;
 use crate::core::model::*;
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use std::io::BufRead;
+use std::io::{self, BufRead, Read, Write};
 
 pub type ProgressFn<'a> = &'a mut dyn FnMut(usize);
+
+/// 机种元素的两种写法：现代 MAME 是 `<machine>`，很老的版本是 `<game>`。
+///
+/// 必须和 [`parse_from_reader`] 里 `b"machine" | b"game"` 那个分支**完全同口径**，
+/// 否则数出来的总数会小于实际解析出的条数，百分比会冲过 100%。
+const TAG_MACHINE: &[u8] = b"<machine";
+const TAG_GAME: &[u8] = b"<game";
+/// 跨块重叠的字节数 = 最长 needle 减一。
+const OVERLAP: usize = TAG_MACHINE.len() - 1;
+
+/// 把 `-listxml` 的输出收进 `writer`，同时数出一共有多少台机种。
+///
+/// 为什么先攒起来再解析：机种总数只有收完整份输出才知道，而解析阶段需要它
+/// 当分母。直接把子进程 stdout 喂给解析器能省掉这份缓冲，代价是**总数永远
+/// 无从得知**，百分比只能拿常量瞎估。
+///
+/// `on_count` 会周期性收到当前的机种计数。收输出这一步给不出百分比——总数
+/// 还没收完——只能报台数。
+///
+/// 返回机种总数，也就是第二阶段 [`parse_from_reader`] 的分母。
+pub fn buffer_and_count<R: Read, W: Write>(
+    mut reader: R,
+    mut writer: W,
+    on_count: &mut dyn FnMut(usize),
+) -> io::Result<usize> {
+    let mut chunk = vec![0u8; 1 << 20];
+    // carry = 上一块末尾的 OVERLAP 字节；hay = carry + 本块，这样跨块边界的
+    // needle 不会被切断
+    let mut carry: Vec<u8> = Vec::new();
+    let mut hay: Vec<u8> = Vec::with_capacity((1 << 20) + OVERLAP);
+    let mut machines = 0usize;
+    let mut last_reported = 0usize;
+
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        writer.write_all(&chunk[..n])?;
+
+        hay.clear();
+        hay.extend_from_slice(&carry);
+        hay.extend_from_slice(&chunk[..n]);
+        machines += count_tags(&hay, carry.len());
+
+        carry.clear();
+        let keep = OVERLAP.min(hay.len());
+        carry.extend_from_slice(&hay[hay.len() - keep..]);
+
+        // 每 200 台汇报一次，和解析阶段的粒度保持一致
+        if machines >= last_reported + 200 {
+            last_reported = machines;
+            on_count(machines);
+        }
+    }
+    writer.flush()?;
+    if machines != last_reported {
+        on_count(machines);
+    }
+    Ok(machines)
+}
+
+/// 数 `hay` 里的机种起始标签。
+///
+/// `carry_len` 是 `hay` 开头那段的字节数——它上一轮已经数过了。**只计入
+/// `i + needle.len() > carry_len` 的匹配**：完整落在 carry 里的那些上一轮必然
+/// 已经计过，再算一次就重复了；而起始位置虽然落在 carry 里、但需要借本块
+/// 字节才凑得齐的，上一轮不可能命中，正是重叠存在的意义。
+fn count_tags(hay: &[u8], carry_len: usize) -> usize {
+    let mut n = 0;
+    for tag in [TAG_MACHINE, TAG_GAME] {
+        let len = tag.len();
+        for (i, w) in hay.windows(len).enumerate() {
+            if w == tag && i + len > carry_len {
+                n += 1;
+            }
+        }
+    }
+    n
+}
 
 pub fn parse_from_reader<R: BufRead>(
     mut r: R,
@@ -304,12 +387,6 @@ pub fn parse_from_reader<R: BufRead>(
                         }
                     }
                 }
-                b"ramoption" => {
-                    // `<ramoption default="1">2</ramoption>` always arrives as a
-                    // Start event (it carries the size as text), so the attribute
-                    // is read there — this Empty arm could never fire and kept a
-                    // stale `default_ram` around.
-                }
                 _ => {}
             },
             Ok(Event::End(ref e)) => match e.name().as_ref() {
@@ -470,6 +547,112 @@ fn skip_subtree_buf<R: BufRead>(reader: &mut Reader<R>, buf: &mut Vec<u8>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 每次最多吐 `n` 字节的 Reader。
+    ///
+    /// 缓冲是 1MB 分块的，测试里造不出 1MB 的输入，只能靠这种"滴水式"
+    /// reader 把标签强行切断在块边界上——跨块重叠逻辑正是为这种情况存在的。
+    struct Chunked<'a> {
+        data: &'a [u8],
+        pos: usize,
+        n: usize,
+    }
+
+    impl Read for Chunked<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            let n = self.n.min(buf.len()).min(self.data.len() - self.pos);
+            buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn count_tags_matches_both_spellings() {
+        // 现代 MAME 是 <machine>，老版本是 <game>；两者都要算，否则总数会
+        // 小于实际解析出的条数，百分比会冲过 100%
+        assert_eq!(count_tags(br#"<machine name="a">"#, 0), 1);
+        assert_eq!(count_tags(br#"<game name="b">"#, 0), 1);
+        // 不是机种元素的标签不能误算
+        assert_eq!(count_tags(br#"<software name="c">"#, 0), 0);
+        assert_eq!(count_tags(br#"<device_ref name="d"/>"#, 0), 0);
+    }
+
+    #[test]
+    fn count_tags_skips_what_carry_already_counted() {
+        // hay = carry ++ 本块。完整落在 carry 里的匹配上一轮已经数过。
+        let mut hay = Vec::new();
+        hay.extend_from_slice(b"<machin"); // 7 字节 carry
+        hay.extend_from_slice(b"e>");
+        // 起始在 carry 里、但借了本块字节才凑齐 → 该算
+        assert_eq!(count_tags(&hay, 7), 1);
+
+        // 完整落在 carry 里 → 不该再算一次
+        let mut hay2 = Vec::new();
+        hay2.extend_from_slice(b"<machine"); // 8 字节全在 carry 段里
+        hay2.extend_from_slice(b">");
+        assert_eq!(count_tags(&hay2, 8), 0);
+    }
+
+    #[test]
+    fn buffer_passes_bytes_through_and_counts() {
+        let xml = br#"junk<machine name="a"/><machine name="b"/><game name="c"/>tail"#;
+        let mut out: Vec<u8> = Vec::new();
+        let mut ticks: Vec<usize> = Vec::new();
+        let total = buffer_and_count(
+            Chunked { data: xml, pos: 0, n: 3 },
+            &mut out,
+            &mut |n| ticks.push(n),
+        )
+        .unwrap();
+        // 写出去的必须和读进来的一模一样，否则第二阶段解析的就是坏数据
+        assert_eq!(out.as_slice(), xml.as_slice());
+        assert_eq!(total, 3);
+        // 最后一次回调必须给出最终总数
+        assert_eq!(ticks.last().copied(), Some(3));
+    }
+
+    #[test]
+    fn buffer_counts_once_across_every_chunk_boundary() {
+        // 逐字节喂：每个标签都会被切断好几次，但必须只数一次
+        let xml = br#"<machine name="a"/><game name="b"/><machine name="c"/>"#;
+        for n in [1usize, 2, 3, 5, 7, 8, 9, 13] {
+            let mut out: Vec<u8> = Vec::new();
+            let total =
+                buffer_and_count(Chunked { data: xml, pos: 0, n }, &mut out, &mut |_| {}).unwrap();
+            assert_eq!(total, 3, "chunk size {n}");
+            assert_eq!(out.as_slice(), xml.as_slice(), "chunk size {n}");
+        }
+    }
+
+    /// 两阶段的核心不变量：**数出来的总数 == 解析阶段实际产出的条数**。
+    ///
+    /// 少算了百分比会冲过 100%，多算了永远到不了 100%。两者一旦口径漂移，
+    /// 这里就会红。
+    #[test]
+    fn counted_total_matches_the_parsed_machine_count() {
+        let xml = br#"<mame build="0.1">
+<machine name="a"><description>A</description></machine>
+<machine name="b"><description>B</description></machine>
+<game name="c"><description>C</description></game>
+<machine name="d"><description>D</description><device type="t" tag=":"><instance name="i"/></device></machine>
+</mame>"#;
+        let mut buf: Vec<u8> = Vec::new();
+        let total = buffer_and_count(Chunked { data: xml, pos: 0, n: 5 }, &mut buf, &mut |_| {})
+            .unwrap();
+        let lib = parse_from_reader(&buf[..], false, &mut |_| {}).unwrap();
+        assert_eq!(total, 4);
+        assert_eq!(lib.len(), 4);
+    }
+
+    #[test]
+    fn buffer_on_empty_input() {
+        let mut out: Vec<u8> = Vec::new();
+        assert_eq!(buffer_and_count(&b""[..], &mut out, &mut |_| {}).unwrap(), 0);
+    }
 
     #[test]
     fn parse_minimal_listxml() {

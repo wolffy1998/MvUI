@@ -61,15 +61,8 @@ pub fn draw_app_logo(ui: &mut egui::Ui, size: f32) -> bool {
         return false;
     };
     let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
-    ui.painter().image(
-        texture.id,
-        rect,
-        egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(texture.size.x as f32, texture.size.y as f32),
-        ),
-        egui::Color32::WHITE,
-    );
+    ui.painter()
+        .image(texture.id, rect, crate::icons::full_uv(), egui::Color32::WHITE);
     true
 }
 
@@ -757,7 +750,7 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
         // The title is translated, but the window's position must not move when
         // the language does — `Window::new` derives its `Area` id from the title
         // text, so switching language would otherwise reset the placement.
-        .id(egui::Id::new("mamepgui_dirs"))
+        .id(egui::Id::new("mvui_dirs"))
         .show(ctx, |ui| {
             // The MvUI mark, at the left of the title bar. It cannot be added as
             // a widget: the title bar is drawn by `Window` itself *above* this
@@ -797,15 +790,7 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
             ) {
                 let mut p = ui.painter().clone();
                 p.set_clip_rect(bar);
-                p.image(
-                    texture.id,
-                    mark,
-                    egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(texture.size.x as f32, texture.size.y as f32),
-                    ),
-                    egui::Color32::WHITE,
-                );
+                p.image(texture.id, mark, crate::icons::full_uv(), egui::Color32::WHITE);
             }
             ui.label(note);
             ui.label(

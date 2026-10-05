@@ -7,8 +7,17 @@ use egui_dock::{DockArea, DockState, NodeIndex};
 use crate::core::folders::{self, FolderChild, FolderKind};
 use crate::core::launcher::RunMode;
 
-/// estimated machine count for parse percentage (modern MAME ~46k)
-const EST_MACHINES: f32 = 46_000.0;
+/// `done / total` 的百分比，**值域 0..100**。
+///
+/// 别写成 `done as f32 / total as f32`（那是 0..1）再直接 `{:.0}%` 打印——
+/// 审计进度就踩过这个：44000 个单元扫到一半显示的是 "0%"，看着像卡死。
+/// `total == 0` 返回 0，调用方自己判断要不要显示。
+pub(crate) fn percent(done: usize, total: usize) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    (done as f32 / total as f32 * 100.0).clamp(0.0, 100.0)
+}
 
 /// where Help ▸ Documentation points
 const HELP_URL: &str = "https://bbs.xqemu.cn/";
@@ -789,7 +798,7 @@ impl MameApp {
             }
 
             // MAME's own per-machine / global options, i.e. everything that ends
-            // up in mame.ini rather than in mamepgui.ini
+            // up in mame.ini rather than in the original GUI ini
             let x = self.tr("MAME Extra Config");
             if ui.button(x).clicked() {
                 self.open_properties(crate::core::options::OPTLEVEL_GLOBAL);
@@ -1509,7 +1518,7 @@ impl MameApp {
                     // percents) and an integer percent alone reads as "stuck
                     // at 0%" — the raw counter is what shows it is moving.
                     if total > 0 {
-                        let pct = (done as f32 / total as f32).clamp(0.0, 1.0);
+                        let pct = percent(done, total);
                         ui.weak(format!(
                             "{} {pct:.0}% ({done}/{total})",
                             self.tr("Auditing")
@@ -1524,12 +1533,20 @@ impl MameApp {
                     // the whole first scan next boot. `AuditHandle::cancel` is
                     // kept for the headless examples, which do want a stop.
                     if self.lib_status == crate::app::LibStatus::Loading {
-                        let (done, _, stage) = &self.lib_progress;
-                        let pct = ((*done as f32 / EST_MACHINES) * 100.0).min(99.0);
-                        ui.weak(format!(
-                            "{} {pct:.0}% ({done}) {stage}",
-                            self.tr("Parsing XML")
-                        ));
+                        let (done, total) = self.lib_progress;
+                        if total > 0 {
+                            // 阶段二：分母是收输出时数出来的机种总数，真百分比。
+                            // 封顶 99% —— 100% 留给"加载完成"，否则解析完还要等
+                            // 审计，进度条会先顶到头再纹丝不动
+                            let pct = percent(done, total).min(99.0);
+                            ui.weak(format!(
+                                "{} {pct:.0}% ({done}/{total})",
+                                self.tr("Parsing XML")
+                            ));
+                        } else {
+                            // 阶段一：还在收输出，总数要收完才知道，只报台数
+                            ui.weak(format!("{} ({done})", self.tr("Reading listxml")));
+                        }
                     }
                 });
             });
@@ -1599,6 +1616,21 @@ impl MameApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `percent` 必须返回 0..100，不是 0..1。
+    ///
+    /// 曾经写成 `(done / total).clamp(0.0, 1.0)` 再 `{:.0}%` 打印，44000 个
+    /// 单元扫到一半显示 "0%" —— 界面上看着就是进度条坏了。
+    #[test]
+    fn percent_is_scaled_to_hundred() {
+        assert_eq!(percent(0, 44_000), 0.0);
+        assert_eq!(percent(22_000, 44_000), 50.0);
+        assert_eq!(percent(44_000, 44_000), 100.0);
+        // 没有分母时给 0，让调用方自己决定要不要显示
+        assert_eq!(percent(1, 0), 0.0);
+        // 计数冲过总数（并发下的常见抖动）不能显示 100% 以上
+        assert_eq!(percent(999, 100), 100.0);
+    }
 
     fn line(t: &str) -> crate::core::dat::DatLine {
         crate::core::dat::DatLine {

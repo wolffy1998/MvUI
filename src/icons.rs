@@ -1,4 +1,4 @@
-//! Icon registry over the PNG set inherited from mamepgui 1.8.2
+//! Icon registry over the PNG set inherited from the original GUI (1.8.2)
 //! (design doc §9.2). Files under `assets/icons/` are embedded by build.rs;
 //! the procedural squares below stay as the fallback when a file is missing.
 //!
@@ -89,6 +89,16 @@ fn placeholder_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     Some(tex)
 }
 
+/// 画整张纹理时该传的 uv 矩形。
+///
+/// **uv 是归一化的 0..1，不是像素尺寸**（egui 0.29 `painter.rs:435` 文档原话）。
+/// 曾三处写成 `Rect::from_min_size(Pos2::ZERO, tex.size_vec2())`，采样全落在
+/// 纹理外 + 默认 `ClampToEdge` → clamp 到边缘像素（logo 边缘恰好全透明）→
+/// **整张图凭空消失，而且不报错**。
+pub fn full_uv() -> egui::Rect {
+    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0))
+}
+
 /// 在 `rect` 内居中画占位图，保持原比例；画不出来返回 false。
 ///
 /// 不无限放大：240×180 的图铺满一个大 dock 会糊成一片，最多放大 2 倍。
@@ -103,12 +113,7 @@ pub fn draw_placeholder(ui: &mut egui::Ui, rect: egui::Rect) -> bool {
     }
     let scale = (rect.width() / size.x).min(rect.height() / size.y).min(2.0);
     let drawn = egui::Rect::from_center_size(rect.center(), size * scale);
-    ui.painter().image(
-        tex.id(),
-        drawn,
-        egui::Rect::from_min_size(egui::Pos2::ZERO, size),
-        Color32::WHITE,
-    );
+    ui.painter().image(tex.id(), drawn, full_uv(), Color32::WHITE);
     true
 }
 
@@ -288,5 +293,33 @@ pub fn notation_glyph(n: &crate::core::dat::Notation) -> (&'static str, Color32)
         CircleRed => ("◎", RED),
         CircleGreen => ("●", GREEN),
         Arrow => ("→", GRAY),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// uv 是**归一化的 0..1**，不是像素尺寸。
+    ///
+    /// 三处调用曾写成 `Rect::from_min_size(Pos2::ZERO, tex.size_vec2())`：采样
+    /// 全落在纹理之外，加上默认的 `ClampToEdge` 会被夹到边缘像素上，而 logo
+    /// 的边缘恰好全是透明像素 → **整张图凭空消失，而且不报错**。只有测试能
+    /// 抓住这种失败。
+    #[test]
+    fn full_uv_is_normalized() {
+        let uv = full_uv();
+        assert_eq!(uv.min, egui::Pos2::ZERO);
+        assert_eq!(uv.max, egui::pos2(1.0, 1.0));
+        // 一张 240×180 的图也必须用同一矩形——尺寸不该出现在 uv 里
+        assert_ne!(uv.size(), egui::vec2(240.0, 180.0));
+    }
+
+    /// 占位图是编译期内嵌的：路径写错或图坏了不会在编译期报出来，运行时
+    /// `draw_placeholder` 只是安静地返回 false。这里把它解码一遍钉住。
+    #[test]
+    fn embedded_placeholder_decodes() {
+        let img = image::load_from_memory(include_bytes!("../assets/images/mame.png")).unwrap();
+        assert!(img.width() > 0 && img.height() > 0);
     }
 }

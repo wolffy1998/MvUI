@@ -22,7 +22,13 @@ pub struct ReadyPayload {
 
 pub enum AppEvent {
     MameVersionChecked { path: String, version: String },
-    LibProgress { done: usize, total: usize, stage: String },
+    /// `-listxml` 的进度。
+    ///
+    /// `total == 0` 表示还在收子进程输出——机种总数要收完整份才知道，此时只
+    /// 报台数；`total > 0` 是解析阶段，分母就是收输出时数出来的真总数。
+    LibProgress { done: usize, total: usize },
+    /// 审计进度。`system` 是当前正在扫的机种/系统名，状态栏会显示它。
+    AuditProgress { done: usize, total: usize, system: String },
     LibraryReady(Result<ReadyPayload, String>),
     /// the boot chain's audit handle, so the UI can report "Auditing nn%" from
     /// the first tick (the handle owns the counter the progress thread reads)

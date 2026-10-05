@@ -3,9 +3,9 @@
 //! 路径：CFG_PREFIX + `mvui.ini`；CFG_PREFIX 默认取 exe 目录下的
 //! `.mvui/`（便携安装），可用 `-configpath <dir>` 命令行参数覆盖。
 //!
-//! 改名说明：目录与文件名随程序名从 `.mamepgui/` + `mamepgui.ini`
+//! 改名说明：目录与文件名随程序名从 `.the original GUI/` + `the original GUI ini`
 //! 换成 `.mvui/` + `mvui.ini`，**不做迁移**——旧配置不再生效，
-//! 用户需要重新配置一次。旧的 `.mamepgui` 目录不会被自动删除，
+//! 用户需要重新配置一次。旧的 `.the original GUI` 目录不会被自动删除，
 //! 残留在磁盘上，可手动清理。
 
 use crate::dlog;

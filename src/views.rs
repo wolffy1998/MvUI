@@ -1061,7 +1061,7 @@ impl MameApp {
                 // Whole-row selection paint: `set_selected` propagates to every
                 // cell drawn afterwards, and egui_extras' `StripLayout::add`
                 // fills the selection background across the full cell — the
-                // "整行浅蓝色" of MxUI. (Origin: QItemDelegate paints a single
+                // "整行浅蓝色" of MvUI. (Origin: QItemDelegate paints a single
                 // selection rect over the whole row; egui_extras paints per
                 // cell, but each cell's fill spans its own `max_rect`, so the
                 // line lights up end-to-end.)
@@ -1289,7 +1289,7 @@ impl MameApp {
         }
 
         // Floating ghost of the source column's header, following the pointer
-        // horizontally. MxUI's `QHeaderView` lifts the dragged section and
+        // horizontally. The Qt `QHeaderView` lifts the dragged section and
         // carries it with the cursor; we can't relayout the table mid-drag
         // without losing cells, so the lookalike header floats above the table
         // at `source_left + (pointer.x - press.x)`. The press-x is latched in

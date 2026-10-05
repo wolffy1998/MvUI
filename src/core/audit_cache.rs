@@ -4,7 +4,7 @@
 //! their central directories. Measured on the reference machine: 0.55 ms per
 //! archive when the drive is warm, 19–27 ms when it is cold — so a cold run is
 //! 10–20 minutes of pure head movement, and a warm one is under a minute.
-//! Nothing about that is algorithmic; `mamepgui`'s own auditor does the same
+//! Nothing about that is algorithmic; `the original GUI`'s own auditor does the same
 //! work and takes the same time on a cold disk.
 //!
 //! The entry list of a romset changes only when the file does, and a file's

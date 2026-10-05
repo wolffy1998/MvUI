@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release --example mame_check -- [mame.exe]
 //!
-//! Mirrors `app.rs` start-up: read `mame_binary` from `.mamepgui/mamepgui.ini`,
+//! Mirrors `app.rs` start-up: read `mame_binary` from `.mvui/mvui.ini`,
 //! run the same version detection, and report whether `try_accept_mame` would
 //! accept it. Use this instead of guessing why the app opened the picker — the
 //! three failure modes (key missing, version not detected, path == self) print
@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 fn main() {
-    let ini = mvui::core::settings::GuiSettings::cfg_prefix().join("mamepgui.ini");
+    let ini = mvui::core::settings::GuiSettings::cfg_prefix().join("mvui.ini");
     println!("ini: {}", ini.display());
 
     let gui = mvui::core::settings::GuiSettings::load();

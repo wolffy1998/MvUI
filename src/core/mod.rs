@@ -1,8 +1,8 @@
 //! 领域层：MvUI 里所有"不画界面"的部分。
 //!
-//! 这一层曾经是独立的 `mamegui-core` crate，现在是模块，所以分层
+//! 这一层曾经是独立的 `the legacy core crate` crate，现在是模块，所以分层
 //! 是**约定**而不是构建系统强制的（改名前的老注释里提到的
-//! `crates/mamegui-core/` 早已不存在）：
+//! `crates/the legacy core crate/` 早已不存在）：
 //!
 //! * **`core/` 不得依赖 UI。** 这里不允许出现 `egui`、`eframe`、`rfd`
 //!   这些类型——它们属于旁边的模块。正因为守住了这条线，MAME 进程

@@ -1,7 +1,7 @@
 // Verify the DAT byte-range index against the original linear scan.
 //
 // Generates a history.dat-shaped file with the awkward cases in it, then times
-// and compares both extraction paths. Run from mamegui-rs/:
+// and compares both extraction paths. Run from the repository root/:
 //
 //     cargo run --release --example datindex_bench
 
@@ -11,7 +11,7 @@ use mvui::core::dat::{self, DOCK_HISTORY};
 use mvui::core::datindex;
 
 fn main() {
-    let dir = std::env::temp_dir().join("mamepgui-datbench");
+    let dir = std::env::temp_dir().join("mvui-datbench");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("history.dat");
 

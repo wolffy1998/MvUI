@@ -30,8 +30,7 @@ fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// full boot chain (origin: MainWindow::init → pMameDat load → -listxml →
-/// -showconfig → loadDefault → autoAudit)
+/// 冷启动的完整链路：读缓存 → `mame -listxml` → `mame -showconfig` → 审计。
 pub fn boot_library(mame: MameBinary, tx: Sender<AppEvent>, ctx: egui::Context) {
     thread::spawn(move || {
         // set as soon as `LibraryReady` has been sent: from that moment on the
@@ -86,7 +85,7 @@ fn boot_run(mame: &MameBinary, tx: &Sender<AppEvent>, published: &Arc<AtomicBool
         }
     }
 
-    // 2) listxml (origin: MameDat(0,1) child chain)
+    // 2) listxml
     let _ = tx.send(AppEvent::Log(
         "running mame -listxml (this can take a while)…".into(),
     ));
@@ -97,28 +96,17 @@ fn boot_run(mame: &MameBinary, tx: &Sender<AppEvent>, published: &Arc<AtomicBool
             return;
         }
     };
-    let tx2 = tx.clone();
-    let parse_result = child
-        .stdout
-        .take()
-        .map(|out| {
-            listxml::parse_from_reader(std::io::BufReader::new(out), false, &mut |done| {
-                let _ = tx2.send(AppEvent::LibProgress { done, total: 0, stage: "listxml".into() });
-            })
-        })
-        .unwrap_or_else(|| Err("no stdout".into()));
-    let mut library = match parse_result {
+    let mut library = match parse_listxml(&mut child, tx) {
         Ok(l) => l,
         Err(e) => {
-            let _ = child.kill();
-            // reap it: a killed child nobody waits for keeps the pipe open
-            let _ = child.wait();
-            let _ = tx.send(AppEvent::LibraryReady(Err(format!("listxml: {e}"))));
+            let _ = tx.send(AppEvent::LibraryReady(Err(e)));
             return;
         }
     };
-    let _ = child.wait();
-    let _ = tx.send(AppEvent::Log("listxml parsed.".into()));
+    let _ = tx.send(AppEvent::Log(format!(
+        "listxml parsed: {} machines.",
+        library.len()
+    )));
 
     // 3) showconfig (origin: loadDefaultIni child chain)
     let default_ini = match mame.spawn_showconfig() {
@@ -141,6 +129,48 @@ fn boot_run(mame: &MameBinary, tx: &Sender<AppEvent>, published: &Arc<AtomicBool
     library.complete_data();
 
     finish_boot(library, mame, tx, published);
+}
+
+/// 收完 `mame -listxml` 的输出并解析成游戏库。
+///
+/// 两阶段是必须的：**机种总数只有收完整份输出才知道**。把子进程 stdout 直接
+/// 喂给解析器（流式）能省掉这份缓冲，但分母就永远无从得知，解析百分比只能
+/// 拿常量瞎估。所以先攒缓冲、边攒边数，攒完再解析——进度从第一帧起就是真
+/// 百分比。
+fn parse_listxml(
+    child: &mut std::process::Child,
+    tx: &Sender<AppEvent>,
+) -> Result<GameLibrary, String> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "mame -listxml: no stdout".to_string())?;
+
+    // 阶段一：收输出并数机种。这一步只报台数——总数还没收完，给不出百分比
+    let mut xml: Vec<u8> = Vec::new();
+    let tx2 = tx.clone();
+    let total = match listxml::buffer_and_count(stdout, &mut xml, &mut |machines| {
+        let _ = tx2.send(AppEvent::LibProgress {
+            done: machines,
+            total: 0,
+        });
+    }) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = child.kill();
+            // reap it: a killed child nobody waits for keeps the pipe open
+            let _ = child.wait();
+            return Err(format!("listxml: {e}"));
+        }
+    };
+    let _ = child.wait();
+
+    // 阶段二：解析，分母是阶段一数出来的真总数
+    let tx2 = tx.clone();
+    listxml::parse_from_reader(&xml[..], false, &mut |done| {
+        let _ = tx2.send(AppEvent::LibProgress { done, total });
+    })
+    .map_err(|e| format!("listxml: {e}"))
 }
 
 /// warm start: publish options + library as-is (audit state comes from cache)
@@ -255,10 +285,10 @@ fn finish_boot(
         let h2 = handle.clone();
         thread::spawn(move || loop {
             let (done, total, cur) = h2.snapshot();
-            let _ = tx2.send(AppEvent::LibProgress {
+            let _ = tx2.send(AppEvent::AuditProgress {
                 done,
                 total,
-                stage: format!("audit:{cur}"),
+                system: cur,
             });
             if h2.is_finished() || (total > 0 && done >= total) {
                 break;
@@ -325,7 +355,7 @@ fn extra_software_for(lib: &GameLibrary) -> HashMap<String, String> {
 /// Same, with the (disk-backed) settings already in hand.
 ///
 /// The manual-audit path used to call `extra_software_for` while holding the
-/// library lock — reading and parsing `mamepgui.ini` inside the critical section
+/// library lock — reading and parsing `the original GUI ini` inside the critical section
 /// stalled the UI for the frame that started the audit (README P2-18).
 fn extra_software_with(lib: &GameLibrary, settings: &GuiSettings) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -516,7 +546,7 @@ pub fn load_preview(    dock: usize,
     // parent sets to try, in order, when the game has no picture of its own —
     // the clone chain, like the old recursive `getScreenshot`
     fallbacks: Vec<String>,
-    // the `snapname` pattern, read once by the caller: re-reading mamepgui.ini on
+    // the `snapname` pattern, read once by the caller: re-reading the original GUI ini on
     // every preview request hit the disk for every dock of every game (README P3)
     snapname: Option<String>,
     tx: Sender<AppEvent>,

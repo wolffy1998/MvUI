@@ -1,4 +1,4 @@
-//! Game collection with secondary indexes (origin: prototype.cpp MameDat).
+//! 游戏集合 + 二级索引（按名查、按克隆关系查）。
 
 use crate::core::model::GameMeta;
 use serde::{Deserialize, Serialize};

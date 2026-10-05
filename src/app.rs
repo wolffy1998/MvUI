@@ -21,8 +21,8 @@ pub const COLUMN_TITLES: [&str; COL_LAST] = [
     "Description", "Name", "ROMs", "Manufacturer", "Driver", "Year", "Clone of",
 ];
 
-/// Origin: the default `column_state` shipped in `res/mamepgui.ini` of
-/// mamepgui 1.8.2 (Description 242, Name 100, ROMs 36, Manufacturer 142,
+/// Origin: the default `column_state` shipped in `res/the original GUI ini` of
+/// the original GUI (1.8.2) (Description 242, Name 100, ROMs 36, Manufacturer 142,
 /// Driver 67, Year 33, Clone of 58). Kept so a fresh install looks like the
 /// original instead of collapsing to egui's generic 100px suggestion.
 pub const COL_DEFAULT_WIDTH: [f32; COL_LAST] = [242.0, 100.0, 36.0, 142.0, 67.0, 33.0, 58.0];
@@ -127,7 +127,8 @@ pub struct MameApp {
     pub maps: FolderMaps,
     pub folder_cache: Option<Arc<crate::core::folders::FolderCache>>,
     pub lib_status: LibStatus,
-    pub lib_progress: (usize, usize, String),
+    /// `-listxml` 的进度：`(已处理, 总数)`。`total == 0` = 还在收输出。
+    pub lib_progress: (usize, usize),
 
     // folder/filter state (origin: currentFolder/currentGame/hiddenFolders/filterFlags)
     pub folder_kind: FolderKind,
@@ -167,7 +168,7 @@ pub struct MameApp {
     pub header_drag: Option<(usize, usize, bool)>,
     /// pointer x where the current header drag began — the floating header
     /// ghost offsets by `pointer.x - header_drag_x` so it tracks the pointer
-    /// the way MxUI/1.8.2 does
+    /// the way MvUI/1.8.2 does
     pub header_drag_x: f32,
     /// in-flight **column-width** drag: `(column, pointer x at press, width at
     /// press)`.
@@ -260,8 +261,9 @@ pub struct MameApp {
     /// the frame loop, which is the one place every selection path passes through
     pub published_game: String,
     pub progress_open: bool,
-    /// audit running as part of first boot (progress via LibProgress stage=audit)
+    /// audit running as part of first boot (progress via `AuditProgress`)
     pub boot_auditing: bool,
+    /// 冷启动那次审计的进度：`(已扫, 总数, 当前系统)`。
     pub audit_stage: (usize, usize, String),
     pub frame_count: u32,
     /// window background: `None` = the flat theme colour, `Some(file)` = an
@@ -418,7 +420,7 @@ impl MameApp {
             maps: FolderMaps::default(),
             folder_cache: None,
             lib_status: LibStatus::Idle,
-            lib_progress: (0, 0, String::new()),
+            lib_progress: (0, 0),
             folder_kind: FolderKind::AllArc,
             folder_key: None,
             current_folder: String::new(),
@@ -726,7 +728,7 @@ impl MameApp {
         // These went to `eprintln!`, which is a dead end in a release build:
         // `main.rs` sets `windows_subsystem = "windows"`, so the process has no
         // console and stderr is never seen. `perf_log` writes them to
-        // `.mamepgui/cache/boot.log`, which is also where the rest of the
+        // `.mvui/cache/boot.log`, which is also where the rest of the
         // start-up trace already goes.
         perf_log("startup: validating mame binary");
         let path = self
@@ -857,7 +859,7 @@ impl MameApp {
     /// The user's setting for a content path, GUI settings first.
     ///
     /// Every one of these keys is `guivisible="1"` in the template, which is what
-    /// makes 1.8.2 persist it into mamepgui.ini rather than mame.ini. The GUI
+    /// makes 1.8.2 persist it into the original GUI ini rather than mame.ini. The GUI
     /// map is therefore the authoritative copy; the option chain is only
     /// consulted as a fallback for installs whose mame.ini already carries a
     /// value from the old layout.
@@ -989,7 +991,7 @@ impl MameApp {
     pub fn export_fixdat(&mut self, method: crate::core::audit::AuditMethod) {
         let Some(lib) = self.lib.clone() else { return };
         let target = self.export_target.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join("mamepgui_fixdat.dat")
+            std::env::temp_dir().join("mvui_fixdat.dat")
         });
         let guard = lib.lock().unwrap();
         match crate::core::audit::export_fixdat(&guard, method, &target) {
@@ -1047,12 +1049,11 @@ impl MameApp {
                         self.poplog(self.tr("Could not find valid MAME/MESS."));
                     }
                 }
-                AppEvent::LibProgress { done, total, stage } => {
-                    if let Some(sys) = stage.strip_prefix("audit:") {
-                        self.audit_stage = (done, total, sys.to_string());
-                    } else {
-                        self.lib_progress = (done, total, stage);
-                    }
+                AppEvent::LibProgress { done, total } => {
+                    self.lib_progress = (done, total);
+                }
+                AppEvent::AuditProgress { done, total, system } => {
+                    self.audit_stage = (done, total, system);
                 }
                 AppEvent::LibraryReady(res) => {
                     perf_log("event: LibraryReady");

@@ -1,4 +1,4 @@
-//! Embeds assets/icons/**/*.png (the icon set inherited from mamepgui 1.8.2)
+//! Embeds assets/icons/**/*.png (the icon set inherited from the original GUI (1.8.2))
 //! into the binary as a `&[(&str, &[u8])]` table, consumed by src/icons.rs.
 
 use std::path::{Path, PathBuf};
