@@ -5,8 +5,8 @@ use crate::app::{
     COL_LAST, COLUMN_TITLES,
 };
 use crate::core::options::{
-    OptKind, OptionCore, GUI_CATEGORIES, OPTLEVEL_BIOS, OPTLEVEL_CLONEOF,
-    OPTLEVEL_GUI, OPTLEVEL_GLOBAL, OPTLEVEL_SRC, LEVEL_NAMES,
+    OptKind, OptionCore, OPTLEVEL_BIOS, OPTLEVEL_CURR, OPTLEVEL_GLOBAL, OPTLEVEL_LAST,
+    OPTLEVEL_ORIENT, OPTLEVEL_SRC, LEVEL_NAMES,
 };
 
 /// A window frame that does not let the wallpaper through.
@@ -231,13 +231,31 @@ fn draw_filter(app: &mut MameApp, ctx: &egui::Context) {
 }
 
 // ---------------------------------------------------------------------
-// options (origin: OptionsUI 6 tabs + category lists + OptionDelegate)
+// options (origin: OptionsUI tabs + category lists + OptionDelegate).
+// Four levels: Global/Source/Bios/Game. The old GUI page moved to
+// Settings ▸ Directories; the Cloneof page is gone, but clone inis still
+// take part in chain inheritance — they are just no longer editable here.
 // ---------------------------------------------------------------------
+
+/// Tab/title text for a level. The Orient slot covers two MAME files
+/// (`horizont.ini`/`vertical.ini`, chosen by the current game's native
+/// orientation), so its label follows the selection instead of LEVEL_NAMES.
+fn level_label(app: &MameApp, level: usize) -> String {
+    if level == OPTLEVEL_ORIENT {
+        let horz = app.current_meta().map(|m| m.is_horz).unwrap_or(true);
+        return app.tr(if horz {
+            "horizontal configuration"
+        } else {
+            "vertical configuration"
+        });
+    }
+    app.tr(LEVEL_NAMES[level.min(OPTLEVEL_LAST - 1)])
+}
 
 fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
     let mut show = app.show_options_win.is_some();
     let level = app.show_options_win.unwrap_or(OPTLEVEL_GLOBAL);
-    egui::Window::new(app.tf("Options - {}", app.tr(LEVEL_NAMES[level.min(5)])))
+    egui::Window::new(app.tf("Options - {}", level_label(app, level)))
         .open(&mut show)
         .resizable(true)
         .default_width(860.0)
@@ -245,11 +263,20 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             app.ensure_chain();
-            // level tabs
+            // level tabs — Global / Orient / Source / Bios / Game
             ui.horizontal(|ui| {
-                for (i, name) in LEVEL_NAMES.iter().enumerate() {
-                    if ui.selectable_label(app.opt_level == i, app.tr(*name)).clicked() {
-                        app.opt_level = i;
+                for lvl in [
+                    OPTLEVEL_GLOBAL,
+                    OPTLEVEL_ORIENT,
+                    OPTLEVEL_SRC,
+                    OPTLEVEL_BIOS,
+                    OPTLEVEL_CURR,
+                ] {
+                    if ui
+                        .selectable_label(app.opt_level == lvl, level_label(app, lvl))
+                        .clicked()
+                    {
+                        app.opt_level = lvl;
                         app.opt_edits.clear();
                     }
                 }
@@ -265,12 +292,7 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
             ui.columns(2, |cols| {
                 let list = &mut cols[0];
                 egui::ScrollArea::vertical().show(list, |ui| {
-                    let cats: Vec<&str> = if app.opt_level == OPTLEVEL_GUI {
-                        GUI_CATEGORIES.iter().map(|s| s.as_ref()).collect()
-                    } else {
-                        CORE_CATEGORIES_VEC.iter().map(|s| s.as_ref()).collect()
-                    };
-                    for c in cats {
+                    for c in CORE_CATEGORIES_VEC {
                         // `opt_category` keeps the English key; only the display
                         // is translated, so the snapshot filter still matches
                         if ui.selectable_label(app.opt_category == c, app.tr(c)).clicked() {
@@ -300,9 +322,6 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
                                         ui.end_row();
                                     }
                                     SnapRow::Opt(d) => {
-                                        if app.opt_level == OPTLEVEL_GUI && !d.guivisible {
-                                            continue;
-                                        }
                                         if !current_category_matches(&current_title, &app.opt_category, app.opt_level) {
                                             continue;
                                         }
@@ -344,7 +363,7 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.weak(app.tf(
                     "editing level: {} — edits are written to the matching ini on change",
-                    app.tr(LEVEL_NAMES[app.opt_level.min(5)]),
+                    level_label(app, app.opt_level),
                 ));
             });
         });
@@ -362,12 +381,10 @@ struct SnapOpt {
     defvalue: String,
     globalvalue: String,
     srcvalue: String,
-    biosvalue: String,
     cloneofvalue: String,
     choices: Vec<(String, String)>,
     min: f64,
     max: f64,
-    guivisible: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -411,27 +428,20 @@ fn build_snapshot(opts: &std::sync::Mutex<OptionCore>, app: &MameApp) -> Vec<Sna
     for (cat_key, names) in &guard.opt_cat_map {
         let seg = cat_key.split('_').nth(1).unwrap_or("");
         // sidebar match (origin: optSubCat == tr(key.split('_')[1]))
-        let in_cat = if level == OPTLEVEL_GUI {
-            matches!(
-                cat_key.split('_').nth(1).unwrap_or(""),
-                "GUI Paths" | "MAME Paths" | "MESS Paths"
-            ) && seg == gui_category_key(&app.opt_category)
-        } else {
-            seg == app.opt_category
-        };
-        if !in_cat {
+        if seg != app.opt_category {
             continue;
         }
         rows.push(SnapRow::Title(cat_key.split('_').last().unwrap_or("").to_string()));
         for name in names {
             let Some(o) = guard.opts.get(name) else { continue };
-            // visibility per level (origin updateModel filter)
+            // visibility per level (origin updateModel filter); the Orient
+            // page mirrors the source page — options hidden at driver level
+            // are hidden here too (user rule)
             let visible = match level {
-                OPTLEVEL_GUI => o.guivisible,
                 OPTLEVEL_GLOBAL => o.globalvisible,
+                OPTLEVEL_ORIENT => o.srcvisible,
                 OPTLEVEL_SRC => o.srcvisible,
                 OPTLEVEL_BIOS => o.biosvisible,
-                OPTLEVEL_CLONEOF => o.cloneofvisible,
                 _ => o.gamevisible,
             };
             if !visible {
@@ -461,25 +471,14 @@ fn build_snapshot(opts: &std::sync::Mutex<OptionCore>, app: &MameApp) -> Vec<Sna
                 defvalue: o.defvalue.clone(),
                 globalvalue: o.globalvalue.clone(),
                 srcvalue: o.srcvalue.clone(),
-                biosvalue: o.biosvalue.clone(),
                 cloneofvalue: o.cloneofvalue.clone(),
                 choices,
                 min: o.min.parse().unwrap_or(0.0),
                 max: o.max.parse().unwrap_or(100.0),
-                guivisible: o.guivisible,
             }));
         }
     }
     rows
-}
-
-fn gui_category_key(label: &str) -> &'static str {
-    match label {
-        "GUI Paths" => "GUI Paths",
-        "MAME Paths" => "MAME Paths",
-        "MESS Paths" => "MESS Paths",
-        _ => "GUI Paths",
-    }
 }
 
 fn is_changed(core: &std::sync::Mutex<OptionCore>, level: usize, d: &SnapOpt) -> bool {
@@ -488,10 +487,10 @@ fn is_changed(core: &std::sync::Mutex<OptionCore>, level: usize, d: &SnapOpt) ->
         Err(_) => return false,
     };
     let comp = match level {
-        OPTLEVEL_GUI | OPTLEVEL_GLOBAL => &d.defvalue,
+        OPTLEVEL_GLOBAL => &d.defvalue,
+        OPTLEVEL_ORIENT => &d.globalvalue,
         OPTLEVEL_SRC => &d.globalvalue,
         OPTLEVEL_BIOS => &d.srcvalue,
-        OPTLEVEL_CLONEOF => &d.biosvalue,
         _ => &d.cloneofvalue,
     };
     guard.get_long_value(&d.name, comp) != d.display
@@ -503,10 +502,10 @@ fn parent_value(core: &std::sync::Mutex<OptionCore>, level: usize, d: &SnapOpt) 
         Err(_) => return d.value.clone(),
     };
     let comp = match level {
-        OPTLEVEL_GUI | OPTLEVEL_GLOBAL => &d.defvalue,
+        OPTLEVEL_GLOBAL => &d.defvalue,
+        OPTLEVEL_ORIENT => &d.globalvalue,
         OPTLEVEL_SRC => &d.globalvalue,
         OPTLEVEL_BIOS => &d.srcvalue,
-        OPTLEVEL_CLONEOF => &d.biosvalue,
         _ => &d.cloneofvalue,
     };
     guard.get_short_value(&d.name, &guard.get_long_value(&d.name, comp))
@@ -536,15 +535,16 @@ fn edit_control(app: &mut MameApp, ui: &mut egui::Ui, d: &SnapOpt, opts: &std::s
                 apply_edit(app, opts, &d.name);
             }
         }
-        3 => {
+        3 if !d.choices.is_empty() => {
             // Every value is shown, not hidden behind a drop-down.
             //
-            // The template's widest enumeration is `scale_effect` with 18
-            // entries and the widest common one (`snapview`, `video`) has 5-9,
-            // so laying them out inline costs a few rows and saves a click on
-            // every single edit. A combo also had a second problem: it covered
-            // the rows below it and inherited the translucent window fill, so
-            // the open list was hard to read over a wallpaper.
+            // The template's widest enumeration is `bgfx_backend` with 7
+            // entries on the win port (`snapview`, `video` have 6, most have
+            // 5 or fewer), so laying them out inline costs a few rows and
+            // saves a click on every single edit. A combo also had a second
+            // problem: it covered the rows below it and inherited the
+            // translucent window fill, so the open list was hard to read
+            // over a wallpaper.
             //
             // The canonical value stays untranslated; the shown guivalue is what
             // the 1.8.2 catalogue translates (e.g. Auto / None).
@@ -585,7 +585,9 @@ fn edit_control(app: &mut MameApp, ui: &mut egui::Ui, d: &SnapOpt, opts: &std::s
                 apply_edit(app, opts, &d.name);
             }
         }
-        4 | 9 => {
+        // 3 with empty choices falls through here: showconfig-only strings
+        // (snapname, joystick_map, …) have no template value list.
+        3 | 4 | 9 => {
             if ui
                 .add_sized([240.0, 18.0], egui::TextEdit::singleline(&mut val))
                 .lost_focus()
@@ -668,19 +670,13 @@ fn apply_edit(app: &mut MameApp, opts: &std::sync::Mutex<OptionCore>, name: &str
     let Some(o) = guard.opts.get_mut(name) else { return };
     // write level field
     match level {
-        OPTLEVEL_GUI | OPTLEVEL_GLOBAL => o.globalvalue = short.clone(),
+        OPTLEVEL_GLOBAL => o.globalvalue = short.clone(),
+        OPTLEVEL_ORIENT => o.orientvalue = short.clone(),
         OPTLEVEL_SRC => o.srcvalue = short.clone(),
         OPTLEVEL_BIOS => o.biosvalue = short.clone(),
-        OPTLEVEL_CLONEOF => o.cloneofvalue = short.clone(),
         _ => {}
     }
     o.currvalue = short;
-    // GUI keys persist into pGuiSettings (origin saveSettings)
-    if level == OPTLEVEL_GUI {
-        app.gui.set(name, o.currvalue.clone());
-        let _ = app.gui.save();
-        return;
-    }
     // save ini for the level.
     //
     // The path comes from `OptionCore::ini_file_for`, i.e. the very function
@@ -718,10 +714,11 @@ struct DirRow {
     /// the value the field starts out holding. It used to be a greyed-out
     /// placeholder shown only while the field was empty, which made every row
     /// look blank on open and needed a "reset" button to get the value back;
-    /// it is now written into the field for real, so the dialog shows the paths
-    /// MvUI actually uses — `.\snap`, `.\dats\command.dat`, `.\mame_cn.lst` — and
-    /// the program directory is stated once in the header instead of on all 14
-    /// rows. Empty only for MAME itself, which has no default to offer.
+    /// it is now written into the field for real. Sourced from the template's
+    /// `default=` attributes (see `options::template_default`) so the XML stays
+    /// the one place a default is written — the dialog only reformats
+    /// `dats\history.xml` into the Windows-style `.\dats\history.xml` shown
+    /// here. Empty only for MAME itself, which has no default to offer.
     default_value: String,
     is_dir: bool,
 }
@@ -730,9 +727,17 @@ struct DirRow {
 fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
     use crate::core::{dat, paths};
     let tr = |s: &str| app.tr(s).to_string();
-    // a relative path as the user types it: the Windows-style `.\` prefix plus
-    // the segments, joined the same way the resolver will join them
-    let rel = |parts: &[&str]| format!(".\\{}", parts.join("\\"));
+    // the template's default, shown the way the resolver reads it back: the
+    // Windows-style `.\` prefix plus `\` segments. `template_default` is the
+    // single source — the same value chain_load seeds and the reader resolves.
+    let rel = |key: &str| {
+        let d = crate::core::options::template_default(key);
+        if d.is_empty() {
+            d
+        } else {
+            format!(".\\{}", d.replace('/', "\\"))
+        }
+    };
 
     let mut out: Vec<(String, Vec<DirRow>)> = Vec::new();
 
@@ -757,10 +762,10 @@ fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
     let artwork: Vec<DirRow> = paths::IMAGE_DIRS
         .iter()
         .enumerate()
-        .map(|(i, (key, dir))| DirRow {
+        .map(|(i, (key, _))| DirRow {
             key,
             label: tr(dat::DOCK_NAMES.get(i).copied().unwrap_or("Image")),
-            default_value: rel(&[dir]),
+            default_value: rel(key),
             is_dir: true,
         })
         .collect();
@@ -772,7 +777,7 @@ fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
     // here would name a path nothing ever reads.
     let documents: Vec<DirRow> = paths::DAT_FILES
         .iter()
-        .map(|(key, file)| {
+        .map(|(key, _)| {
             let name = dat::DOCK_NAMES
                 .iter()
                 .find(|n| dat::dock_file_option(docks_index(n)) == Some(*key))
@@ -781,7 +786,7 @@ fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
             DirRow {
                 key,
                 label: tr(name),
-                default_value: rel(&[paths::DAT_SUBDIR, file]),
+                default_value: rel(key),
                 is_dir: false,
             }
         })
@@ -795,19 +800,19 @@ fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
             DirRow {
                 key: "localized_list_file",
                 label: tr("Localized game list"),
-                default_value: rel(&[paths::LST_FILE]),
+                default_value: rel("localized_list_file"),
                 is_dir: false,
             },
             DirRow {
                 key: "background_directory",
                 label: tr("Background images"),
-                default_value: rel(&[paths::BG_SUBDIR]),
+                default_value: rel("background_directory"),
                 is_dir: true,
             },
             DirRow {
                 key: "folder_directory",
                 label: tr("Folder lists"),
-                default_value: rel(&[paths::FOLDERS_SUBDIR]),
+                default_value: rel("folder_directory"),
                 is_dir: true,
             },
         ],

@@ -827,8 +827,8 @@ pub fn load_dat(
     cloneof: String,
     sourcefile: String,
     dark: bool,
-    // `<first langpath>/<language>`, or empty when no language directory is
-    // configured. The dat file name is appended here, not by the caller (N2).
+    // `<first languagepath>/<language>`（0.227 前叫 langpath），或空表示
+    // 未配置语言目录。dat 文件名在这里拼接，不由调用方拼（N2）。
     lang_dir: String,
     tx: Sender<AppEvent>,
     ctx: egui::Context,

@@ -471,8 +471,9 @@ impl MameApp {
             && self.lang != "ru_RU"
         {
             if let Some(o) = self.opts.as_ref().and_then(|o| o.try_lock().ok()) {
-                if let Some(lp) = o.opts.get("langpath") {
-                    args.push("-langpath".into());
+                let lang_key = o.language_path_key();
+                if let Some(lp) = o.opts.get(lang_key) {
+                    args.push(format!("-{lang_key}"));
                     args.push(crate::core::options::dir_string(
                         &crate::core::options::clean_dir_path(&lp.globalvalue),
                     ));
@@ -677,9 +678,15 @@ impl MameApp {
         // ready-made path made it `join()` an absolute path over itself, so the
         // localized DAT was never read and the English one was appended to itself
         // behind an <hr>. Only the *language directory* travels over the wire, and
-        // only the first langpath entry: a ';'-joined list cannot be a path.
+        // only the first entry: a ';'-joined list cannot be a path.
+        let lang_key = self
+            .opts
+            .as_ref()
+            .and_then(|o| o.try_lock().ok())
+            .map(|o| o.language_path_key())
+            .unwrap_or("langpath");
         let langdir = self
-            .opt_resolved_dirs("langpath")
+            .opt_resolved_dirs(lang_key)
             .split(';')
             .next()
             .unwrap_or("")

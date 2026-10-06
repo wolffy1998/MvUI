@@ -1,6 +1,10 @@
 //! MAME option system, 1:1 port of mameopt.cpp.
 //!
-//! Levels: GUI(0) Global(1) Source(2) Bios(3) Cloneof(4) Curr(5).
+//! Levels: GUI(0) Global(1) Orient(2) Source(3) Bios(4) Cloneof(5) Curr(6).
+//!
+//! The Orient level is MAME's `horizont.ini`/`vertical.ini` slot in the ini
+//! chain (picked per game by the driver's native screen orientation); MvUI
+//! keeps one level slot and resolves the file dynamically via `is_horz`.
 
 pub use crate::core::library::GameLibrary;
 use crate::core::model::GameMeta;
@@ -10,12 +14,14 @@ use std::path::{Path, PathBuf};
 
 pub const OPTLEVEL_GUI: usize = 0;
 pub const OPTLEVEL_GLOBAL: usize = 1;
-pub const OPTLEVEL_SRC: usize = 2;
-pub const OPTLEVEL_BIOS: usize = 3;
-pub const OPTLEVEL_CLONEOF: usize = 4;
-pub const OPTLEVEL_CURR: usize = 5;
-pub const OPTLEVEL_LAST: usize = 6;
-pub const LEVEL_NAMES: [&str; OPTLEVEL_LAST] = ["GUI", "Global", "Source", "Bios", "Cloneof", "Game"];
+pub const OPTLEVEL_ORIENT: usize = 2;
+pub const OPTLEVEL_SRC: usize = 3;
+pub const OPTLEVEL_BIOS: usize = 4;
+pub const OPTLEVEL_CLONEOF: usize = 5;
+pub const OPTLEVEL_CURR: usize = 6;
+pub const OPTLEVEL_LAST: usize = 7;
+pub const LEVEL_NAMES: [&str; OPTLEVEL_LAST] =
+    ["GUI", "Global", "Orient", "Source", "Bios", "Cloneof", "Game"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OptKind {
@@ -43,6 +49,7 @@ pub struct MameOption {
     pub max: String,
     pub min: String,
     pub globalvalue: String,
+    pub orientvalue: String,
     pub srcvalue: String,
     pub biosvalue: String,
     pub cloneofvalue: String,
@@ -79,7 +86,7 @@ impl MameOption {
 }
 
 /// hardcoded category table (origin: optCatList, order matters)
-const OPT_CAT_LIST: [&str; 41] = [
+const OPT_CAT_LIST: [&str; 46] = [
     "00_Global Misc_00_core configuration",
     "00_Global Misc_01_core palette",
     "00_Global Misc_02_core language",
@@ -89,6 +96,7 @@ const OPT_CAT_LIST: [&str; 41] = [
     "04_Core Video_00_core rotation",
     "04_Core Video_01_core screen",
     "04_Core Video_02_core performance",
+    "04_Core Video_03_core render",
     "05_OSD Video_00_OSD video",
     "05_OSD Video_01_Windows video",
     "05_OSD Video_02_OSD full screen",
@@ -100,6 +108,8 @@ const OPT_CAT_LIST: [&str; 41] = [
     "05_OSD Video_08_OpenGL-specific",
     "05_OSD Video_09_NTSC post-processing",
     "05_OSD Video_10_Bloom post-processing",
+    "05_OSD Video_11_BGFX post-processing",
+    "05_OSD Video_12_OSD accelerated video",
     "06_Screen_00_OSD per-window video",
     "07_Audio_00_OSD sound",
     "07_Audio_01_core sound",
@@ -108,6 +118,8 @@ const OPT_CAT_LIST: [&str; 41] = [
     "08_Control_02_input device",
     "08_Control_03_SDL keyboard mapping",
     "08_Control_04_SDL joystick mapping",
+    "08_Control_05_OSD input options",
+    "08_Control_06_OSD input mapping",
     "09_Vector_00_core vector",
     "09_Vector_01_Vector post-processing",
     "10_Misc_01_core misc",
@@ -141,6 +153,52 @@ pub const CORE_CATEGORIES: [&str; 7] = [
 /// 20 KB hand-edited file silently drift out of sync — editing one changes
 /// nothing at all for the user.
 const TEMPLATE_XML: &str = include_str!("../../../assets/optiontemplate.xml");
+
+/// One path default from the template: option name → `default=` attribute.
+///
+/// The Settings ▸ Directories dialog reads its fallbacks here instead of
+/// re-deriving them in Rust, so the XML stays the one place a default is
+/// written. Works before boot: it parses the embedded string and needs no
+/// `OptionCore`.
+pub fn template_default(key: &str) -> String {
+    static MAP: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut reader = quick_xml::Reader::from_str(TEMPLATE_XML);
+        reader.config_mut().trim_text(true);
+        // 与 load_template 同一个 0.41 陷阱：不展开自闭合标签就什么都收不到
+        reader.config_mut().expand_empty_elements = true;
+        let mut map = HashMap::new();
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(quick_xml::events::Event::Start(ref e)) if e.name().as_ref() == b"option" => {
+                    let mut name = String::new();
+                    let mut def = String::new();
+                    for a in e.attributes().flatten() {
+                        let k = String::from_utf8_lossy(a.key.as_ref()).to_string();
+                        let v =
+                            crate::core::listxml::xml_unescape(&String::from_utf8_lossy(&a.value));
+                        match k.as_str() {
+                            "name" => name = v,
+                            "default" => def = v,
+                            _ => {}
+                        }
+                    }
+                    if !name.is_empty() {
+                        map.insert(name, def);
+                    }
+                }
+                Ok(quick_xml::events::Event::Eof) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        map
+    })
+    .get(key)
+    .cloned()
+    .unwrap_or_default()
+}
 
 #[derive(Debug, Default)]
 pub struct OptionCore {
@@ -295,7 +353,8 @@ impl OptionCore {
 
         // port detection
         core.is_sdl_port = core.opts.contains_key("sdlvideofps") || core.opts.contains_key("videodriver");
-        core.has_language = core.opts.contains_key("langpath");
+        core.has_language =
+            core.opts.contains_key("langpath") || core.opts.contains_key("languagepath");
         core.has_ips = core.opts.contains_key("ips");
 
         core.load_template(gui);
@@ -334,6 +393,16 @@ impl OptionCore {
         core
     }
 
+    /// MAME 0.227 把 langpath 改名为 languagepath；mamep 等旧构建仍用旧名。
+    /// 语言功能（启动参数、本地化 DAT 路径）按这个键读写，随二进制自适应。
+    pub fn language_path_key(&self) -> &'static str {
+        if self.opts.contains_key("languagepath") {
+            "languagepath"
+        } else {
+            "langpath"
+        }
+    }
+
     /// origin: OptionXMLHandler over res/optiontemplate.xml
     fn load_template(&mut self, gui: &HashMap<String, String>) {
         let mut cur: Option<String> = None;
@@ -345,6 +414,9 @@ impl OptionCore {
         let mut value_gui = String::new();
         let mut reader = quick_xml::Reader::from_str(TEMPLATE_XML);
         reader.config_mut().trim_text(true);
+        // 0.41 默认不展开自闭合标签：`<option …/>` 以 Event::Empty 到达，
+        // 下面只认 Event::Start，不设置就会静默丢掉整个模板
+        reader.config_mut().expand_empty_elements = true;
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
@@ -491,10 +563,10 @@ impl OptionCore {
         };
         let names: Vec<String> = self.opts.keys().cloned().collect();
         for name in names {
-            // GUI-overlap: GUI settings override global for the 14 GUI keys.
+            // GUI-overlap: GUI settings override global for the 16 GUI keys.
             //
             // "GUI keys" means the options the template marks `guivisible="1"`
-            // (exactly 14 of them — the same set `load_default` files under the
+            // (exactly 16 of them — the same set `load_default` files under the
             // "GUI paths" sidebar category). Testing the *name* alone also
             // matched purely-GUI settings that share a name with a core option:
             // `language` is both a GUI setting (`pGuiSettings`, holding e.g.
@@ -527,6 +599,14 @@ impl OptionCore {
                 (OPTLEVEL_GLOBAL, None) => {
                     o.currvalue = o.defvalue.clone();
                     o.globalvalue = o.defvalue.clone();
+                }
+                (OPTLEVEL_ORIENT, Some(v)) => {
+                    o.currvalue = v.clone();
+                    o.orientvalue = v;
+                }
+                (OPTLEVEL_ORIENT, None) => {
+                    o.currvalue = o.globalvalue.clone();
+                    o.orientvalue = o.globalvalue.clone();
                 }
                 (OPTLEVEL_SRC, Some(v)) => {
                     o.currvalue = v.clone();
@@ -594,6 +674,10 @@ impl OptionCore {
             OPTLEVEL_GLOBAL => self
                 .mame_ini_path
                 .join(if self.is_mess_like() { "mess.ini" } else { "mame.ini" }),
+            OPTLEVEL_ORIENT => {
+                let name = if meta.is_horz { "horizont.ini" } else { "vertical.ini" };
+                self.mame_ini_path.join("ini").join(name)
+            }
             OPTLEVEL_SRC => {
                 // origin: mameopt.cpp:815-817 — `iniFileName = sourcefile;
                 // iniFileName.replace(".c", INI_EXT); mameIniPath + "ini/source/" + ...`.
@@ -652,6 +736,10 @@ impl OptionCore {
     ) {
         self.load_ini(OPTLEVEL_GLOBAL, &self.ini_file_for(OPTLEVEL_GLOBAL, meta, lib), gui);
         if upto == OPTLEVEL_GUI || upto == OPTLEVEL_GLOBAL {
+            return;
+        }
+        self.load_ini(OPTLEVEL_ORIENT, &self.ini_file_for(OPTLEVEL_ORIENT, meta, lib), gui);
+        if upto == OPTLEVEL_ORIENT {
             return;
         }
         self.load_ini(OPTLEVEL_SRC, &self.ini_file_for(OPTLEVEL_SRC, meta, lib), gui);
@@ -760,6 +848,13 @@ impl OptionCore {
                 }
                 OPTLEVEL_SRC => {
                     let mut c = o.srcvalue.clone();
+                    if opt_name == "bios" {
+                        c = o.defvalue.clone();
+                    }
+                    (c, o.globalvalue.clone())
+                }
+                OPTLEVEL_ORIENT => {
+                    let mut c = o.orientvalue.clone();
                     if opt_name == "bios" {
                         c = o.defvalue.clone();
                     }
@@ -1107,6 +1202,141 @@ mod tests {
         // core option with a GUI namesake → left alone
         assert_eq!(core.opts["language"].globalvalue, "English");
         assert_eq!(core.opts["language"].currvalue, "English");
+    }
+
+    /// 模板里的 `default=` 不是摆设：GUI 表和 ini 都没配时，加载器把
+    /// defvalue 写进 globalvalue，`content_setting` 再把它当配置值解析；
+    /// 「设置 ▸ 目录」对话框的兜底值也直接读模板（`template_default`）。
+    /// 两边一漂移，内容查找就指向一个没人创建的位置——history_file 默认
+    /// 还是 `history.dat` 时，History 面板在 `<exe>/history.dat` 找一个
+    /// 不存在的文件，而真实默认是 `<exe>/dats/history.xml`。
+    /// 这里把模板默认钉在 `core::paths` 的内置默认上（运行期兜底仍是
+    /// paths，因为启动早期 opts 还没加载，两边必须相等）。
+    #[test]
+    fn template_defaults_match_paths_module() {
+        let mut core = core_at("/mame");
+        core.load_template(&HashMap::new());
+        let d = |k: &str| core.opts.get(k).map(|o| o.defvalue.clone()).unwrap_or_default();
+
+        for (key, dir) in crate::core::paths::IMAGE_DIRS {
+            if key == "snapshot_directory" {
+                // MAME 核心选项：不是 guivisible，空 core 里不会插入，
+                // 改在下面的 template_default 一侧断言
+                continue;
+            }
+            assert_eq!(d(key), dir, "{key} 默认值必须镜像 IMAGE_DIRS");
+        }
+        for (key, file) in crate::core::paths::DAT_FILES {
+            assert_eq!(
+                d(key),
+                format!("{}/{}", crate::core::paths::DAT_SUBDIR, file),
+                "{key} 默认值必须指向 dats/ 下的文件"
+            );
+        }
+        assert_eq!(d("background_directory"), crate::core::paths::BG_SUBDIR);
+        assert_eq!(d("folder_directory"), crate::core::paths::FOLDERS_SUBDIR);
+        assert_eq!(d("icons_directory"), "icons");
+        assert_eq!(d("m1_directory"), "bin/m1");
+        assert_eq!(d("localized_list_file"), crate::core::paths::LST_FILE);
+        // mame_binary 故意没有默认值：它由用户首次启动时选择，回退名
+        // （mamep.exe）只存在于启动校验里，不该进模板
+        assert_eq!(d("mame_binary"), "");
+
+        // 对话框一侧：直接解析嵌入模板，不依赖加载好的 core。
+        // snapshot_directory 在这里补上（MAME 自己的默认就是 snap）。
+        assert_eq!(template_default("snapshot_directory"), "snap");
+        assert_eq!(template_default("command_file"), "dats/command.dat");
+        assert_eq!(template_default("localized_list_file"), "mame_cn.lst");
+        assert_eq!(template_default("mame_binary"), "");
+        assert_eq!(template_default("rompath"), "");
+    }
+
+    /// ORIENT 层对应 MAME 加载链里的 horizont.ini/vertical.ini：一个层级槽，
+    /// 文件按驱动原生横竖屏（is_horz）选（origin: parse_standard_inis）。
+    #[test]
+    fn orient_ini_file_follows_native_orientation() {
+        let lib = GameLibrary::new("0.261".into());
+        let core = core_at("/mame");
+        let mut meta = GameMeta {
+            name: "pacman".into(),
+            is_horz: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            core.ini_file_for(OPTLEVEL_ORIENT, &meta, &lib),
+            PathBuf::from("/mame/ini/horizont.ini")
+        );
+        meta.is_horz = false;
+        assert_eq!(
+            core.ini_file_for(OPTLEVEL_ORIENT, &meta, &lib),
+            PathBuf::from("/mame/ini/vertical.ini")
+        );
+    }
+
+    /// chain_load 到 ORIENT 只读方向 ini：值进 orientvalue/currvalue，
+    /// 更深的 source 层保持未读状态。
+    #[test]
+    fn orient_chain_load_reads_the_orientation_ini() {
+        let dir = std::env::temp_dir().join(format!("mvui_orient_chain_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ini")).unwrap();
+        let ini = dir.join("ini").join("horizont.ini");
+        std::fs::write(&ini, "autofire 1\n").unwrap();
+
+        let lib = GameLibrary::new("0.261".into());
+        let mut core = core_at(&dir.to_string_lossy());
+        core.opts.insert("autofire".into(), MameOption::new("0"));
+        core.opts.insert("cheat".into(), MameOption::new("0"));
+
+        let meta = GameMeta {
+            name: "pacman".into(),
+            is_horz: true,
+            ..Default::default()
+        };
+        core.chain_load(&meta, &lib, &HashMap::new(), OPTLEVEL_ORIENT);
+
+        let af = &core.opts["autofire"];
+        assert_eq!(af.orientvalue, "1");
+        assert_eq!(af.currvalue, "1");
+        assert_eq!(af.globalvalue, "0");
+        assert_eq!(af.srcvalue, "");
+
+        let _ = std::fs::remove_file(&ini);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// ORIENT 层保存与 source 层同规则：只写和 globalvalue 不同的项；
+    /// 全部回到全局值时 diff 清空，文件直接删掉不留空壳。
+    #[test]
+    fn orient_save_writes_only_diffs_from_global() {
+        let dir = std::env::temp_dir().join(format!("mvui_orient_save_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = dir.join("horizont.ini");
+
+        let mut core = core_at("/mame");
+        core.opts.insert("autofire".into(), MameOption::new("0"));
+        core.opts.insert("cheat".into(), MameOption::new("0"));
+        core.load_ini(OPTLEVEL_GLOBAL, &Path::new("/does/not/exist.ini"), &HashMap::new());
+        // 运行期保存前 ensure_chain 一定把 ORIENT 层读过（文件不存在时
+        // orientvalue 回填 globalvalue），这里照做，不然未设置项会以空值入档
+        core.load_ini(OPTLEVEL_ORIENT, &Path::new("/does/not/exist.ini"), &HashMap::new());
+        {
+            let af = core.opts.get_mut("autofire").unwrap();
+            af.orientvalue = "1".into();
+            af.currvalue = "1".into();
+        }
+        let default_ini = "#\n# CORE CONFIGURATION\n#\nautofire 0\ncheat 0\n";
+        core.save_ini_file(OPTLEVEL_ORIENT, &ini, default_ini).unwrap();
+        let text = std::fs::read_to_string(&ini).unwrap();
+        assert!(text.lines().any(|l| l.split_whitespace().eq(["autofire", "1"])));
+        assert!(!text.lines().any(|l| l.starts_with("cheat")));
+
+        let af = core.opts.get_mut("autofire").unwrap();
+        af.orientvalue = "0".into();
+        af.currvalue = "0".into();
+        core.save_ini_file(OPTLEVEL_ORIENT, &ini, default_ini).unwrap();
+        assert!(!ini.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -105,7 +105,7 @@ pub fn build_args(
 
     if mode == RunMode::Cmd {
         for (name, value, is_bool) in cmd_diff {
-            if name.ends_with("_extra_software") || name == "langpath" || name == "language" {
+            if name.ends_with("_extra_software") || name == "langpath" || name == "languagepath" || name == "language" {
                 continue;
             }
             if *is_bool {
@@ -133,6 +133,7 @@ pub fn cmd_diff(core: &crate::core::options::OptionCore, gui_keys: &std::collect
             && !name.ends_with("_extra_software")
             && !gui_keys.contains(name.as_str())
             && name != "langpath"
+            && name != "languagepath"
             && name != "language"
         {
             let is_bool = o.kind == Some(OptKind::Bool);

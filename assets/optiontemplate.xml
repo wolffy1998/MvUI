@@ -1,7 +1,8 @@
-﻿<?xml version="1.0"?>
+<?xml version="1.0"?>
 <optiontemplate version="1">
 
-	<!-- 周边资源文件位置，guivisible="1" 表示仅 GUI 可见 -->
+	<!-- 周边资源文件位置，guivisible="1" 表示仅 GUI 可见。default 是加载路径：
+	     用户没配时 chain_load 会把 defvalue 当真实路径用，必须与 src/core/paths.rs 一致（有测试钉住） -->
 	<option name="cabinet_directory" default="cabinets" type="dirs" guivisible="1" />
 	<option name="cpanel_directory" default="cpanel" guiname="control panel directory" type="dirs" guivisible="1" />
 	<option name="flyer_directory" default="flyers" type="dirs" guivisible="1" />
@@ -12,17 +13,22 @@
 	<option name="background_directory" default="bkground" type="dir" guivisible="1" />
 	<option name="folder_directory" default="folders" guiname="external folder list" type="dirs" guivisible="1" />
 	<option name="m1_directory" default="bin/m1" type="dir" guivisible="1" />
-	<option name="history_file" default="history.dat" type="datfile" guivisible="1" />
-	<option name="story_file" default="story.dat" type="datfile" guivisible="1" />
-	<option name="mameinfo_file" default="mameinfo.dat" type="datfile" guivisible="1" />
+	<option name="history_file" default="dats/history.xml" type="datfile" guivisible="1" />
+	<option name="story_file" default="dats/story.dat" type="datfile" guivisible="1" />
+	<option name="mameinfo_file" default="dats/mameinfo.dat" type="datfile" guivisible="1" />
 	<option name="mame_binary" guiname="MAME binary" type="exefile" guivisible="1" />
+	<option name="localized_list_file" default="mame_cn.lst" type="file" guivisible="1" />
 
-	<!-- ══ 以下所有选项均为【mame.ini】项：Global 层全量写出；Source/Bios/Cloneof/Game 子层只写与父层不同的项 ══ -->
-	<!-- 特殊项：driver_config=驱动级配置占位（不在属性页展示）；readconfig=是否读取 mame.ini（不在属性页展示，且保存时被剔除、永不写回 ini） -->
-	<option name="driver_config" type="csv" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
+	<!-- 这里开始往下为 mame 的配置项，分节与顺序和 MAME 0.284 mame.ini 一致 -->
+
+	<!-- ══ CORE CONFIGURATION OPTIONS：读写配置开关。0.284 的 ini 已不再写
+	     readconfig 行，保留仅为兼容旧 ini；两项都只在命令行用，界面不显示 -->
 	<option name="readconfig" type="bool" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
-	
-	<!-- ══ MAME 核心搜索路径：运行时按序查找 ROM/哈希/采样/作品/控制器定义/ini/字体/金手指/准星/语言/IPS 补丁 ══ -->
+	<option name="writeconfig" type="bool" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
+
+	<!-- ══ CORE SEARCH PATH OPTIONS：运行时按序查找 ROM/哈希/采样/作品/控制器定义/
+	     ini/字体/金手指/准星/插件/语言/散装软件 ══ -->
+	<option name="homepath" guiname="plugin data base folder" type="dir" />
 	<option name="rompath" guiname="ROMsets directory" type="dirs" />
 	<option name="hashpath" guiname="hash files directory" type="dir" />
 	<option name="samplepath" guiname="samplesets directory" type="dirs" />
@@ -32,33 +38,42 @@
 	<option name="fontpath" guiname="font files directory" type="dirs" />
 	<option name="cheatpath" guiname="cheat files directory" type="dirs" />
 	<option name="crosshairpath" guiname="crosshair files directory" type="dir" />
+	<option name="pluginspath" guiname="plugin files directory" type="dir" />
+	<option name="languagepath" guiname="UI translation files directory" type="dir" />
+	<option name="swpath" guiname="loose software directory" type="dir" />
+	<!-- mamep 遗留路径：MAME 本体已无这两项，仅为兼容旧 mamep ini 保留 -->
 	<option name="langpath" guiname="language files directory" type="dir" />
 	<option name="ipspath" guiname="IPS files directory" type="dir" />
-	
-	<!-- 输出与状态目录：MAME 运行中产生的数据（配置/记忆体/存档/截图/差异文件等）落盘位置 -->
+
+	<!-- ══ CORE OUTPUT DIRECTORY OPTIONS：MAME 运行中产生的数据（配置/记忆体/输入
+	     记录/存档/截图/差异文件/调试注释/共享目录）落盘位置 ══ -->
 	<option name="cfg_directory" type="dir" />
 	<option name="nvram_directory" type="dir" />
-	<option name="memcard_directory" type="dir" />
 	<option name="input_directory" type="dir" />
 	<option name="state_directory" type="dir" />
-	<option name="snapshot_directory" type="dirs" />
+	<option name="snapshot_directory" type="dirs" default="snap" />
 	<option name="diff_directory" type="dir" />
 	<option name="comment_directory" type="dir" />
-	<option name="hiscore_directory" type="dir" />
-	
-	<!-- 资料 .dat：指令表与高分记录 -->
-	<option name="command_file" type="datfile" />
-	<option name="hiscore_file" type="datfile" />
-	
-	<!-- 单次运行文件（回放/录制/导出）：*visible 全 0 → 六层属性页都不显示，实际只走命令行（唯一特例 ips，见"核心杂项"） -->
+	<option name="share_directory" type="dir" />
+
+	<!-- 资料 .dat：指令表。command_file 是 GUI 专属配置（1.8.2 遗产，MAME 本体
+	     无此选项），guivisible 让它进入 GUI 设置页 -->
+	<option name="command_file" type="datfile" default="dats/command.dat" guivisible="1" />
+
+	<!-- ══ CORE STATE/PLAYBACK OPTIONS：存档/回放/录制/快照。单次运行文件类
+	     （state/playback/record/mngwrite/aviwrite/wavwrite）*visible 全 0 →
+	     六层属性页都不显示，实际只走命令行（唯一特例 ips，见"核心杂项"） ══ -->
 	<option name="state" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="autosave" guiname="auto restore and save" type="bool" />
+	<option name="rewind" guiname="enable rewind savestates" type="bool" />
+	<option name="rewind_capacity" guiname="rewind buffer size in megabytes" type="int" min="1" max="2048" />
 	<option name="playback" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="record" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
+	<option name="exit_after_playback" guiname="close at end of playback" type="bool" />
 	<option name="mngwrite" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="aviwrite" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="wavwrite" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
-	<!-- 快照/录像设置：命名模式、分辨率、视角、烧屏模拟 -->
+	<!-- 快照/录像设置：命名模式、分辨率、视角、双线性、存档子目录名、烧屏模拟 -->
 	<option name="snapname" guiname="snapshot/movie pattern" type="string">
 		<value guivalue="game name">%g</value>
 		<value guivalue="game name + increment">%g%i</value>
@@ -66,26 +81,41 @@
 		<value guivalue="game name/game name + increment">%g/%g%i</value>
 		<value guivalue="game name/increment">%g/%i</value>
 	</option>
-	<option name="snapsize" guiname="snapshot/movie resolution" type="string" />
-	<option name="snapview" guiname="snapshot/movie view" type="string" >
-		<value>internal</value>
+	<option name="snapsize" guiname="snapshot/movie resolution" type="stringeditable" />
+	<option name="snapview" guiname="snapshot/movie view" type="string">
 		<value>auto</value>
+		<value>native</value>
+		<value>internal</value>
 		<value>standard</value>
 		<value guivalue="pixel aspect">pixel</value>
 		<value>cocktail</value>
 	</option>
+	<option name="snapbilinear" guiname="snapshot/movie bilinear filtering" type="bool" />
+	<option name="statename" guiname="state subfolder naming" type="stringeditable" />
 	<option name="burnin" guiname="create burn-in snapshots" type="bool" />
 
-	<!-- 核心性能：跳帧/节流/休眠/速度 -->
+	<!-- ══ CORE PERFORMANCE OPTIONS：跳帧/节流/休眠/速度/低延迟。seconds_to_run
+	     只在命令行用，界面不显示 ══ -->
 	<option name="autoframeskip" guiname="auto frame skipping" type="bool" />
 	<option name="frameskip" guiname="frame skipping" type="int" min="0" max="10" />
-	<option name="seconds_to_run" type="int" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
-	<option name="throttle" type="bool" />
+	<option name="seconds_to_run" type="stringeditable" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
+	<option name="throttle" guiname="throttle to real time" type="bool" />
 	<option name="sleep" guiname="sleep when possible" type="bool" />
-	<option name="speed" guiname="gameplay speed" type="float" min="0.01" max="100" />
+	<option name="speed" guiname="gameplay speed" type="float" min="0.1" max="100" />
 	<option name="refreshspeed" guiname="auto refresh speed" type="bool" />
-	
-	<!-- 核心视频：屏幕旋转与翻转 -->
+	<option name="lowlatency" guiname="reduce input latency" type="bool" />
+
+	<!-- ══ CORE RENDER OPTIONS：缩放行为与整数缩放 ══ -->
+	<option name="keepaspect" guiname="enforce aspect ratio" type="bool" />
+	<option name="unevenstretch" guiname="non-integer stretching" type="bool" />
+	<option name="unevenstretchx" guiname="non-integer stretch horizontally" type="bool" />
+	<option name="unevenstretchy" guiname="non-integer stretch vertically" type="bool" />
+	<option name="autostretchxy" guiname="auto uneven stretching" type="bool" />
+	<option name="intoverscan" guiname="overscan on integer scaling" type="bool" />
+	<option name="intscalex" guiname="horizontal integer scale factor" type="stringeditable" />
+	<option name="intscaley" guiname="vertical integer scale factor" type="stringeditable" />
+
+	<!-- ══ CORE ROTATION OPTIONS：屏幕旋转与翻转 ══ -->
 	<option name="rotate" type="bool" />
 	<option name="ror" guiname="rotate clockwise" type="bool" />
 	<option name="rol" guiname="rotate anti-clockwise" type="bool" />
@@ -94,49 +124,27 @@
 	<option name="flipx" guiname="flip screen left-right" type="bool" />
 	<option name="flipy" guiname="flip screen upside-down" type="bool" />
 
-	<!-- 外部作品层开关：裁切/背景/覆盖/边框 -->
+	<!-- ══ CORE ARTWORK OPTIONS：外部作品层裁切/兜底/覆盖/字体 ══ -->
 	<option name="artwork_crop" guiname="crop artwork" type="bool" />
-	<option name="use_backdrops" type="bool" />
-	<option name="use_overlays" type="bool" />
-	<option name="use_bezels" type="bool" />
+	<option name="fallback_artwork" guiname="fallback artwork" type="stringeditable" />
+	<option name="override_artwork" guiname="override artwork" type="stringeditable" />
+	<option name="artwork_font" guiname="artwork text font" type="stringeditable" />
 
-	<!-- 画面调色与放大滤镜（浮点项带 min/max 范围） -->
+	<!-- ══ CORE SCREEN OPTIONS：亮度/对比度/伽马/暂停亮度/特效 PNG ══ -->
 	<option name="brightness" guiname="brightness correction" type="float" min="0.1" max="2.0" />
 	<option name="contrast" guiname="contrast correction" type="float" min="0.1" max="2.0" />
 	<option name="gamma" guiname="gamma correction" type="float" min="0.1" max="3.0" />
-	<option name="pause_brightness" type="float" min="0.0" max="1.0" />
-	<option name="scale_effect" guiname="image enhancement" type="string" >
-		<value>none</value>
-		<value guivalue="Scanlines TV">scanlinestv</value>
-		<value guivalue="EPX-B">epxb</value>
-		<value guivalue="EPX-C">epxc</value>
-		<value>scale2x</value>
-		<value>scale3x</value>
-		<value guivalue="2xSaI">2xsai</value>
-		<value guivalue="Super 2xSaI">super2xsai</value>
-		<value guivalue="Super Eagle">supereagle</value>
-		<value guivalue="2xPM">2xpm</value>
-		<value guivalue="HQ2x">hq2x</value>
-		<value guivalue="HQ2xS">hq2xs</value>
-		<value guivalue="HQ2xBold">hq2xbold</value>
-		<value guivalue="HQ3x">hq3x</value>
-		<value guivalue="HQ3xS">hq3xs</value>
-		<value guivalue="HQ4xBold">hq3xbold</value>
-		<value guivalue="2xBRZ">2xbrz</value>
-		<value guivalue="3xBRZ">3xbrz</value>
-	</option>
-	
-	<!-- 矢量游戏渲染：抗锯齿/束宽/闪烁 -->
-	<option name="antialias" guiname="draw antialiased vectors" type="bool" />
-	<option name="beam" guiname="beam width" type="float" min="0.1" max="10.0" />
-	<option name="flicker" type="float" min="0" max="100.0" />
-	
-	<!-- 声音输出：后端/采样率/采样集/音量 -->
-	<option name="sound" guiname="enable sound output" type="string">
-		<value guivalue="Auto">auto</value>
-		<value os="win" guivalue="DirectSound">dsound</value>
-		<value guivalue="None">none</value>
-	</option>
+	<option name="pause_brightness" guiname="pause brightness" type="float" min="0.0" max="1.0" />
+	<option name="effect" guiname="visual effects" type="stringeditable" />
+
+	<!-- ══ CORE VECTOR OPTIONS：矢量线宽/点径/强度权重/闪烁 ══ -->
+	<option name="beam_width_min" guiname="vector beam width minimum" type="stringeditable" />
+	<option name="beam_width_max" guiname="vector beam width maximum" type="stringeditable" />
+	<option name="beam_dot_size" guiname="vector beam dot size" type="stringeditable" />
+	<option name="beam_intensity_weight" guiname="vector beam intensity weight" type="stringeditable" />
+	<option name="flicker" guiname="vector flicker effect" type="float" min="0" max="100.0" />
+
+	<!-- ══ CORE SOUND OPTIONS：采样率/外部采样集/音量衰减（dB） ══ -->
 	<option name="samplerate" guiname="sample rate" type="string">
 		<value>11025</value>
 		<value>22050</value>
@@ -144,22 +152,25 @@
 		<value>48000</value>
 	</option>
 	<option name="samples" guiname="use samples" type="bool" />
-	<option name="volume" guiname="volume attenuation" type="int" min="-32" max="0" />
-	<option name="volume_adjust" guiname="use volume auto adjust" type="bool" />
-	
-	<!-- 输入设备基础开关 -->
-	<option name="coin_lockout" type="bool" />
-	<option name="ctrlr" guiname="default input layout" type="string" />
+	<option name="volume" guiname="volume attenuation" type="int" min="-96" max="12" />
+
+	<!-- ══ CORE INPUT OPTIONS：输入开关/控制器布局/摇杆校准 ══ -->
+	<option name="coin_lockout" guiname="ignore coin lockout" type="bool" />
+	<option name="ctrlr" guiname="default input layout" type="stringeditable" />
 	<option name="mouse" guiname="enable mouse input" type="bool" />
 	<option name="joystick" guiname="enable joystick input" type="bool" />
 	<option name="lightgun" guiname="enable lightgun input" type="bool" />
 	<option name="multikeyboard" guiname="enable multiple keyboards" type="bool" />
 	<option name="multimouse" guiname="enable multiple mice" type="bool" />
 	<option name="steadykey" guiname="enable steadykey support" type="bool" />
-	<option name="offscreen_reload" guiname="offscreen shots reload" type="bool" />
-	<option name="joystick_map" type="string" />
-	<option name="joystick_deadzone" type="float" min="0" max="1.0" />
-	<option name="joystick_saturation" type="float" min="0" max="1.0" />
+	<option name="ui_active" guiname="UI over emulated keyboard" type="bool" />
+	<option name="joystick_map" guiname="joystick map" type="stringeditable" />
+	<option name="joystick_deadzone" guiname="joystick deadzone" type="float" min="0" max="1.0" />
+	<option name="joystick_saturation" guiname="joystick saturation" type="float" min="0" max="1.0" />
+	<option name="joystick_threshold" guiname="joystick threshold" type="float" min="0" max="1.0" />
+	<option name="natural" guiname="use natural keyboard" type="bool" />
+	<option name="joystick_contradictory" guiname="allow contradictory joystick input" type="bool" />
+	<option name="coin_impulse" guiname="coin impulse time" type="stringeditable" />
 
 	<!-- 特殊街机控制器 → PC 输入源映射：踏板/旋钮/轨迹球等八类，每组 none/keyboard/mouse/lightgun/joystick 五选一 -->
 	<option name="paddle_device" type="string">
@@ -219,61 +230,130 @@
 		<value>joystick</value>
 	</option>
 
-	<!--CORE DEBUGGING OPTIONS—核心调试开关-->
-	<option name="log" type="bool" />
-	<option name="verbose" type="bool" />
-	<option name="update_in_pause" type="bool" />
-	<option name="debug" type="bool" />
-	<option name="debugscript" type="file" />
+	<!-- ══ CORE DEBUGGING OPTIONS：日志/调试器开关 ══ -->
+	<option name="verbose" guiname="display additional diagnostics" type="bool" />
+	<option name="log" guiname="generate error.log" type="bool" />
+	<option name="oslog" guiname="log to system diagnostic output" type="bool" />
+	<option name="debug" guiname="enable debugger" type="bool" />
+	<option name="update_in_pause" guiname="keep updating while paused" type="bool" />
+	<option name="debugscript" guiname="debugger script" type="file" />
+	<option name="debuglog" guiname="write debug console log" type="bool" />
 
-	<!-- 核心杂项：BIOS 选择（动态枚举，按所选游戏填充）/金手指/IPS 补丁/退出确认等。
-	     两个写 ini 特例：bios 在 GUI/Global/Source 层强制写默认值；ips 只写游戏层 ini，其余层不写 -->
+	<!-- ══ CORE COMM OPTIONS：多机联机地址/端口/帧同步 ══ -->
+	<option name="comm_localhost" guiname="local address to bind" type="stringeditable" />
+	<option name="comm_localport" guiname="local port to bind" type="stringeditable" />
+	<option name="comm_remotehost" guiname="remote address to connect" type="stringeditable" />
+	<option name="comm_remoteport" guiname="remote port to connect" type="stringeditable" />
+	<option name="comm_framesync" guiname="sync frames" type="bool" />
+
+	<!-- ══ CORE MISC OPTIONS：DRC 后端/BIOS 选择（动态枚举，按所选游戏填充）/
+	     金手指/界面字体/退出确认等。两个写 ini 特例：bios 在 GUI/Global/Source
+	     层强制写默认值；ips 只写游戏层 ini，其余层不写 ══ -->
+	<option name="drc" guiname="enable DRC CPU cores" type="bool" />
+	<option name="drc_rwx" guiname="allow writable executable pages" type="bool" />
+	<option name="drc_use_c" guiname="force C DRC backend" type="bool" />
+	<option name="drc_log_uml" guiname="write DRC UML log" type="bool" />
+	<option name="drc_log_native" guiname="write DRC native log" type="bool" />
 	<option name="bios" guiname="BIOS" type="string" globalvisible="0" srcvisible="0" />
 	<option name="cheat" guiname="enable game cheats" type="bool" />
 	<option name="skip_gameinfo" guiname="skip game info" type="bool" />
-	<option name="ips" guiname="IPS" type="string" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
-	<option name="confirm_quit" guiname="quit game with confirmation" type="bool" />
-	<option name="auto_pause" guiname="auto pause when playback is finished" type="bool" />
-	<!--obsoleted—已废弃，仅为兼容旧 ini 保留-->
-	<option name="m68k_core" type="string">
-		<value>c</value>
-		<value>drc</value>
+	<option name="uifont" guiname="UI font" type="stringeditable" />
+	<option name="ui" guiname="type of UI" type="string">
+		<value>simple</value>
+		<value>cabinet</value>
 	</option>
-	<!--obsoleted—已废弃，仅为兼容旧 ini 保留-->
-	<option name="use_trans_ui" guiname="transparent in-game UI" type="bool" />
-	<option name="ui_transparency" guiname="in-game UI transparency" type="int" min="0" max="255" />
-
-	<!--CORE PALETTE OPTIONS—内嵌 UI 调色板：前端菜单/按钮/光标颜色-->
-	<option name="font_blank" type="color" />
-	<option name="font_normal" type="color" />
-	<option name="font_special" type="color" />
-	<option name="system_background" type="color" />
-	<option name="button_red" type="color" />
-	<option name="button_yellow" type="color" />
-	<option name="button_green" type="color" />
-	<option name="button_blue" type="color" />
-	<option name="button_purple" type="color" />
-	<option name="button_pink" type="color" />
-	<option name="button_aqua" type="color" />
-	<option name="button_silver" type="color" />
-	<option name="button_navy" type="color" />
-	<option name="button_lime" type="color" />
-	<option name="cursor" type="color" />
-
+	<option name="ramsize" guiname="RAM size" type="stringeditable" />
+	<option name="confirm_quit" guiname="quit game with confirmation" type="bool" />
+	<option name="ui_mouse" guiname="display UI mouse cursor" type="bool" />
+	<option name="nvram_save" guiname="save NVRAM on exit" type="bool" />
+	<option name="ips" guiname="IPS" type="string" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<!-- 界面语言：与前端 pGuiSettings 里的同名 GUI 设置是两回事，勿混（见 mod.rs load_ini 注释）。
 	     保存特例：save_ini_file 会剔除 language 行，该项实际不会写回 mame.ini -->
 	<option name="language" type="string" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="use_lang_list" type="bool" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 
-	<!--WINDOWS DEBUGGING OPTIONS—Windows 调试-->
-	<option name="oslog" type="bool" />
-	<option name="watchdog" type="string" />
-	<option name="debugger_font" type="string" />
-	<option name="debugger_font_size" type="int" min="1" max="64" />
+	<!-- ══ SCRIPTING OPTIONS：开机自动执行命令/Lua 脚本/插件 ══ -->
+	<option name="autoboot_command" guiname="autoboot command" type="stringeditable" />
+	<option name="autoboot_delay" guiname="autoboot delay in seconds" type="stringeditable" />
+	<option name="autoboot_script" guiname="autoboot Lua script" type="file" />
+	<option name="console" guiname="enable Lua console" type="bool" />
+	<option name="plugins" guiname="enable Lua plugins" type="bool" />
+	<option name="plugin" guiname="plugins to enable" type="stringeditable" />
+	<option name="noplugin" guiname="plugins to disable" type="stringeditable" />
 
-	<!--WINDOWS PERFORMANCE OPTIONS—Windows 性能：线程优先级/多线程/CPU 数-->
-	<option name="priority" guiname="thread priority" type="int" min="-15" max="1" />
-	<option name="multithreading" guiname="enable multi-threading" type="bool" />
+	<!-- ══ HTTP SERVER OPTIONS：内嵌 HTTP 服务（Lua/远程控制用） ══ -->
+	<option name="http" guiname="enable HTTP server" type="bool" />
+	<option name="http_port" guiname="HTTP server port" type="stringeditable" />
+	<option name="http_root" guiname="HTTP document root" type="dir" />
+
+	<!-- ══ OSD INPUT MAPPING OPTIONS：UI 模式切换键/手柄映射文件 ══ -->
+	<option name="uimodekey" guiname="UI mode toggle key" type="stringeditable" />
+	<option name="controller_map" guiname="controller mapping file" type="file" />
+	<option name="background_input" guiname="accept input without focus" type="bool" />
+
+	<!-- ══ OSD FONT / OUTPUT OPTIONS：字体与输出通知提供方 ══ -->
+	<option name="uifontprovider" guiname="UI font provider" type="string">
+		<value>auto</value>
+		<value os="win">win</value>
+		<value os="win">dwrite</value>
+		<value>none</value>
+	</option>
+	<option name="output" guiname="output notifications" type="string">
+		<value>auto</value>
+		<value>none</value>
+		<value>console</value>
+		<value>network</value>
+		<value os="win">windows</value>
+	</option>
+
+	<!-- ══ OSD INPUT OPTIONS：键盘/鼠标/光枪/手柄输入后端，按平台过滤 ══ -->
+	<option name="keyboardprovider" guiname="keyboard input provider" type="string">
+		<value>auto</value>
+		<value os="win">rawinput</value>
+		<value os="win">dinput</value>
+		<value os="win">win32</value>
+		<value>none</value>
+	</option>
+	<option name="mouseprovider" guiname="mouse input provider" type="string">
+		<value>auto</value>
+		<value os="win">rawinput</value>
+		<value os="win">dinput</value>
+		<value os="win">win32</value>
+		<value>none</value>
+	</option>
+	<option name="lightgunprovider" guiname="lightgun input provider" type="string">
+		<value>auto</value>
+		<value os="win">rawinput</value>
+		<value os="win">win32</value>
+		<value>none</value>
+	</option>
+	<option name="joystickprovider" guiname="joystick input provider" type="string">
+		<value>auto</value>
+		<value os="win">winhybrid</value>
+		<value os="win">dinput</value>
+		<value os="win">xinput</value>
+		<value>none</value>
+	</option>
+
+	<!-- ══ OSD CLI OPTIONS：设备枚举命令行，界面不显示 ══ -->
+	<option name="listmidi" type="bool" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
+	<option name="listnetwork" type="bool" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
+
+	<!-- ══ OSD DEBUGGING OPTIONS：调试器选择/gdbstub/看门狗 ══ -->
+	<option name="debugger" guiname="debugger used" type="string">
+		<value>auto</value>
+		<value os="win">windows</value>
+		<value>imgui</value>
+		<value>gdbstub</value>
+		<value>none</value>
+	</option>
+	<option name="debugger_host" guiname="gdbstub bind address" type="stringeditable" />
+	<option name="debugger_port" guiname="gdbstub port" type="stringeditable" />
+	<option name="debugger_font" guiname="debugger font" type="stringeditable" />
+	<option name="debugger_font_size" guiname="debugger font size" type="stringeditable" />
+	<option name="watchdog" guiname="watchdog timeout in seconds" type="stringeditable" />
+
+	<!-- ══ OSD PERFORMANCE OPTIONS：CPU 数/基准测试 ══ -->
 	<option name="numprocessors" guiname="number of processors" type="string">
 		<value>auto</value>
 		<value>1</value>
@@ -281,18 +361,17 @@
 		<value>3</value>
 		<value>4</value>
 	</option>
+	<option name="bench" guiname="benchmark seconds" type="stringeditable" />
 
-	<!-- SDL 版检测标记：mod.rs 以 sdlvideofps/videodriver 是否存在判定 is_sdl_port -->
-	<option name="sdlvideofps" guiname="show SDL video performance" type="bool" />
-
-	<!-- ══ OSD 视频输出：渲染后端/窗口/缩放/同步 ══
+	<!-- ══ OSD 视频输出：渲染后端/窗口/同步/显示器发现 ══
 	     <value os="win|sdl"> 按平台过滤：is_sdl_port=true 取 sdl，否则取 win。两端选项都写进 mame.ini，但只有对应版本会读取生效 -->
 	<option name="video" guiname="video output method" type="string">
+		<value>auto</value>
 		<value os="win">none</value>
 		<value os="win" guivalue="GDI">gdi</value>
-		<value os="win" guivalue="DirectDraw">ddraw</value>
 		<value os="win" guivalue="Direct3D">d3d</value>
 		<value os="win" guivalue="BGFX">bgfx</value>
+		<value os="win" guivalue="OpenGL">opengl</value>
 		<value os="sdl" guivalue="OpenGL">opengl</value>
 		<value os="sdl">opengl16</value>
 		<value os="sdl">soft</value>
@@ -301,108 +380,79 @@
 	<option name="numscreens" guiname="number of screens to create" type="int" min="1" max="4" />
 	<option name="window" guiname="run in a window" type="bool" />
 	<option name="maximize" guiname="start out maximized" type="bool" />
-	<option name="keepaspect" guiname="enforce aspect ratio" type="bool" />
-	<option name="prescale" guiname="scale screen" type="int" min="1" max="10" />
-	<option name="unevenstretch" guiname="non-integer stretching" type="bool" />
-	<option name="effect" guiname="visual effects" type="string" />
-	<option name="centerh" guiname="center horizontally" type="bool" />
-	<option name="centerv" guiname="center vertically" type="bool" />
 	<option name="waitvsync" guiname="wait for vertical sync" type="bool" />
 	<option name="syncrefresh" guiname="sync to monitor refresh" type="bool" />
-
-	<option name="scalemode" guiname="scale mode" type="string">
-		<value>none</value>
-		<value>hwblit</value>
-		<value>hwbest</value>
-		<value>async</value>
-		<value>yv12</value>
-		<value>yuy2</value>
-		<value>yv12x2</value>
-		<value>yuy2x2</value>
+	<option name="monitorprovider" guiname="monitor discovery method" type="string">
+		<value>auto</value>
+		<value os="win">win32</value>
+		<value os="win">dxgi</value>
 	</option>
 
-	<option name="hwstretch" guiname="hardware stretching" type="bool" />
-
-	<option name="d3dversion" guiname="D3D version" type="string">
-		<value guivalue="Version 8">8</value>
-		<value guivalue="Version 9">9</value>
-	</option>
-	<option name="filter" guiname="bilinear filtering" type="bool" />
-	
-	<!--OpenGL-SPECIFIC OPTIONS-->
-	<option name="gl_forcepow2texture" guiname="force power of 2 textures" type="bool" />
-	<option name="gl_notexturerect" guiname="no GL ARB texture rectangle" type="bool" />
-	<option name="gl_vbo" guiname="enable OpenGL VBO" type="bool" />
-	<option name="gl_pbo" guiname="enable OpenGL PBO" type="bool" />
-	<option name="gl_glsl" guiname="enable OpenGL GLSL" type="bool" />
-	<option name="gl_glsl_filter" guiname="OpenGL GLSL filtering" type="bool" />
-	<option name="gl_glsl_vid_attr" guiname="OpenGL GLSL video attributes" type="bool" />
-	
 	<!-- 多屏逐屏配置：all screens 统一 + screen0~3 四块物理屏独立（aspect 为可编辑下拉，可手输如 16:10） -->
-	<option name="screen" guiname="all screens: physical monitor" type="string" />
+	<option name="screen" guiname="all screens: physical monitor" type="stringeditable" />
 	<option name="aspect" guiname="all screens: aspect ratio" type="stringeditable">
 		<value>auto</value>
 		<value>4:3</value>
 		<value>5:4</value>
 		<value>16:9</value>
 	</option>
-	<option name="resolution" guiname="all screens: resolution" type="string" />
+	<option name="resolution" guiname="all screens: resolution" type="stringeditable" />
 	<option name="view" guiname="all screens: view" type="string">
 		<value>auto</value>
 		<value>standard</value>
 		<value guivalue="pixel aspect">pixel</value>
 		<value>cocktail</value>
 	</option>
-	<option name="screen0" guiname="screen 1: physical monitor" type="string" />
+	<option name="screen0" guiname="screen 1: physical monitor" type="stringeditable" />
 	<option name="aspect0" guiname="screen 1: aspect ratio" type="stringeditable">
 		<value>auto</value>
 		<value>4:3</value>
 		<value>5:4</value>
 		<value>16:9</value>
 	</option>
-	<option name="resolution0" guiname="screen 1: resolution" type="string" />
+	<option name="resolution0" guiname="screen 1: resolution" type="stringeditable" />
 	<option name="view0" guiname="screen 1: view" type="string">
 		<value>auto</value>
 		<value>standard</value>
 		<value guivalue="pixel aspect">pixel</value>
 		<value>cocktail</value>
 	</option>
-	<option name="screen1" guiname="screen 2: physical monitor" type="string" />
+	<option name="screen1" guiname="screen 2: physical monitor" type="stringeditable" />
 	<option name="aspect1" guiname="screen 2: aspect ratio" type="stringeditable">
 		<value>auto</value>
 		<value>4:3</value>
 		<value>5:4</value>
 		<value>16:9</value>
 	</option>
-	<option name="resolution1" guiname="screen 2: resolution" type="string" />
+	<option name="resolution1" guiname="screen 2: resolution" type="stringeditable" />
 	<option name="view1" guiname="screen 2: view" type="string">
 		<value>auto</value>
 		<value>standard</value>
 		<value guivalue="pixel aspect">pixel</value>
 		<value>cocktail</value>
 	</option>
-	<option name="screen2" guiname="screen 3: physical monitor" type="string" />
+	<option name="screen2" guiname="screen 3: physical monitor" type="stringeditable" />
 	<option name="aspect2" guiname="screen 3: aspect ratio" type="stringeditable">
 		<value>auto</value>
 		<value>4:3</value>
 		<value>5:4</value>
 		<value>16:9</value>
 	</option>
-	<option name="resolution2" guiname="screen 3: resolution" type="string" />
+	<option name="resolution2" guiname="screen 3: resolution" type="stringeditable" />
 	<option name="view2" guiname="screen 3: view" type="string">
 		<value>auto</value>
 		<value>standard</value>
 		<value guivalue="pixel aspect">pixel</value>
 		<value>cocktail</value>
 	</option>
-	<option name="screen3" guiname="screen 4: physical monitor" type="string" />
+	<option name="screen3" guiname="screen 4: physical monitor" type="stringeditable" />
 	<option name="aspect3" guiname="screen 4: aspect ratio" type="stringeditable">
 		<value>auto</value>
 		<value>4:3</value>
 		<value>5:4</value>
 		<value>16:9</value>
 	</option>
-	<option name="resolution3" guiname="screen 4: resolution" type="string" />
+	<option name="resolution3" guiname="screen 4: resolution" type="stringeditable" />
 	<option name="view3" guiname="screen 4: view" type="string">
 		<value>auto</value>
 		<value>standard</value>
@@ -410,50 +460,214 @@
 		<value>cocktail</value>
 	</option>
 
-	<!--FULL SCREEN OPTIONS—全屏专属：三缓冲/切换分辨率-->
-	<option name="triplebuffer" guiname="triple buffering" type="bool" />
+	<!-- ══ OSD FULL SCREEN OPTIONS：全屏切换分辨率 ══ -->
 	<option name="switchres" guiname="switch resolutions to fit" type="bool" />
+
+	<!-- ══ OSD ACCELERATED VIDEO OPTIONS：双线性过滤/预放大 ══ -->
+	<option name="filter" guiname="bilinear filtering" type="bool" />
+	<option name="prescale" guiname="scale screen" type="int" min="1" max="20" />
+
+	<!-- ══ OpenGL-SPECIFIC OPTIONS：VBO/PBO/GLSL 着色器槽（mame0-9 + screen0-9） ══ -->
+	<option name="gl_forcepow2texture" guiname="force power of 2 textures" type="bool" />
+	<option name="gl_notexturerect" guiname="no GL ARB texture rectangle" type="bool" />
+	<option name="gl_vbo" guiname="enable OpenGL VBO" type="bool" />
+	<option name="gl_pbo" guiname="enable OpenGL PBO" type="bool" />
+	<option name="gl_glsl" guiname="enable OpenGL GLSL" type="bool" />
+	<option name="gl_glsl_filter" guiname="OpenGL GLSL filtering" type="int" min="0" max="2" />
+	<option name="glsl_shader_mame0" guiname="GLSL shader mame bitmap 0" type="stringeditable" />
+	<option name="glsl_shader_mame1" guiname="GLSL shader mame bitmap 1" type="stringeditable" />
+	<option name="glsl_shader_mame2" guiname="GLSL shader mame bitmap 2" type="stringeditable" />
+	<option name="glsl_shader_mame3" guiname="GLSL shader mame bitmap 3" type="stringeditable" />
+	<option name="glsl_shader_mame4" guiname="GLSL shader mame bitmap 4" type="stringeditable" />
+	<option name="glsl_shader_mame5" guiname="GLSL shader mame bitmap 5" type="stringeditable" />
+	<option name="glsl_shader_mame6" guiname="GLSL shader mame bitmap 6" type="stringeditable" />
+	<option name="glsl_shader_mame7" guiname="GLSL shader mame bitmap 7" type="stringeditable" />
+	<option name="glsl_shader_mame8" guiname="GLSL shader mame bitmap 8" type="stringeditable" />
+	<option name="glsl_shader_mame9" guiname="GLSL shader mame bitmap 9" type="stringeditable" />
+	<option name="glsl_shader_screen0" guiname="GLSL shader screen bitmap 0" type="stringeditable" />
+	<option name="glsl_shader_screen1" guiname="GLSL shader screen bitmap 1" type="stringeditable" />
+	<option name="glsl_shader_screen2" guiname="GLSL shader screen bitmap 2" type="stringeditable" />
+	<option name="glsl_shader_screen3" guiname="GLSL shader screen bitmap 3" type="stringeditable" />
+	<option name="glsl_shader_screen4" guiname="GLSL shader screen bitmap 4" type="stringeditable" />
+	<option name="glsl_shader_screen5" guiname="GLSL shader screen bitmap 5" type="stringeditable" />
+	<option name="glsl_shader_screen6" guiname="GLSL shader screen bitmap 6" type="stringeditable" />
+	<option name="glsl_shader_screen7" guiname="GLSL shader screen bitmap 7" type="stringeditable" />
+	<option name="glsl_shader_screen8" guiname="GLSL shader screen bitmap 8" type="stringeditable" />
+	<option name="glsl_shader_screen9" guiname="GLSL shader screen bitmap 9" type="stringeditable" />
+
+	<!-- ══ OSD SOUND OPTIONS：音频后端/延迟 ══ -->
+	<option name="sound" guiname="sound output method" type="string">
+		<value>auto</value>
+		<value os="win">wasapi</value>
+		<value os="win">xaudio2</value>
+		<value os="win">portaudio</value>
+		<value os="sdl">sdl</value>
+		<value>none</value>
+	</option>
+	<option name="audio_latency" guiname="audio latency" type="float" min="0" max="50.0" />
+
+	<!-- ══ OSD MIDI / EMULATED NETWORKING OPTIONS：MIDI 与虚拟网卡提供方 ══ -->
+	<option name="midiprovider" guiname="MIDI I/O method" type="string">
+		<value>auto</value>
+		<value>pm</value>
+		<value>none</value>
+	</option>
+	<option name="networkprovider" guiname="network adapter provider" type="string">
+		<value>auto</value>
+		<value os="win">taptun</value>
+		<value>none</value>
+	</option>
+
+	<!-- ══ BGFX POST-PROCESSING OPTIONS：BGFX 路径/后端/屏幕链/遮罩/LUT ══ -->
+	<option name="bgfx_path" guiname="BGFX files path" type="dir" />
+	<option name="bgfx_backend" guiname="BGFX backend" type="string">
+		<value>auto</value>
+		<value os="win">d3d9</value>
+		<value os="win">d3d11</value>
+		<value os="win">d3d12</value>
+		<value os="sdl">metal</value>
+		<value>opengl</value>
+		<value>gles</value>
+		<value>vulkan</value>
+	</option>
+	<option name="bgfx_debug" guiname="enable BGFX debugging statistics" type="bool" />
+	<option name="bgfx_screen_chains" guiname="screen chain JSON names" type="stringeditable" />
+	<option name="bgfx_shadow_mask" guiname="shadow mask texture name" type="stringeditable" />
+	<option name="bgfx_lut" guiname="LUT texture name" type="stringeditable" />
+	<option name="bgfx_avi_name" guiname="BGFX output filename" type="stringeditable" />
+
+	<!-- ══ WINDOWS PERFORMANCE / VIDEO OPTIONS：线程优先级/性能分析/窗口附着 ══ -->
+	<option name="priority" guiname="thread priority" type="int" min="-15" max="1" />
+	<option name="profile" guiname="profiling stack depth" type="stringeditable" />
+	<option name="attach_window" guiname="attach to arbitrary window" type="stringeditable" />
+
+	<!-- ══ DIRECT3D POST-PROCESSING OPTIONS：HLSL 着色器链。带实测范围的浮点项给
+	     min/max；CSV 逗号三元组项（收敛/信号比/磷光等）无统一标量范围，用可编辑文本 -->
+	<option name="hlslpath" guiname="HLSL support files path" type="dir" />
+	<option name="hlsl_enable" guiname="enable HLSL post-processing" type="bool" />
+	<option name="hlsl_oversampling" guiname="enable HLSL oversampling" type="bool" />
+	<option name="hlsl_write" guiname="enable HLSL AVI writing" type="stringeditable" />
+	<option name="hlsl_snap_width" guiname="HLSL snapshot width" type="stringeditable" />
+	<option name="hlsl_snap_height" guiname="HLSL snapshot height" type="stringeditable" />
+	<option name="shadow_mask_tile_mode" guiname="shadow mask tile mode" type="string">
+		<value guivalue="screen based">0</value>
+		<value guivalue="source based">1</value>
+	</option>
+	<option name="shadow_mask_alpha" guiname="shadow mask alpha blend" type="float" min="0" max="1.0" />
+	<option name="shadow_mask_texture" guiname="shadow mask texture" type="stringeditable" />
+	<option name="shadow_mask_x_count" guiname="shadow mask tile width" type="stringeditable" />
+	<option name="shadow_mask_y_count" guiname="shadow mask tile height" type="stringeditable" />
+	<option name="shadow_mask_usize" guiname="shadow mask U size" type="float" min="0" max="1.0" />
+	<option name="shadow_mask_vsize" guiname="shadow mask V size" type="float" min="0" max="1.0" />
+	<option name="shadow_mask_uoffset" guiname="shadow mask U offset" type="float" min="-1.0" max="1.0" />
+	<option name="shadow_mask_voffset" guiname="shadow mask V offset" type="float" min="-1.0" max="1.0" />
+	<option name="distortion" guiname="screen distortion amount" type="float" min="-1.0" max="1.0" />
+	<option name="cubic_distortion" guiname="cubic distortion amount" type="float" min="-1.0" max="1.0" />
+	<option name="distort_corner" guiname="distort corner amount" type="float" min="0" max="1.0" />
+	<option name="round_corner" guiname="round corner amount" type="float" min="0" max="1.0" />
+	<option name="smooth_border" guiname="smooth border amount" type="float" min="0" max="1.0" />
+	<option name="reflection" guiname="screen reflection amount" type="float" min="0" max="1.0" />
+	<option name="vignetting" guiname="image vignetting amount" type="float" min="0" max="1.0" />
+	<option name="scanline_alpha" guiname="scanline alpha" type="float" min="0" max="4.0" />
+	<option name="scanline_size" guiname="scanline overall height scale" type="float" min="0" max="4.0" />
+	<option name="scanline_height" guiname="individual scanline height" type="float" min="0" max="4.0" />
+	<option name="scanline_variation" guiname="scanline height variation" type="float" min="0" max="4.0" />
+	<option name="scanline_bright_scale" guiname="scanline brightness scale" type="float" min="0" max="2.0" />
+	<option name="scanline_bright_offset" guiname="scanline brightness offset" type="float" min="0" max="1.0" />
+	<option name="scanline_jitter" guiname="scanline interlace jitter" type="float" min="0" max="4.0" />
+	<option name="hum_bar_alpha" guiname="hum bar alpha" type="float" min="0" max="1.0" />
+	<option name="defocus" guiname="defocus amount" type="stringeditable" />
+	<option name="converge_x" guiname="convergence X" type="stringeditable" />
+	<option name="converge_y" guiname="convergence Y" type="stringeditable" />
+	<option name="radial_converge_x" guiname="radial convergence X" type="stringeditable" />
+	<option name="radial_converge_y" guiname="radial convergence Y" type="stringeditable" />
+	<option name="red_ratio" guiname="red output ratio" type="stringeditable" />
+	<option name="grn_ratio" guiname="green output ratio" type="stringeditable" />
+	<option name="blu_ratio" guiname="blue output ratio" type="stringeditable" />
+	<option name="saturation" guiname="saturation scale" type="stringeditable" />
+	<option name="offset" guiname="signal offset" type="stringeditable" />
+	<option name="scale" guiname="signal scale" type="stringeditable" />
+	<option name="power" guiname="signal power" type="stringeditable" />
+	<option name="floor" guiname="signal floor" type="stringeditable" />
+	<option name="phosphor_life" guiname="phosphor decay rate" type="stringeditable" />
+	<option name="chroma_mode" guiname="phosphor chroma mode" type="string">
+		<value guivalue="monochrome">1</value>
+		<value guivalue="dichrome">2</value>
+		<value guivalue="trichrome">3</value>
+	</option>
+	<option name="chroma_conversion_gain" guiname="chroma conversion gain" type="stringeditable" />
+	<option name="chroma_a" guiname="chroma A (x,y)" type="stringeditable" />
+	<option name="chroma_b" guiname="chroma B (x,y)" type="stringeditable" />
+	<option name="chroma_c" guiname="chroma C (x,y)" type="stringeditable" />
+	<option name="chroma_y_gain" guiname="chroma Y gain" type="stringeditable" />
+
+	<!-- ══ NTSC POST-PROCESSING OPTIONS：复合视频 YIQ 模拟（各参数无统一标量范围） ══ -->
+	<option name="yiq_enable" guiname="enable NTSC YIQ filter" type="bool" />
+	<option name="yiq_jitter" guiname="YIQ color carrier jitter" type="stringeditable" />
+	<option name="yiq_cc" guiname="YIQ color carrier frequency" type="stringeditable" />
+	<option name="yiq_a" guiname="YIQ A timing" type="stringeditable" />
+	<option name="yiq_b" guiname="YIQ B timing" type="stringeditable" />
+	<option name="yiq_o" guiname="YIQ O timing" type="stringeditable" />
+	<option name="yiq_p" guiname="YIQ P timing" type="stringeditable" />
+	<option name="yiq_n" guiname="YIQ N timing" type="stringeditable" />
+	<option name="yiq_y" guiname="YIQ Y frequency" type="stringeditable" />
+	<option name="yiq_i" guiname="YIQ I frequency" type="stringeditable" />
+	<option name="yiq_q" guiname="YIQ Q frequency" type="stringeditable" />
+	<option name="yiq_scan_time" guiname="YIQ scanline duration" type="stringeditable" />
+	<option name="yiq_phase_count" guiname="YIQ phase count" type="stringeditable" />
+
+	<!-- ══ VECTOR POST-PROCESSING OPTIONS：矢量后处理（平滑/衰减） ══ -->
+	<option name="vector_beam_smooth" guiname="vector beam smoothing" type="stringeditable" />
+	<option name="vector_length_scale" guiname="attenuation maximum" type="stringeditable" />
+	<option name="vector_length_ratio" guiname="attenuation length minimum" type="stringeditable" />
+
+	<!-- ══ BLOOM POST-PROCESSING OPTIONS：泛光叠加与 LUT 查找表 ══ -->
+	<option name="bloom_blend_mode" guiname="bloom blend mode" type="string">
+		<value guivalue="brighten">0</value>
+		<value guivalue="darken">1</value>
+	</option>
+	<option name="bloom_scale" guiname="bloom scale" type="stringeditable" />
+	<option name="bloom_overdrive" guiname="bloom overdrive" type="stringeditable" />
+	<option name="bloom_lvl0_weight" guiname="bloom level 0 weight" type="stringeditable" />
+	<option name="bloom_lvl1_weight" guiname="bloom level 1 weight" type="stringeditable" />
+	<option name="bloom_lvl2_weight" guiname="bloom level 2 weight" type="stringeditable" />
+	<option name="bloom_lvl3_weight" guiname="bloom level 3 weight" type="stringeditable" />
+	<option name="bloom_lvl4_weight" guiname="bloom level 4 weight" type="stringeditable" />
+	<option name="bloom_lvl5_weight" guiname="bloom level 5 weight" type="stringeditable" />
+	<option name="bloom_lvl6_weight" guiname="bloom level 6 weight" type="stringeditable" />
+	<option name="bloom_lvl7_weight" guiname="bloom level 7 weight" type="stringeditable" />
+	<option name="bloom_lvl8_weight" guiname="bloom level 8 weight" type="stringeditable" />
+	<option name="lut_texture" guiname="LUT texture" type="file" />
+	<option name="lut_enable" guiname="enable LUT" type="bool" />
+	<option name="ui_lut_texture" guiname="UI LUT texture" type="file" />
+	<option name="ui_lut_enable" guiname="enable UI LUT" type="bool" />
+
+	<!-- ══ FULL SCREEN OPTIONS：全屏专属：三缓冲/独立亮度对比度伽马 ══ -->
+	<option name="triplebuffer" guiname="triple buffering" type="bool" />
 	<option name="full_screen_brightness" type="float" min="0.1" max="2.0" />
 	<option name="full_screen_contrast" type="float" min="0.1" max="2.0" />
 	<option name="full_screen_gamma" type="float" min="0.1" max="3.0" />
-	
-	<option name="useallheads" guiname="split image across monitors" type="bool" />
 
-	<!--SOUND OPTIONS—SDL 音频：延迟/同步-->
-	<option name="audio_latency" type="int" min="1" max="5" />
-	<option name="audio_sync" type="bool" />
-	
-	<!--INPUT DEVICE OPTIONS—SDL 输入设备：双光枪/手柄序号绑定-->
-	<option name="dual_lightgun" type="bool" />
+	<!-- ══ INPUT DEVICE OPTIONS：SDL 双光枪 ══ -->
+	<option name="dual_lightgun" guiname="enable dual lightguns" type="bool" />
+
+	<!-- ══ FRONTEND COMMAND OPTIONS：dtd 只在命令行用，界面不显示 ══ -->
+	<option name="dtd" type="bool" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
+
+	<!-- sdlmame ver —以下为 SDL 版专属选项（仅 is_sdl_port 时生效；
+	     mod.rs 以 sdlvideofps/videodriver 之一判定 SDL 端） -->
+	<option name="sdlvideofps" guiname="show SDL video performance" type="bool" />
+	<!--SDL KEYBOARD MAPPING-->
+	<option name="keymap" guiname="enable keymap" type="bool" />
+	<option name="keymap_file" guiname="keymap filename" type="datfile" />
+	<!--SDL JOYSTICK MAPPING：手柄序号绑定-->
 	<option name="joyid1" type="int" min="0" max="7" />
 	<option name="joyid2" type="int" min="0" max="7" />
 	<option name="joyid3" type="int" min="0" max="7" />
 	<option name="joyid4" type="int" min="0" max="7" />
-	<option name="joyid5" type="int" min="0" max="7" />
-	<option name="joyid6" type="int" min="0" max="7" />
-	<option name="joyid7" type="int" min="0" max="7" />
-	<option name="joyid8" type="int" min="0" max="7" />
-
-	<!--MESS SPECIFIC OPTIONS—MESS(计算机/掌机)专属-->
-	<option name="ramsize" type="bool" />
-	<option name="writeconfig" type="bool" />
-	<option name="skip_warnings" type="bool" />
-	<option name="newui" guiname="use new MESS UI" type="bool" />
-	<option name="natural" guiname="use natural keyboard" type="bool" />
-
-<!-- sdlmame ver —以下为 SDL 版专属选项（仅 is_sdl_port 时生效） -->
-	<!--SDL KEYBOARD MAPPING-->
-	<option name="keymap" guiname="enable keymap" type="bool" />
-	<option name="keymap_file" guiname="keymap filename" type="datfile" />
-
-	<!--SDL JOYSTICK MAPPING-->
-	<option name="remapjoys" guiname="enable joystick mapping" type="bool" />
-	<option name="remapjoyfile" guiname="joymap filename" type="datfile" />
-	<option name="sixaxis" guiname="PS3 Sixaxis controllers" type="bool" />
-	
 	<!--SDL LOWLEVEL DRIVER OPTIONS-->
-	<option name="audiodriver" guiname="SDL audio driver" type="string" />
-	<option name="videodriver" guiname="SDL video driver" type="string" />
-	<option name="renderdriver" guiname="SDL render driver" type="string" />
-	<option name="gl_lib" guiname="alternative libGL.so" type="string" />
+	<option name="audiodriver" guiname="SDL audio driver" type="stringeditable" />
+	<option name="videodriver" guiname="SDL video driver" type="stringeditable" />
+	<option name="renderdriver" guiname="SDL render driver" type="stringeditable" />
+	<option name="gl_lib" guiname="alternative libGL.so" type="stringeditable" />
 </optiontemplate>
