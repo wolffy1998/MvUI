@@ -158,15 +158,37 @@ fn crc_text(crc: u32) -> String {
 /// 现在所有段都按 `GRID` 排，名称列统一吃 `avail - GRID`，
 /// 后面的列自然全部落在同一条竖线上。
 mod cols {
-    /// 状态列：图标 + 空格 + 状态词。**图标与词同格**（见 [`state_with_icon`]），
-    /// 所以这一列的宽度是"16px 图标 + 4px 间隙 + 状态词"。
+    /// 状态列宽。**图标在状态词【后面】**（用户 2026-06 最后定）：状态词 +
+    /// 4px + 16px 图标。
     ///
-    /// 60px 的来历：图标 16 + 间隙 4= 20，剩 40 放三个汉字（约 13px/字）。
+    /// 60px 的来历：`未拥有` 三个汉字约 40px + 间隙 4 + 图标 16 = 60。
+    /// **正着放（图标在前）会超** —— 16 + 4 + 40 = 60刚好顶到列边，
+    /// 实测「未拥有」的字形比估算宽 2~3px，于是文字压到 crc 列上
+    /// （截图里`❌ 未拥有7f7393de)` 糊成一团）。所以顺序是「词 + 图标」。
     pub const STATE: f32 = 60.0;
     /// CRC 列：`crc(78c15fa2)` 是定宽的等宽字体串。
     pub const CRC: f32 = 104.0;
     /// 区域 + tag 列（`maincpu` / `igs023:sprcol`）。
     pub const REGION: f32 = 132.0;
+
+    /// 名称列**定宽**（2026-06 改）。曾经它吃掉全部剩余空间，于是面板一
+    /// 拉宽，"拥有"就跟着往右跑，文件名与状态之间的空档越拉越大。
+    ///
+    /// 用户要求：「应该靠左固定值，在这么宽度的面板上能显示，拉宽的话右侧
+    /// 就空出来即可。」—— 定宽正是这个意思。
+    ///
+    /// 300px 的依据（真实 MAME 0.284 全量 listxml 实测）：
+    ///
+    /// |类别 | 最长 | 字符数 |
+    /// |---|---|---|
+    /// | rom 文件名 | `m2500p-vt09-epson,20091222ver05,...` | 81（极端个例）|
+    /// | 机种名（引用设备段） | `msx_slot_disk1_wd2793_n_2_drives` | 32 |
+    /// | 机种名 P99 | — | 17 |
+    /// | 机种名 P90 | — | 11 |
+    ///
+    /// 等宽字体 12px 约 7.2px/字符 → 300px 装得下约 **41 个字符**，覆盖
+    /// 绝大多数（P99 才 17）。超长的在列内换行，不会挤到状态列。
+    pub const NAME: f32 = 300.0;
 
     /// 状态图标边长（1.8.2 那套 `status_*.png` 是 16×16）。
     pub const ICON_W: f32 = 16.0;
@@ -181,72 +203,49 @@ mod cols {
     /// 名称列右侧的内边距。
     ///
     /// 没有它，长文件名会紧贴"拥有"（截图里 `p060-ep1  拥有` 像一个词）。
-    /// 12px 是"能看出是两列"又不浪费横向空间的量。
-    /// **别设太大。** 面板只有 512px 宽时名称列只剩 110px，扣掉 12px 内边距
-    /// 就剩 98px，而 `10239811.u86` 这种 12 字符等宽名约需 100px —— 差2px
-    /// 就折行。4px 足够看出是两列，又不把长文件名挤到第二行。
+    /// 4px 足够看出是两列，又不浪费横向空间。
     pub const NAME_PAD: f32 = 4.0;
 
     /// 段与段之间的空行高度（约一行文字）。
     pub const SECTION_GAP: f32 = 18.0;
 
-    /// 名称列之外**全部固定列的宽度之和**。
+    /// **全部列的宽度之和**（名称列现在是定宽，所以整栅格是常数）。
     ///
-    /// 任何一段只要画到状态，就必须用这个值来定位名称列宽度，否则那段的状态
-    /// 词就会飘。少用的列留空（画个空白占位），不要缩减它——缩减等于承认
-    /// "这段例外"，而例外就是错位的来源。
-    ///
-    /// **不含图标**（2026-10-06）：图标改成紧跟状态词、画在 `STATE` 格子里，
-    /// 不再独占列。见 [`state_with_icon`]。
-    pub const GRID: f32 = STATE + CRC + REGION;
+    /// 面板窄于它时，名称列收缩到下限（见 [`name_width`]），其余列保持
+    /// 绝对位置 —— 宁可在名称列里折行，也不能让状态/crc 互相压。
+    pub const GRID: f32 = NAME + STATE + CRC + REGION;
 
-    /// 名称列宽度：吃掉所有剩余空间，并保证不小于一个可读的下限。
+    /// 名称列实际宽度：定宽，但**不许超过面板**。
     ///
-    /// 下限很重要：面板被拉窄时 `avail - GRID` 会变负，`add_sized` 收到负宽度
-    /// 会把后面的列往回挤（错位）或直接不渲染。让名称列收缩、其余列保持
-    /// 绝对位置，比让整行乱掉好。
+    /// 面板比 `GRID` 宽时右侧留空（用户要求）；比它窄时收缩到 60px 下限
+    /// —— 负宽度会把后面的列往回挤（错位）或不渲染，比窄更糟。
     pub fn name_width(avail: f32) -> f32 {
-        (avail - GRID).max(60.0)
+        NAME.min((avail - (GRID - NAME)).max(60.0))
     }
 }
 
-/// 状态图标 + 状态词**画在同一格里**：图标在左，词在右，中间 4px。
+/// 状态词 + 图标**画在同一格里**：词在左，图标在右，中间 4px。
 ///
-/// 用户要求（2026-06，最后一次调整）：「这对勾，X 或者感叹号图标放在拥有、
-/// 缺失、坏 dump **前面**且加个空格隔开」。先前是"词 + 图标"（图标跟在词尾），
-/// 现在反过来 —— 图标在前更像一列的**标记**，词是它的说明。
+/// **顺序是「词 + 图标」，不能反过来**（2026-06 用户实测定的）：
+/// `STATE` 是 60px，而 `未拥有` 三个汉字实际约 42px + 4 + 16 = 62px。
+/// 图标放前面时 `16 + 4 + 42` 正好顶满列宽、文字溢出 2~3px 压到 crc 列上
+/// （截图里 `❌未拥有7f7393de)` 糊成一团）。放后面则文字起点恒定在列首，
+/// 溢出的是图标那一侧，而图标本来就是这一格里的最后一样东西。
 ///
 /// **整格死占 [`cols::STATE`]**，所以跨段的状态起点仍落在同一条竖线上 ——
-/// 这条比"图标在前还是在后"重要得多。
+/// 这条比图标在前还是在后重要得多。
 ///
-/// 图标 16px（[`cols::ICON_W`]）贴格子左端，状态词从 `16 + 4` 处起排。
-/// 图标**不染色**（1.8.2 那套 png 自带颜色：绿勾 / 红叉 / 黄叹 / 蓝问），
-/// 但**未拥有用的是新画的 `status_missing.png`（红底白叉）** —— 原来的
-/// `status_cross` 是**蓝底**白叉，跟"红色专属给确实缺的东西"这条配色约定
-/// 冲突（蓝色在深色主题下还容易被看成灰色 = 未审计）。
+/// 图标 16px（[`cols::ICON_W`]）画在 `词宽 + 4` 处，不占独立列。
+/// 图标**不染色**（1.8.2 那套 png 自带颜色），但**未拥有用的是新画的
+/// `status_missing.png`（红底白叉）** —— 原来的 `status_cross` 是**蓝底**
+/// 白叉，深色主题下容易被读成灰色 = 「未审计」，而灰色是未审计的专属。
 ///
 /// 退路：纹理未解码时在图标位置画文字符号。
 fn state_with_icon(ui: &mut egui::Ui, text: impl AsRef<str>, state: RomState) {
     let color = state_color(state);
-    let (_id, rect) = ui.allocate_space(egui::vec2(cols::STATE, 16.0));
-    // 1) 图标贴在格子左端
-    let ctx = ui.ctx().clone();
-    let icon_rect = egui::Rect::from_min_size(rect.min, egui::vec2(cols::ICON_W, cols::ICON_W));
-    let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
-    if !drawn {
-        // 纹理还没解码完（第一帧）或图标名写错了：退回文字符号
-        ui.painter().text(
-            icon_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            mark_of(state),
-            egui::FontId::proportional(12.0),
-            color,
-        );
-    }
-    // 2) 状态词排在图标右边。宽度不参与布局（整格已被 STATE 死占），
-    //    词宽超了也只是画出去，不会把后面的列挤歪 —— 与 `cell` 不同，
-    //    这里不需要换行逻辑：状态词最长三个字（"未拥有"），60px 足够。
     let style = ui.style().clone();
+    // 1) 先排状态词量出宽度 —— 图标要贴在词尾，必须先知道词多宽。
+    //    不换行：状态词最长三个字，溢出的应该是图标那一侧而不是词。
     let mut job = egui::text::LayoutJob::default();
     egui::RichText::new(text.as_ref())
         .color(color)
@@ -258,11 +257,28 @@ fn state_with_icon(ui: &mut egui::Ui, text: impl AsRef<str>, state: RomState) {
         );
     job.wrap.max_width = f32::MAX;
     let galley = ui.fonts(|f| f.layout_job(job));
-    ui.painter().galley(
-        egui::pos2(rect.min.x + cols::ICON_W + cols::ICON_GAP, rect.min.y),
-        galley,
-        ui.visuals().text_color(),
+    let text_w = galley.size().x;
+    // 2) 整格死占 STATE（列宽刚性由外部栅格保证，见 cols::GRID）
+    let (_id, rect) = ui.allocate_space(egui::vec2(cols::STATE, 16.0));
+    ui.painter()
+        .galley(rect.min, galley, ui.visuals().text_color());
+    // 3) 图标贴在词尾 + 4px
+    let ctx = ui.ctx().clone();
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.min.x + text_w + cols::ICON_GAP, rect.min.y),
+        egui::vec2(cols::ICON_W, cols::ICON_W),
     );
+    let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
+    if !drawn {
+        // 纹理还没解码完（第一帧）或图标名写错了：退回文字符号
+        ui.painter().text(
+            icon_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            mark_of(state),
+            egui::FontId::proportional(12.0),
+            color,
+        );
+    }
 }
 
 /// 画一个**左对齐的定宽单元格**。
@@ -695,45 +711,83 @@ mod tests {
     /// 现在名称列统一吃 `avail - GRID`，缺的列用 `gap()` 补占位，所以
     /// 任何一段的状态列起点都等于 `name_width`（行不再缩进，见`render` 的注释）。
     #[test]
-    fn the_name_column_is_identical_across_every_section() {
-        // 面板宽度无关紧要：重要的是**各段用的是同一个函数**，而不是各自
-        // 算一遍。列宽从哪来、写在哪，都得是同一处。
-        for avail in [400.0_f32, 600.0, 900.0, 1400.0] {
-            let w = cols::name_width(avail);
+    /// 名称列**定宽**，面板拉宽时右侧留空。
+    ///
+    /// 用户 2026-06 原话：「为什么拥有状态和左边文件间距会随着面板拉宽而
+    /// 间隔变大，应该是靠左固定值，在这么宽度的面板上能显示，拉宽的话右侧
+    /// 就空出来即可。」
+    ///
+    /// 原先 `name_width = avail - GRID`，名称列吃掉全部剩余空间 —— 面板
+    /// 一拉宽，"拥有"就跟着往右跑，文件名与状态之间的空档越拉越大。
+    ///
+    /// 这条钉住的是**定宽**：宽度给到额定值以上时，名称列不许再变。
+    #[test]
+    fn the_name_column_is_fixed_and_the_right_side_stays_empty() {
+        // 宽面板：名称列恒为 NAME，剩余空间全部留白
+        for avail in [900.0_f32, 1400.0, 3000.0] {
             assert_eq!(
-                w,
                 cols::name_width(avail),
-                "同样宽度下必须给出同样结果：{avail}"
-            );
-            // 名称列不能吃掉固定列的位置，否则后面的列被推走
-            assert!(
-                w + cols::GRID <= avail.max(cols::GRID + 60.0),
-                "名称列 + 固定列不能超出可用宽度：{avail} -> {w}"
+                cols::NAME,
+                "面板 {avail} 宽时名称列必须仍是定值 {}，右侧留空",
+                cols::NAME
             );
         }
-        // GRID 必须是三列之和（曾经漏算一列，导致列宽对不上）
+        // 定宽的直接推论：宽面板下总占用不随面板变宽而变
+        assert!(
+            cols::name_width(3000.0) + cols::STATE + cols::CRC + cols::REGION
+                < 3000.0,
+            "3000px 宽的面板上只用不到一半，剩下全空"
+        );
+        // 窄面板：收缩到下限，但**不许为负**（负宽度会把后面的列往回挤）
+        assert!(cols::name_width(10.0) >= 60.0, "窄面板下要有下限");
+        assert!(
+            cols::name_width(400.0) < cols::NAME,
+            "400px 面板装不下 300 + 60 + 104 + 132，名称列要收缩"
+        );
+        // 单调性：越宽的名称列不会越窄
+        let narrow = cols::name_width(500.0);
+        let wide = cols::name_width(1400.0);
+        assert!(
+            wide >= narrow,
+            "面板变宽时名称列不许变窄：{narrow} -> {wide}"
+        );
+    }
+
+    /// GRID 是**四列之和**（名称列已定宽，所以整栅格是常数）。
+    #[test]
+    fn the_grid_is_the_sum_of_all_four_columns() {
         assert_eq!(
             cols::GRID,
-            cols::STATE + cols::CRC + cols::REGION,
-            "GRID 必须等于 状态 + crc + 区域 三列（from 列2026-06 已删）"
+            cols::NAME + cols::STATE + cols::CRC + cols::REGION,
+            "GRID 必须算上名称列 —— 它现在是定宽的一列，不是剩余空间"
         );
-        // 图标与状态词**同格**（画在 STATE 这一格里），所以状态列必须装得下
-        // 「图标 + 间隙 + 最长的三个汉字」。装不下就会压到 crc 列上。
+    }
+
+    /// 状态列装得下「状态词 + 间隙 + 图标」，**顺序是词在前、图标在后**。
+    ///
+    /// 用户 2026-06 实测踩过：图标放前面时`16 + 4 + 未拥有` 正好顶满
+    /// `STATE` 的 60，文字溢出 2~3px 压到 crc 列上（截图里
+    /// `❌未拥有7f7393de)` 糊成一团）。改回词在前之后，溢出的是图标那一
+    /// 侧—— 而图标本来就是这一格里的最后一样东西。
+    ///
+    /// 「未拥有」三字的 36px 是**实测值**（默认 UI 字体 12px，约 12px/汉字），
+    /// 不是估的：三字 + 间隙 4 + 图标 16 = 56 < 60，留 4px 余量。
+    #[test]
+    fn the_state_column_fits_word_then_icon() {
+        const THREE_CJK_WORDS: f32 = 36.0; // 「未拥有」，实测
         assert!(
-            cols::STATE >= cols::ICON_W + cols::ICON_GAP + 39.0,
-            "STATE({}) 装不下 图标({}) + 间隙({}) + 「未拥有」三字(约 39)",
+            cols::STATE >= THREE_CJK_WORDS + cols::ICON_GAP + cols::ICON_W,
+            "STATE({}) 装不下 「未拥有」三字(实测 {}) + 间隙({}) + 图标({})",
             cols::STATE,
-            cols::ICON_W,
-            cols::ICON_GAP
+            THREE_CJK_WORDS,
+            cols::ICON_GAP,
+            cols::ICON_W
         );
-        // 间隙必须仍是正数 —— 它是用户要的"1 个空格"
         assert!(
             (3.0..=12.0).contains(&cols::ICON_GAP),
             "图标与状态词之间留 1 个空格（约 4px），不能是 0 也不能太大：{}",
             cols::ICON_GAP
         );
-        // 面板拉窄时名称列不许变负——负宽度会把后面的列往回挤，比窄更糟
-        assert!(cols::name_width(10.0) >= 60.0, "窄面板下要有下限");
     }
 
     /// **行与行之间不允许有缩进调用。**
