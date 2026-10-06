@@ -78,7 +78,7 @@ impl MameBinary {
     fn run(&self, args: &[&str]) -> Result<Child, MameError> {
         let mut cmd = quiet_command(&self.path);
         cmd.args(args);
-        // 记下实际启动的进程与参数：审计/解析出问题的时候，boot.log
+        // 记下实际启动的进程与参数：校验/解析出问题的时候，boot.log
         // 里这一行能直接说明 MvUI 到底让 mame 干了什么。
         dlog!("mame: 启动 {} {:?}", self.path.display(), args);
         cmd.spawn()

@@ -1,8 +1,8 @@
 //! Rom 信息的表格渲染，被两处复用：
 //!
-//! * **dock 面板**（View ▸ 自定义信息栏 ▸ RomInfo）——数据来自审计缓存，
+//! * **dock 面板**（View ▸ 自定义信息栏 ▸ RomInfo）——数据来自校验缓存，
 //!   跟着游戏选择刷新。
-//! * **审计结果弹窗**（右键/菜单「审计 ROM」跑完）——数据来自现场重审。
+//! * **校验结果弹窗**（右键/菜单「校验 ROM」跑完）——数据来自现场重审。
 //!
 //! 两者的**版式完全一样**，只有数据来源和顶部那一行说明不同。所以渲染只写
 //! 一份：谁拿到 [`RomInfoView`] 谁调用。抄两遍的话，改一次样式要记得改两处，
@@ -27,7 +27,7 @@ use crate::icons;
 /// | 未拥有 | **红** | 确认缺失。**只有这一种是红色** |
 ///
 /// **只有"未拥有"用红色。** 之前 `nodump` 走灰色，理由是"它不是坏消息"；
-/// 但灰色和"未审计"撞在一起，用户看到灰就以为是没查。改黄之后语义分开了：
+/// 但灰色和"未校验"撞在一起，用户看到灰就以为是没查。改黄之后语义分开了：
 /// 黄 = 有问题但不是缺文件（坏 dump / 无 dump），红 = 确实缺，灰 = 还没查。
 ///
 /// `nodump` 用黄而不是红：它是 dat 自己声明的"此文件不存在"，报红会让用户
@@ -48,7 +48,7 @@ fn state_color(state: RomState) -> egui::Color32 {
 /// / 蓝叉 `status_cross`）。自己画一套对勾叉号只会和它们不一致，也不用维护
 /// 两份矢量资源。
 ///
-/// `baddump` 那张是本项目新画的（`status_baddump.png`）：它与"未审计"语义
+/// `baddump` 那张是本项目新画的（`status_baddump.png`）：它与"未校验"语义
 /// 完全不同——一个是"文件在但是坏的，用户该去重下"，另一个是"还没查"——
 /// 共用一个图标会让用户以为 baddump 是个可以忽略的提示。
 ///
@@ -68,7 +68,7 @@ fn state_icon(state: RomState) -> Option<&'static str> {
     })
 }
 
-/// "未审计"用的灰。
+/// "未校验"用的灰。
 ///
 /// 取 `visuals().weak_text_color` 的话这里就得带 `ui`，而配色函数是纯的
 /// （好测、好在任何面板/弹窗里复用）。用 `Color32::from_gray(140)`：两个
@@ -102,8 +102,8 @@ fn section(ui: &mut egui::Ui, app: &MameApp, label: &str) {
 /// 返回 key 而不是文案：文案要走 `app.tr` 现查，语言切换后立刻跟着变。
 ///
 /// 四个词与用户指定的四态一一对应：`拥有` / `坏 dump` / `未拥有` /
-/// `未 dump`（外加未审计时的 `未审计`）。旧版的"很好 / 缺失"是从 MAME 的
-/// audit 报告里抄的词，但用户明确要求用"拥有 / 坏 dump / 未拥有"这套——
+/// `未 dump`（外加未校验时的 `未校验`）。旧版的"很好 / 缺失"是从 MAME 的
+/// verify 报告里抄的词，但用户明确要求用"拥有 / 坏 dump / 未拥有"这套——
 /// 前者描述校验结果，后者描述**用户手上有没有**，后者才是用户真正关心的
 /// 问题。`nodump` 的词也从"无 dump"改成"**未 dump**"（与"未拥有"对齐，
 /// 都是"用户手上没有"的意思）。
@@ -113,7 +113,7 @@ fn state_word(state: RomState) -> &'static str {
         RomState::BadDump => "bad dump",
         RomState::Missing => "not owned",
         RomState::NoDump => "not dumped",
-        RomState::Unknown => "not audited",
+        RomState::Unknown => "not verified",
     }
 }
 
@@ -158,8 +158,8 @@ fn crc_text(crc: u32) -> String {
 /// 现在所有段都按 `GRID` 排，名称列统一吃 `avail - GRID`，
 /// 后面的列自然全部落在同一条竖线上。
 mod cols {
-    /// 状态词列（`未审计` / `未拥有` / `坏 dump` / `无 dump`）——中文最宽的
-    /// "未审计" 三个字，加点余量。
+    /// 状态词列（`未校验` / `未拥有` / `坏 dump` / `无 dump`）——中文最宽的
+    /// "未校验" 三个字，加点余量。
     pub const STATE: f32 = 60.0;
     /// CRC 列：`crc(78c15fa2)` 是定宽的等宽字体串。
     pub const CRC: f32 = 104.0;
@@ -167,20 +167,14 @@ mod cols {
     pub const REGION: f32 = 132.0;
     /// 继承来源标记 `(pgm)` 的宽度上限。
     pub const FROM: f32 = 84.0;
-    /// 状态图标列：16×16 的图 + 与后一列的小间距。
+    /// 状态词与图标之间的空隙（用户要的"1 个空格"）。
     ///
-    /// **曾经写成 22 = 16(图) + 6(间距)，但那 6px 从来没出现过。**
-    /// 原因：`allocate_exact_size(vec2(22, 16))` 在 `LeftToRight` 布局里
-    /// **宽度会被重算**——它按子 ui 的 `min_rect` 走，而 16px 的图标 min_rect
-    /// 就是 16，于是分配到的 22px 被收成 16px，图标紧贴 `crc(...)`
-    /// （用户截图里就是 `✅crc(c055b993)` 粘成一团）。
+    /// 4px ≈ 一个空格符。**这个间隙不是列宽相减出来的**，而是量出状态词的
+    /// 实际宽度后画在词尾 —— 见 [`state_with_icon`]。
     ///
-    /// **正确做法：把间隙画成独立的 `add_space`。** `add_space` 内部就是
-    /// `advance_cursor`，它的宽度**不回看之后画了什么**，所以 6px 一定在。
-    /// 图标本身用 `allocate_space(16)` 单独占 16px。
-    pub const ICON: f32 = 16.0;
-    /// 图标与后一列之间的小空隙（用户明确要的"图标和 crc 要有个小空格"）。
-    pub const ICON_GAP: f32 = 8.0;
+    /// 历史：这里曾是 `ICON(16) + ICON_GAP(8)` 两个独立列。图标独占一列导致
+    /// 「拥有」与图标之间空了 60px，看着像两列而不是一个组合。
+    pub const ICON_GAP: f32 = 4.0;
 
     /// 名称列右侧的内边距。
     ///
@@ -196,10 +190,13 @@ mod cols {
 
     /// 名称列之外**全部固定列的宽度之和**。
     ///
-    /// 任何一段只要画到状态 / 图标，就必须用这个值来定位名称列宽度，
-    /// 否则那段的状态词就会飘。少用的列留空（画个空白占位），不要缩减它——
-    /// 缩减等于承认"这段例外"，而例外就是错位的来源。
-    pub const GRID: f32 = STATE + ICON + ICON_GAP + CRC + REGION + FROM;
+    /// 任何一段只要画到状态，就必须用这个值来定位名称列宽度，否则那段的状态
+    /// 词就会飘。少用的列留空（画个空白占位），不要缩减它——缩减等于承认
+    /// "这段例外"，而例外就是错位的来源。
+    ///
+    /// **不含图标**（2026-10-06）：图标改成紧跟状态词、画在 `STATE` 格子里，
+    /// 不再独占列。见 [`state_with_icon`]。
+    pub const GRID: f32 = STATE + CRC + REGION + FROM;
 
     /// 名称列宽度：吃掉所有剩余空间，并保证不小于一个可读的下限。
     ///
@@ -211,36 +208,56 @@ mod cols {
     }
 }
 
-/// 画第三列的 16×16 状态图标。
+/// 状态词 + 图标**画在同一格里**：图标紧跟在文字后面，中间 4px。
 ///
-/// 抽出来是因为 Rom / CHD / 引用设备 / BIOS 四段都要画，而**必须走同一套
-/// 逻辑**：取不到纹理时的退路（文字符号）也要一致，否则两段在同一个面板里
-/// 会一个显示图标、一个显示方框。
+/// 用户要求（2026-10-06）：「图标放到 拥有 / 缺失 / 未 dump 等签名，和他们
+/// 有 1 个空格的间隔」。原先图标独占一列（`ICON` + `ICON_GAP`），于是
+/// 「拥有」在 x=700、图标在 x=780、中间 60px 全是空白 —— 看着像两列而不是
+/// 一个「状态 + 图标」的组合。
 ///
-/// **间隙是独立的 `add_space`，不是"列宽减去图标宽"** —— 后者在
-/// `LeftToRight` 里会被 `min_rect` 收回去（见 [`cols::ICON`] 的注释）。
-/// `add_space` 只推进游标，8px 一定在。
+/// **实现：先量出状态词的实际宽度，再在词尾 + 4px 处画图标。**
 ///
-/// 顺序：**先推 8px 间隙，再在间隙之后画图标**。于是图标离前面的状态列
-/// 8px，离后面的 crc 列也是 8px（下一列的起点由栅格定）。
-fn icon_cell(ui: &mut egui::Ui, state: RomState) {
-    let ctx = ui.ctx().clone();
-    let font = egui::FontId::proportional(12.0);
+/// - 不能用 `add_sized` / `cell` 排图标 —— 它们都会居中（见 [`cell`]）。
+/// - 不能把间隙折进列宽 —— `allocate_exact_size` 在 `LeftToRight` 里会把
+///   宽度按 `min_rect` 重算，22px 被收成 16px（这个坑踩过一次）。
+/// - 图标**不占独立列**（不再有 `ICON` 常量），整格宽度
+///   仍由外部的 `STATE` 保证，所以跨段的状态词起点仍落在同一条竖线上。
+///
+/// 退路：纹理未解码时在图标格中心画文字符号。
+fn state_with_icon(ui: &mut egui::Ui, text: impl AsRef<str>, state: RomState) {
+    let style = ui.style().clone();
     let color = state_color(state);
-    // 先吃掉图标与前一列之间的间隙（`add_space` 的宽度是刚性的）。
-    ui.add_space(cols::ICON_GAP);
-    // 图标本体：死占 16×16。`allocate_space` 保证后面的列从 rect.right() 起算。
-    let (_id, rect) = ui.allocate_space(egui::vec2(cols::ICON, 16.0));
-    let icon_rect = egui::Rect::from_min_size(rect.min, egui::vec2(16.0, 16.0));
+    // 1) 排版状态词，量出它的宽度（图标要贴着词尾，所以必须先知道多宽）
+    let mut job = egui::text::LayoutJob::default();
+    egui::RichText::new(text.as_ref())
+        .color(color)
+        .append_to(
+            &mut job,
+            &style,
+            egui::FontSelection::default(),
+            egui::Align::Min,
+        );
+    // 不换行：状态词最长三个字（"未拥有"），`STATE` 有60px 富余
+    job.wrap.max_width = f32::MAX;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    let text_w = galley.size().x;
+    // 2) 整格死占 `STATE`（列宽刚性由外部栅格保证）
+    let (_id, rect) = ui.allocate_space(egui::vec2(cols::STATE, 16.0));
+    ui.painter()
+        .galley(rect.min, galley, ui.visuals().text_color());
+    // 3) 图标画在词尾 + 4px —— 这 4px 就是用户要的"1 个空格的间隔"
+    let ctx = ui.ctx().clone();
+    let icon_x = rect.min.x + text_w + cols::ICON_GAP;
+    let icon_rect =
+        egui::Rect::from_min_size(egui::pos2(icon_x, rect.min.y), egui::vec2(16.0, 16.0));
     let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
     if !drawn {
-        // 纹理还没解码完（第一帧）或图标名写错了：退回文字符号。列宽是定死
-        // 的，这里的文字画在图标格中心，不会挤歪后面的列。
+        // 纹理还没解码完（第一帧）或图标名写错了：退回文字符号
         ui.painter().text(
             icon_rect.center(),
             egui::Align2::CENTER_CENTER,
             mark_of(state),
-            font,
+            egui::FontId::proportional(12.0),
             color,
         );
     }
@@ -361,7 +378,6 @@ fn tight_horizontal(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui, 
 /// 文件"和"这台机器有 40 个文件全是好的"用同一种满屏绿色表达，信息量是零。
 /// 状态词 + 图标已经足够定位，颜色只服务这两列。
 fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
-    let color = state_color(r.state);
     tight_horizontal(ui, |ui, _row_width| {
         // 名称：列宽减去 `NAME_PAD` —— 内边距放在**列宽里**而不是画在右侧，
         // 这样"名称列起点"和"状态列起点"都不受影响，栅格照样严丝合缝。
@@ -370,14 +386,8 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
             (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
             egui::RichText::new(&r.name).monospace(),
         );
-        // 状态词：唯一带状态色的文字
-        cell(
-            ui,
-            cols::STATE,
-            egui::RichText::new(app.tr(state_word(r.state))).color(color),
-        );
-        // 16×16 状态图标
-        icon_cell(ui, r.state);
+        // 状态词 + 图标：同一格，图标紧跟词尾（用户 2026-06 要求）
+        state_with_icon(ui, app.tr(state_word(r.state)), r.state);
         // CRC
         cell(
             ui,
@@ -407,7 +417,7 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
 
 /// 渲染整个视图。
 ///
-/// `header_note` 是顶部那行说明（例如"来自审计缓存"或"刚刚重新审计"），
+/// `header_note` 是顶部那行说明（例如"来自校验缓存"或"刚刚重新校验"），
 /// `None` 时不渲染那一行。
 ///
 /// **只有数据，没有游戏名/描述/缺失计数。** 用户明确要求去掉顶部那一块
@@ -416,7 +426,7 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
 ///
 /// **行与行之间一律不缩进。** 曾经这里每行都套一层 `ui.indent("rom_rows", …)`，而 `ui.indent` 是**按 id 存状态的**：同一个 id 在循环里反复调用，缩进会逐行累加（第二行起每行往右挪一点）。更糟的是缩进会吃掉 `available_width()`，于是 `cols::name_width()` 算出来的名称列宽度逐行变小、状态词起点逐行左移 —— 用户看到的"每到下一行就额外缩进、根本没对齐"就是这个。对齐由 `cols` 栅格保证，缩进只会碍事。
 pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
-    // **顶部不要那行"数据来源于审计缓存"。**
+    // **顶部不要那行"数据来源于校验缓存"。**
     // 旧版写的是"数据来源"这类元信息，用户不要：面板里每一行的状态词已经
     // 把结论说完了，顶部再写一遍"这数据是哪来的"是纯噪音。
 
@@ -446,12 +456,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                     (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
                 egui::RichText::new(&d.file_name).monospace(),
                 );
-                cell(
-                    ui,
-                    cols::STATE,
-                egui::RichText::new(app.tr(state_word(d.state))).color(color),
-                );
-                icon_cell(ui, d.state);
+                state_with_icon(ui, app.tr(state_word(d.state)), d.state);
                 let short = if d.sha1.len() > 8 {
                     d.sha1[..8].to_string()
                 } else {
@@ -486,11 +491,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                     (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
                     egui::RichText::new(&b.name).monospace().strong().color(color),
                 );
-                cell(
-                    ui,
-                    cols::STATE,
-                    egui::RichText::new(app.tr(state_word(b.state))).color(color),
-                );
+                // 状态词 + 图标，与 Rom 段同一套
+                state_with_icon(ui, app.tr(state_word(b.state)), b.state);
                 // 描述占 crc + region 两列的宽度（描述比 crc 长得多）。
                 // 同样**不加 `.small()`** —— 字号跟其他列一致，靠灰色弱化。
                 cell(
@@ -500,8 +502,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                         .monospace()
                         .color(ui_weak_color()),
                 );
-                gap(ui, cols::ICON);
-                gap(ui, cols::ICON_GAP);
                 gap(ui, cols::FROM);
             });
             for r in &b.roms {
@@ -516,7 +516,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Referenced devices:");
         for d in &view.devices {
-            let color = state_color(d.state);
             tight_horizontal(ui, |ui, _row_width| {
                 // 第一列：设备机种名（`m68000` / `igs036` / `z80`）。
                 cell(
@@ -524,19 +523,11 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                     (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
                     egui::RichText::new(&d.name).monospace(),
                 );
-                // 第二列：**只有状态词**，图标/描述/tag 全部去掉。
-                // 用户要的是"两列：名 + 拥有/缺失"——tag（`:maincpu`）是内部
-                // 引用名，描述在这台机器的语境下是废话，三样都只会让第二列
-                // 长得参差不齐（`z80` 只有 3 个字，`floppy_525_hd` 有 13 个）。
-                cell(
-                    ui,
-                    cols::STATE,
-                    egui::RichText::new(app.tr(state_word(d.state))).color(color),
-                );
+                // 第二列：状态词 + 图标（与其他段同一套），不画描述/tag ——
+                // tag（`:maincpu`）是内部引用名，描述在这台机器的语境下是废话。
+                state_with_icon(ui, app.tr(state_word(d.state)), d.state);
                 // 后面这些列一律留空，但**必须用 gap 占住**——少一列，
                 // 下一行的设备 rom 就会整体前移（见 `gap` 的注释）。
-                gap(ui, cols::ICON);
-                gap(ui, cols::ICON_GAP);
                 gap(ui, cols::CRC);
                 gap(ui, cols::REGION);
                 gap(ui, cols::FROM);
@@ -593,8 +584,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 );
                 // 后面的列一律留空，但**必须 gap 占住**——少一列，这一段
                 // 的名称列宽度就与 Rom 段不一致（见 `cols::GRID`）。
-                gap(ui, cols::ICON);
-                gap(ui, cols::ICON_GAP);
                 gap(ui, cols::CRC);
                 gap(ui, cols::REGION);
                 gap(ui, cols::FROM);
@@ -617,8 +606,8 @@ mod tests {
     /// 用户指定的四态配色（2026-06 修订）：绿 / 黄 / 黄 / 红。
     ///
     /// **只有"未拥有"是红色。** `nodump` 从灰色改成黄色（与坏 dump 同色，
-    /// 图标也是同一个感叹号）——原先它和"未审计"共用灰色，用户看到灰就
-    /// 以为是没查。灰色现在只属于"未审计"，独占。
+    /// 图标也是同一个感叹号）——原先它和"未校验"共用灰色，用户看到灰就
+    /// 以为是没查。灰色现在只属于"未校验"，独占。
     #[test]
     fn the_four_user_facing_colours_are_distinct() {
         assert_eq!(state_color(RomState::Good), icons::GREEN, "拥有=绿");
@@ -629,12 +618,12 @@ mod tests {
         assert_ne!(
             state_color(RomState::Unknown),
             icons::RED,
-            "未审计不能是红色 —— 那会让人以为自己的盘空了"
+            "未校验不能是红色 —— 那会让人以为自己的盘空了"
         );
         assert_ne!(
             state_color(RomState::Unknown),
             icons::YELLOW,
-            "未审计不能是黄色 —— 黄色已经表示有问题了"
+            "未校验不能是黄色 —— 黄色已经表示有问题了"
         );
     }
 
@@ -646,7 +635,7 @@ mod tests {
     /// 自带蓝色，跟旁边的黄字并排显得是两件事。
     ///
     /// 真正要防的是**绿勾 / 红叉 / 黄叹 / 蓝问这四个语义图标**被两个状态
-    /// 共用：拥有/坏 dump/未拥有/未审计必须各自不同。
+    /// 共用：拥有/坏 dump/未拥有/未校验必须各自不同。
     #[test]
     fn the_meaningful_icons_are_not_shared() {
         let unique = [
@@ -698,30 +687,30 @@ mod tests {
                 "名称列 + 固定列不能超出可用宽度：{avail} -> {w}"
             );
         }
-        // GRID 必须是五列之和（曾经漏算一列，导致列宽对不上）
+        // GRID 必须是四列之和（曾经漏算一列，导致列宽对不上）
         assert_eq!(
             cols::GRID,
-            cols::STATE + cols::ICON + cols::ICON_GAP + cols::CRC + cols::REGION + cols::FROM,
-            "GRID 必须算上图标与后一列之间的间隙，否则名称列宽对不上"
+            cols::STATE + cols::CRC + cols::REGION + cols::FROM,
+            "GRID 必须等于状态+crc+区域+来源四列"
         );
-        // 间隙必须是真的正数：曾经把它折进 ICON 列宽（22 = 16 + 6），
-        // 而 allocate_exact_size 在 LeftToRight 里会把宽度收回去 → 0px。
+        // 图标不再独占列（2026-10-06：改成紧跟状态词），但间隙必须仍是正数
+        // —— 它现在画在词尾 4px 处，全靠这个常量。
         assert!(
-            cols::ICON_GAP >= 4.0,
-            "图标与小间隙必须分开两笔，不能指望列宽相减：{}",
+            (3.0..=12.0).contains(&cols::ICON_GAP),
+            "图标与状态词之间留 1 个空格（约 4px），不能是 0 也不能太大：{}",
             cols::ICON_GAP
         );
         // 面板拉窄时名称列不许变负——负宽度会把后面的列往回挤，比窄更糟
         assert!(cols::name_width(10.0) >= 60.0, "窄面板下要有下限");
     }
 
-    /// **行与行之间不允许有 `ui.indent`。**
+    /// **行与行之间不允许有缩进调用。**
     ///
-    /// `ui.indent` 的缩进量是**按 id 存在 `Memory.indentation` 里的有状态值**，
-    /// 同一个 id 在循环里每调用一次就累加一层。所以 `for r in &view.roms {
-    /// ui.indent("rom_rows", ..) }` 的第二行起会整体右移，而且缩进吃掉
-    /// `available_width()` 后 `cols::name_width()` 会逐行变小、状态词起点
-    /// 逐行左移——正是用户报的"每到下一行就额外缩进，根本没对齐"。
+    /// 缩进的量是**按 id 存在 `Memory.indentation` 里的有状态值**，同一个 id
+    /// 在循环里每调用一次就累加一层。所以 `for r in &view.roms { … }` 循环体
+    /// 里套一层缩进的第二行起会整体右移，而且缩进吃掉 `available_width()`
+    /// 后 `cols::name_width()` 会逐行变小、状态词起点逐行左移——正是用户报的
+    /// "每到下一行就额外缩进，根本没对齐"。
     ///
     /// 这种回归肉眼很难在改动里看出来（缩进本来就该存在），所以用测试钉住：
     /// **行布局里 `item_spacing` 两个轴都必须归零。**
@@ -757,7 +746,10 @@ mod tests {
         );
     }
 
-    /// `render` 的函数体里出现 `ui.indent(` 就失败。
+    /// `render` 的函数体里出现缩进调用就失败。
+    ///
+    /// （下面这条测试自己也在 `render` 之后，所以它**不能**在注释里写出那个
+    /// 函数的完整名字 —— 会被自己 grep 到。）
     #[test]
     fn rows_are_never_indented() {
         let src = include_str!("rompanel.rs");

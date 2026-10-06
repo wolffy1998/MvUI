@@ -325,7 +325,7 @@ pub fn parse_from_reader<R: BufRead>(
                     // 1.8.2 也把 device_ref 归进忽略分支（`utils.cpp`），所以
                     // 这里没有旧版可抄；但"引用设备"面板要显示设备 rom，而设备
                     // 引用**只**在这里出现过——不解析它，`GameMeta::devices`
-                    // 永远是空的（`audit.rs` 的 MESS 主机扫描也依赖它来认出一
+                    // 永远是空的（`verify.rs` 的 MESS 主机扫描也依赖它来认出一
                     // 台主机）。反向依赖：console 扫描靠 `!devices.is_empty()`
                     // 挑出主机机种。
                     //

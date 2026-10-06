@@ -23,7 +23,7 @@ fn main() {
         .enumerate()
         .filter(|(_, g)| !g.is_device && !g.is_bios && !g.is_mechanical)
         .map(|(_i, g)| {
-            let v = mvui::core::rominfo::view_of(&lib, &g.name, data.audited);
+            let v = mvui::core::rominfo::view_of(&lib, &g.name, data.verified);
             (v.roms.len(), g.name.clone(), v.bios.len(), v.devices.len(),
              v.slots.len(), v.samples.len() + v.disks.len())
         })
@@ -41,8 +41,8 @@ fn main() {
     let target = if lib.get_idx(&game).is_some() { game.clone() } else {
         ranked.first().map(|r| r.1.clone()).unwrap_or(game)
     };
-    println!("\n== view_of({target}) audited={} ==", data.audited);
-    let v = mvui::core::rominfo::view_of(&lib, &target, data.audited);
+    println!("\n== view_of({target}) verified={} ==", data.verified);
+    let v = mvui::core::rominfo::view_of(&lib, &target, data.verified);
     println!("  roms        {}", v.roms.len());
     println!("  disks       {}", v.disks.len());
     println!("  bios        {}", v.bios.len());
@@ -103,7 +103,7 @@ fn main() {
 ///
 /// `pgm` 的 `-listxml` 里有 5 个 `<device_ref>`，但如果 `GameMeta::devices`
 /// 是空的，那说明**缓存是旧格式**——`device_ref` 的解析是后加的，老缓存里
-/// 根本没有这个字段。热启动走`audited=true` 的路径会跳过 `-listxml` 重新
+/// 根本没有这个字段。热启动走`verified=true` 的路径会跳过 `-listxml` 重新
 /// 解析，于是 `devices` 永远是空的，而用户看不到任何提示。
 #[allow(dead_code)]
 fn diagnose_devices(lib: &mvui::core::library::GameLibrary) {

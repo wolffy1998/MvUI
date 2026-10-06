@@ -1,4 +1,4 @@
-//! ROM 审计，1:1 移植自 audit.cpp 的 RomAuditor（内部审计 + 主机
+//! ROM 校验，1:1 移植自 verify.cpp 的 RomVerifyor（内部校验 + 主机
 //! 扫描 + Logiqx fixdat 导出，含那 4 种导出方式）。
 //!
 //! 可用性存在数据模型里（每个 rom/disk 的 `available` + 游戏的
@@ -18,12 +18,12 @@ use std::sync::{Arc, Mutex};
 /// 约 4.4 万个 romsets 序列化后大约 20 MB；取 6.4 万是为了给异常大
 /// 或者多 rompath 的收藏留出余量，同时不让病态配置把缓存无限撑大。
 /// 超上限时丢弃条目（下次扫描会重建），而不是拒绝保存。
-const AUDIT_CACHE_LIMIT: usize = 64 * 1024;
+const VERIFY_CACHE_LIMIT: usize = 64 * 1024;
 
-/// 对应旧版 AUDIT_ONLY=0 / EXPORT_COMPLETE / EXPORT_ALL /
+/// 对应旧版 VERIFY_ONLY=0 / EXPORT_COMPLETE / EXPORT_ALL /
 /// EXPORT_INCOMPLETE / EXPORT_MISSING。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuditMethod {
+pub enum VerifyMethod {
     Only,
     ExportComplete,
     ExportAll,
@@ -32,7 +32,7 @@ pub enum AuditMethod {
 }
 
 #[derive(Clone)]
-pub struct AuditHandle {
+pub struct VerifyHandle {
     pub cancel: Arc<AtomicBool>,
     /// 一轮跑完就置上，这样即使一个都没扫（total == 0），转发进度
     /// 的线程也能退出。
@@ -50,14 +50,14 @@ pub struct AuditHandle {
     current: Arc<Mutex<String>>,
     /// Test-only：观察 `set_enumerating` 的每次调用。
     ///
-    /// 不用它就测不到枚举阶段——`audit_all` 返回前那行
+    /// 不用它就测不到枚举阶段——`verify_all` 返回前那行
     /// `set_progress(0, 0, "")` 会把标签清空（那是故意的，好让转发线程最后
     /// 观察到"已完成"），所以跑完之后句柄里只剩空串。
     #[cfg(test)]
     enum_observer: Arc<std::sync::OnceLock<Box<dyn Fn(usize, usize, usize)>>>,
 }
 
-impl AuditHandle {
+impl VerifyHandle {
     pub fn new() -> Self {
         Self {
             cancel: Arc::new(AtomicBool::new(false)),
@@ -112,9 +112,9 @@ impl AuditHandle {
     /// 已经收到多少单元"这种**绝对计数**，让状态栏在分母出现之前也有
     /// 东西在动。
     ///
-    /// 不用新原子量：这段是纯串行的（枚举就在 `audit_all` 的主线程上），
+    /// 不用新原子量：这段是纯串行的（枚举就在 `verify_all` 的主线程上），
     /// 而 `current` 本来就是"尽力而为的标签"、天生有竞态也不影响正确性。
-    /// 复用它零成本，且不必让 `AuditProgress` 事件多带一个字段。
+    /// 复用它零成本，且不必让 `VerifyProgress` 事件多带一个字段。
     pub fn set_enumerating(&self, done_dirs: usize, total_dirs: usize, units: usize) {
         #[cfg(test)]
         if let Some(obs) = self.enum_observer.get() {
@@ -131,7 +131,7 @@ impl AuditHandle {
     }
 }
 
-impl Default for AuditHandle {
+impl Default for VerifyHandle {
     fn default() -> Self {
         Self::new()
     }
@@ -142,7 +142,7 @@ enum Mark {
     Disk(usize, usize),
 }
 
-/// Scan every audit unit, returning the marks it produced.
+/// Scan every verify unit, returning the marks it produced.
 ///
 /// **Deliberately sequential.** The previous version used
 /// `units.par_iter()` over four rayon workers and measured *slower* than one
@@ -152,11 +152,11 @@ enum Mark {
 /// the drive is the bottleneck, not the CPU.
 ///
 /// Progress is reported by *incrementing a counter when a unit finishes*, never
-/// by publishing the loop index — see [`AuditHandle`]. Sequential iteration
+/// by publishing the loop index — see [`VerifyHandle`]. Sequential iteration
 /// makes that ordering trivially correct, but the counter form is what the
 /// status bar needs either way, and it stays correct if parallelism is ever
 /// reintroduced for an SSD.
-fn scan_units(units: &[(PathBuf, usize)], lib: &GameLibrary, handle: &AuditHandle) -> Vec<Vec<Mark>> {
+fn scan_units(units: &[(PathBuf, usize)], lib: &GameLibrary, handle: &VerifyHandle) -> Vec<Vec<Mark>> {
     let mut results: Vec<Vec<Mark>> = Vec::with_capacity(units.len());
     for (path, gi) in units {
         if handle.cancelled() {
@@ -202,12 +202,12 @@ fn scan_units(units: &[(PathBuf, usize)], lib: &GameLibrary, handle: &AuditHandl
                     }
                 }
             }
-        } else if let Some(entries) = crate::core::audit_cache::list_cached(path) {
-            // origin: RomAuditor::run — a `<game>.zip` is matched only against
+        } else if let Some(entries) = crate::core::verify_cache::list_cached(path) {
+            // origin: RomVerifyor::run — a `<game>.zip` is matched only against
             // that game's roms and its clone family, never the whole library.
             // Using the global crc index here was both wrong and pathological:
             // a crc shared by thousands of sets (bios / device roms) produced
-            // thousands of marks per entry and the audit never finished.
+            // thousands of marks per entry and the verify never finished.
             let mut table: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
             {
                 let g = &lib.games[*gi];
@@ -238,10 +238,10 @@ fn scan_units(units: &[(PathBuf, usize)], lib: &GameLibrary, handle: &AuditHandl
     results
 }
 
-/// internal audit (origin: RomAuditor::run) — mutates per-rom/disk availability
+/// internal verify (origin: RomVerifyor::run) — mutates per-rom/disk availability
 /// and game.available; console scan appends ext roms into the library.
-/// Marks the audit finished on *any* exit path, including unwinding.
-/// origin: the Qt version always emitted `finished()` from the auditor thread.
+/// Marks the verify finished on *any* exit path, including unwinding.
+/// origin: the Qt version always emitted `finished()` from the verifyor thread.
 struct FinishOnDrop(Arc<AtomicBool>);
 
 impl Drop for FinishOnDrop {
@@ -250,20 +250,20 @@ impl Drop for FinishOnDrop {
     }
 }
 
-pub fn audit_all(
+pub fn verify_all(
     lib: &mut GameLibrary,
     rom_paths: &[PathBuf],
     extra_software: &HashMap<String, String>,
-    handle: &AuditHandle,
+    handle: &VerifyHandle,
 ) {
     // 从这里往后的任何情况——正常返回、提前退出，还是归档层/utf8
     // 之类的地方 panic——句柄都必须变成 finished，否则那个 200 ms
     // 的进度转发线程永远不退出，会一直往 channel 里灌（README P2-19）。
     let _finish_guard = FinishOnDrop(handle.finished.clone());
 
-    let audit_t0 = std::time::Instant::now();
+    let verify_t0 = std::time::Instant::now();
     dlog!(
-        "审计: 开始（{} 台机种, {} 个 rompath）",
+        "校验: 开始（{} 台机种, {} 个 rompath）",
         lib.len(),
         rom_paths.len()
     );
@@ -271,10 +271,10 @@ pub fn audit_all(
     // 把上一轮记住的归档清单拉进来。这就是 10–20 分钟和几秒钟的
     // 区别：成本在于打开 4.4 万个 zip，而清单只在文件变了才变。
     let cache_t0 = std::time::Instant::now();
-    crate::core::audit_cache::load();
+    crate::core::verify_cache::load();
     dlog!(
-        "审计: 归档清单缓存载入完成（{} 条记录），耗时 {:?}",
-        crate::core::audit_cache::len(),
+        "校验: 归档清单缓存载入完成（{} 条记录），耗时 {:?}",
+        crate::core::verify_cache::len(),
         cache_t0.elapsed()
     );
 
@@ -291,7 +291,7 @@ pub fn audit_all(
 
     // sha1 → every (game, disk) sharing that CHD. Built once so a disk hit
     // propagates in O(1); the port used to rescan the whole library per hit,
-    // which is O(disks x games) (origin: RomAuditor::run clone propagation).
+    // which is O(disks x games) (origin: RomVerifyor::run clone propagation).
     let mut disk_index: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for (gi, g) in lib.games.iter().enumerate() {
         for (di, d) in g.disks.iter().enumerate() {
@@ -303,9 +303,9 @@ pub fn audit_all(
 
     // 枚举待扫单元。这一步要把每个 rompath 整目录读一遍（`read_dir`），
     // 4.4 万个条目在机械盘上是**整整一段静默期**——在这期间
-    // `progress.1` 还是 0，状态栏只能打"正在审计"而给不出百分比。
+    // `progress.1` 还是 0，状态栏只能打"正在校验"而给不出百分比。
     // 分母只有枚举完才知道，所以这不是可以"顺手修好"的东西，
-    // 而是一次审计里"前若干秒没有百分比"的全部原因。
+    // 而是一次校验里"前若干秒没有百分比"的全部原因。
     let enum_t0 = std::time::Instant::now();
     let mut units: Vec<(PathBuf, usize)> = Vec::new();
     for (di, dir) in rom_paths.iter().enumerate() {
@@ -340,7 +340,7 @@ pub fn audit_all(
 
     handle.set_total(units.len());
     dlog!(
-        "审计: 待扫单元 {} 个（枚举耗时 {:?}）——分母此刻才确定，状态栏从这条日志之后才开始有百分比",
+        "校验: 待扫单元 {} 个（枚举耗时 {:?}）——分母此刻才确定，状态栏从这条日志之后才开始有百分比",
         units.len(),
         enum_t0.elapsed()
     );
@@ -348,20 +348,20 @@ pub fn audit_all(
     let scan_t0 = std::time::Instant::now();
     let results = scan_units(&units, lib, handle);
     dlog!(
-        "审计: 单元扫描完成（{} 个单元, 耗时 {:?}）",
+        "校验: 单元扫描完成（{} 个单元, 耗时 {:?}）",
         units.len(),
         scan_t0.elapsed()
     );
 
     // 所有被打开过的单元的归档清单现在已经记下来了。先清掉那些文件
-    // 已经消失的条目，再把整份交给持久化缓存，这样**下一次**审计——
+    // 已经消失的条目，再把整份交给持久化缓存，这样**下一次**校验——
     // 哪怕重启过——就退化成一次 stat 遍历。放在下面那个 parent/BIOS
     // 回填之前是故意的：那里万一 panic，也不会把一份好好的清单缓存
     // 一起丢掉。
     {
         let paths: Vec<PathBuf> = units.iter().map(|(p, _)| p.clone()).collect();
-        crate::core::audit_cache::prune(&paths, AUDIT_CACHE_LIMIT);
-        crate::core::audit_cache::save();
+        crate::core::verify_cache::prune(&paths, VERIFY_CACHE_LIMIT);
+        crate::core::verify_cache::save();
     }
 
     // 应用标记；disk 的标记会传播给共用同一 sha1 的克隆
@@ -377,7 +377,7 @@ pub fn audit_all(
         }
     }
     // 一个 CHD 由整个克隆家族共用——把所有引用同一 sha1 的游戏都标上
-    // （origin: RomAuditor::run 里的那个克隆循环）
+    // （origin: RomVerifyor::run 里的那个克隆循环）
     for (gi, di) in &disk_marks {
         let sha1 = lib.games[*gi].disks[*di].sha1.clone();
         if sha1.is_empty() {
@@ -440,7 +440,7 @@ pub fn audit_all(
                 }
             }
         }
-        // origin: audit.cpp:468-514 —— 等级必须根据**最终**的 rom /
+        // origin: verify.cpp:468-514 —— 等级必须根据**最终**的 rom /
         // disk 状态来判定。1.8.2 读 `allinParent` 的时候，克隆集扫描
         // 已经把父集的 ROM 传播进克隆了，所以一个 ROM 全部来自父集
         // 的克隆算作完整；在这里重算是等价的，而且它还覆盖了散装
@@ -451,7 +451,7 @@ pub fn audit_all(
         lib.games[i].available = if complete { GAME_COMPLETE } else { GAME_MISSING };
     }
 
-    // 4) 主机（MESS）审计 —— 会创建 ext rom
+    // 4) 主机（MESS）校验 —— 会创建 ext rom
     let console_names: Vec<String> = lib
         .games
         .iter()
@@ -470,17 +470,17 @@ pub fn audit_all(
         }
         handle.set_progress(ci, total_consoles, console);
         dlog!(
-            "审计: 主机（console）扫描 {}/{} — {} → {}",
+            "校验: 主机（console）扫描 {}/{} — {} → {}",
             ci + 1,
             total_consoles,
             console,
             dirpath
         );
-        audit_console(lib, console, dirpath);
+        verify_console(lib, console, dirpath);
         consoles_done += 1;
     }
     dlog!(
-        "审计: 主机扫描完成（{} 台机种, 处理 {} 个主机目录, 耗时 {:?}）",
+        "校验: 主机扫描完成（{} 台机种, 处理 {} 个主机目录, 耗时 {:?}）",
         total_consoles,
         consoles_done,
         console_t0.elapsed()
@@ -497,20 +497,20 @@ pub fn audit_all(
     // 统计一下结果，便于在 boot.log 里对照界面上看到的数字
     let complete = lib.games.iter().filter(|g| g.available == GAME_COMPLETE).count();
     dlog!(
-        "审计: 完成（{} 台中 {} 台完整），总耗时 {:?}",
+        "校验: 完成（{} 台中 {} 台完整），总耗时 {:?}",
         lib.len(),
         complete,
-        audit_t0.elapsed()
+        verify_t0.elapsed()
     );
 }
 
-/// 一台机种在单游戏审计里的**审计范围**：它自己 + 它依赖的一切。
+/// 一台机种在单游戏校验里的**校验范围**：它自己 + 它依赖的一切。
 ///
 /// 用户口径：「就是此 ROM + 依赖的主 ROM 文件 + BIOS + Device + Samples
 /// + CHD」。这五类依赖在数据模型里落在五个不同地方，凑齐它们是
-/// [`audit_scope`] 唯一要解决的问题。
+/// [`verify_scope`] 唯一要解决的问题。
 #[derive(Debug, Clone, Default)]
-pub struct AuditScope {
+pub struct VerifyScope {
     /// 本机种。
     pub game: usize,
     /// `romof` 父集与祖父集（依赖的主 ROM 文件）。
@@ -521,7 +521,7 @@ pub struct AuditScope {
     pub samples: Vec<usize>,
 }
 
-impl AuditScope {
+impl VerifyScope {
     /// 范围内的全部机种索引，本体在前。
     pub fn all(&self) -> Vec<usize> {
         let mut v = vec![self.game];
@@ -536,20 +536,20 @@ impl AuditScope {
     }
 }
 
-/// 算出一台机种的审计范围。
+/// 算出一台机种的校验范围。
 ///
 /// **BIOS 不在这里**：查真实的 `mame pgm -listxml`，BIOS 集是同一个
 /// `<machine>` 上的 `<biosset>` 标签，它的 rom 带着 `bios="v2"` 属性**混在
-/// 本机种的 `<rom>` 列表里**——没有独立的机种可扫。审计本机种的归档时那些
+/// 本机种的 `<rom>` 列表里**——没有独立的机种可扫。校验本机种的归档时那些
 /// 条目自然一起被匹配到，所以 BIOS 不需要额外处理。
 ///
 /// 设备机种名在 `DeviceInfo::kind` / `instance` 上（`core/listxml.rs` 的
 /// `device_ref` 解析把 `name` 属性填进这两处），`tag` 是父机种里的标签全名
 /// （`maincpu`），**不能**拿去查库。
-pub fn audit_scope(lib: &GameLibrary, game: &str) -> Option<AuditScope> {
+pub fn verify_scope(lib: &GameLibrary, game: &str) -> Option<VerifyScope> {
     let gi = lib.get_idx(game)?;
     let g = &lib.games[gi];
-    let mut scope = AuditScope {
+    let mut scope = VerifyScope {
         game: gi,
         ..Default::default()
     };
@@ -597,7 +597,7 @@ pub fn audit_scope(lib: &GameLibrary, game: &str) -> Option<AuditScope> {
 
 /// 按名字在 rompath 里直接定位归档，**不做整目录枚举**。
 ///
-/// 单游戏审计的旧写法是对每个 rompath 做一次 `read_dir`，把 4.4 万个
+/// 单游戏校验的旧写法是对每个 rompath 做一次 `read_dir`，把 4.4 万个
 /// 条目逐个 `is_dir()` 一遍，只为了挑出其中 2~5 个。实测冷盘 13.3 s、
 /// 热缓存 5.8 s——这就是「审一个游戏要等 20 秒」的全部原因，而代价里
 /// 没有一分钱是花在真正读归档上的。
@@ -614,7 +614,7 @@ pub fn audit_scope(lib: &GameLibrary, game: &str) -> Option<AuditScope> {
 /// 大小写：Windows/macOS 文件系统不敏感，磁盘上是 `GTMRUSA.ZIP` 用小写拼
 /// 也能找到。但正因为不敏感，**两种拼法会命中同一个文件**——所以去重必须
 /// 比路径而不是比字符串，否则同一个包会被扫两遍（白读一遍归档，还让
-/// `audit_cache` 里多一条一模一样的记录）。这里用 `canonicalize` 把两条
+/// `verify_cache` 里多一条一模一样的记录）。这里用 `canonicalize` 把两条
 /// 路径收敛成同一个再比。
 pub fn find_units_for(lib: &GameLibrary, gis: &[usize], rom_paths: &[PathBuf]) -> Vec<(PathBuf, usize)> {
     let mut units: Vec<(PathBuf, usize)> = Vec::new();
@@ -622,7 +622,7 @@ pub fn find_units_for(lib: &GameLibrary, gis: &[usize], rom_paths: &[PathBuf]) -
     // 包，按路径字符串去重是去不掉的，必须先 canonicalize 再比。
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for &gi in gis {
-        // 越界的 gi 要挡住而不是 panic：`audit_scope` 给的是合法下标，但
+        // 越界的 gi 要挡住而不是 panic：`verify_scope` 给的是合法下标，但
         // 这个函数是 pub 的，headless 例子与将来的调用方未必都守约。
         let Some(g) = lib.games.get(gi) else {
             continue;
@@ -663,36 +663,36 @@ fn real_path(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
-/// 只审计一台机种 + 它的依赖（右键/菜单「审计 ROM」）。
+/// 只校验一台机种 + 它的依赖（右键/菜单「校验 ROM」）。
 ///
-/// 与 [`audit_all`] 的差别不只是范围小，有三处必须不同：
+/// 与 [`verify_all`] 的差别不只是范围小，有三处必须不同：
 ///
-/// 1. **只重置范围内的 `available`。** `audit_all` 那个重置循环扫 5 万台
-///    游戏，单游戏审计照抄它就把 4.9 万台没参与审计的游戏的"已拥有"全
-///    抹成"缺失"——那会直接毁掉整个审计缓存。范围外的状态必须原样保留。
+/// 1. **只重置范围内的 `available`。** `verify_all` 那个重置循环扫 5 万台
+///    游戏，单游戏校验照抄它就把 4.9 万台没参与校验的游戏的"已拥有"全
+///    抹成"缺失"——那会直接毁掉整个校验缓存。范围外的状态必须原样保留。
 /// 2. **只枚举相关归档。** 按名字在 rompath 里找那几台机种的包，而不是
 ///    `read_dir` 整目录收 4.4 万个条目。
 /// 3. **不动 MESS 主机扫描**，也不改别的游戏的定级。
 ///
-/// 复用 [`audit_cache`]：包没变过就只 `stat` 不重开，所以这一轮通常在
+/// 复用 [`verify_cache`]：包没变过就只 `stat` 不重开，所以这一轮通常在
 /// 一秒内结束——这正是"单独审一个游戏"该有的速度。
 ///
 /// 返回实际扫过的归档数，供 UI 报"检查了 N 个文件"。
-pub fn audit_game(
+pub fn verify_game(
     lib: &mut GameLibrary,
     game: &str,
     rom_paths: &[PathBuf],
-    handle: &AuditHandle,
+    handle: &VerifyHandle,
 ) -> usize {
     let _finish_guard = FinishOnDrop(handle.finished.clone());
     let t0 = std::time::Instant::now();
-    let Some(scope) = audit_scope(lib, game) else {
-        dlog!("单游戏审计: 库里没有 {game}");
+    let Some(scope) = verify_scope(lib, game) else {
+        dlog!("单游戏校验: 库里没有 {game}");
         handle.finish();
         return 0;
     };
     dlog!(
-        "单游戏审计: {} 范围 {} 台（本机 + {} 父集 + {} 设备 + {} 样本）",
+        "单游戏校验: {} 范围 {} 台（本机 + {} 父集 + {} 设备 + {} 样本）",
         game,
         scope.len(),
         scope.parents.len(),
@@ -700,13 +700,13 @@ pub fn audit_game(
         scope.samples.len()
     );
 
-    // 1) 载入归档清单缓存。和 audit_all 一样，读一次约 20 MB。
-    crate::core::audit_cache::load();
+    // 1) 载入归档清单缓存。和 verify_all 一样，读一次约 20 MB。
+    crate::core::verify_cache::load();
 
     // 2) 只重置范围内这几台。范围外的一个字节都不碰——这是本函数和
-    //    audit_all 最要命的区别，写错会把全库审计成果抹掉。
+    //    verify_all 最要命的区别，写错会把全库校验成果抹掉。
     //
-    //    旧值先留一份：与 audit_all 不同，本函数是**就地**改共享库（没有
+    //    旧值先留一份：与 verify_all 不同，本函数是**就地**改共享库（没有
     //    快照可回滚），所以中途取消时只有靠这份备份才能还原。UI 不给取消
     //    入口，但 headless 例子用得到，而"取消后把范围外的正确结论改成缺失
     //    并落盘"是不能接受的下场。
@@ -732,13 +732,13 @@ pub fn audit_game(
     let units = find_units_for(lib, &gis, rom_paths);
     handle.set_total(units.len());
     dlog!(
-        "单游戏审计: {} 待扫 {} 个归档（枚举 {:?}）",
+        "单游戏校验: {} 待扫 {} 个归档（枚举 {:?}）",
         game,
         units.len(),
         t0.elapsed()
     );
 
-    // 4) 扫。scan_units 内部按"本机种 + 其克隆集"匹配 crc，对单游戏审计
+    // 4) 扫。scan_units 内部按"本机种 + 其克隆集"匹配 crc，对单游戏校验
     //    正好合适：它只看得到传入的这台机种的 roms。
     let results = scan_units(&units, lib, handle);
 
@@ -756,7 +756,7 @@ pub fn audit_game(
             lib.games[gi].available = grade;
         }
         handle.finish();
-        dlog!("单游戏审计: {game} 被取消，已还原范围内的旧结论");
+        dlog!("单游戏校验: {game} 被取消，已还原范围内的旧结论");
         return 0;
     }
 
@@ -772,7 +772,7 @@ pub fn audit_game(
             }
         }
     }
-    // CHD 由克隆家族共用——同 sha1 的一起标上（与 audit_all 同一理由）
+    // CHD 由克隆家族共用——同 sha1 的一起标上（与 verify_all 同一理由）
     let mut disk_index: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for &(gi, di) in &disk_marks {
         let sha1 = lib.games[gi].disks[di].sha1.clone();
@@ -826,17 +826,17 @@ pub fn audit_game(
         lib.games[gi].available = if complete { GAME_COMPLETE } else { GAME_MISSING };
     }
 
-    // 8) 这轮动过的归档清单存回去（下次全库审计能直接命中）
+    // 8) 这轮动过的归档清单存回去（下次全库校验能直接命中）
     let paths: Vec<PathBuf> = units.iter().map(|(p, _)| p.clone()).collect();
-    crate::core::audit_cache::prune(&paths, AUDIT_CACHE_LIMIT);
-    crate::core::audit_cache::save();
+    crate::core::verify_cache::prune(&paths, VERIFY_CACHE_LIMIT);
+    crate::core::verify_cache::save();
 
     handle.set_progress(0, 0, "");
     handle.finish();
 
     let scanned = units.len();
     dlog!(
-        "单游戏审计: {} 完成，扫了 {} 个归档，缺失 {} 条，总耗时 {:?}",
+        "单游戏校验: {} 完成，扫了 {} 个归档，缺失 {} 条，总耗时 {:?}",
         game,
         scanned,
         lib.games[scope.game]
@@ -849,8 +849,8 @@ pub fn audit_game(
     scanned
 }
 
-/// origin: RomAuditor::auditConsole — creates ext roms with "dir+file[/zip]" keys
-fn audit_console(lib: &mut GameLibrary, console: &str, dirpath: &str) {
+/// origin: RomVerifyor::verifyConsole — creates ext roms with "dir+file[/zip]" keys
+fn verify_console(lib: &mut GameLibrary, console: &str, dirpath: &str) {
     let dir_path = dir_string_of(dirpath);
     let sourcefile = lib.get(console).map(|g| g.sourcefile.clone()).unwrap_or_default();
     let mut all_ext: Vec<String> = Vec::new();
@@ -938,11 +938,11 @@ fn dir_string_of(p: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// fixdat export (origin: RomAuditor::exportDat)
+// fixdat export (origin: RomVerifyor::exportDat)
 // ---------------------------------------------------------------------------
 
-pub fn export_fixdat(lib: &GameLibrary, method: AuditMethod, out: &Path) -> std::io::Result<usize> {
-    if method == AuditMethod::Only {
+pub fn export_fixdat(lib: &GameLibrary, method: VerifyMethod, out: &Path) -> std::io::Result<usize> {
+    if method == VerifyMethod::Only {
         return Ok(0);
     }
     let mut names: Vec<String> = lib
@@ -978,9 +978,9 @@ pub fn export_fixdat(lib: &GameLibrary, method: AuditMethod, out: &Path) -> std:
         // Which sets belong in this dat at all (origin: the include test at the
         // top of the exportDat loop):
         //   * Export All Sets      → every real set, whether or not it is missing
-        //   * anything else        → only sets the audit marked as missing
+        //   * anything else        → only sets the verify marked as missing
         let wanted = match method {
-            AuditMethod::ExportComplete => !g.is_ext_rom,
+            VerifyMethod::ExportComplete => !g.is_ext_rom,
             _ => g.available == GAME_MISSING,
         };
         if !wanted {
@@ -1037,15 +1037,15 @@ pub fn export_fixdat(lib: &GameLibrary, method: AuditMethod, out: &Path) -> std:
                 completely_missing_clone = false;
             }
         }
-        if method != AuditMethod::ExportComplete && missing.is_empty() {
+        if method != VerifyMethod::ExportComplete && missing.is_empty() {
             continue;
         }
         // bios roms and nodumps never count towards "everything is missing"
         let denom = g.roms.len().saturating_sub(bios_roms_count + nodump_count);
         let completely_missing = missing_count >= denom || completely_missing_clone;
         match method {
-            AuditMethod::ExportIncomplete if completely_missing => continue,
-            AuditMethod::ExportMissing if !completely_missing => continue,
+            VerifyMethod::ExportIncomplete if completely_missing => continue,
+            VerifyMethod::ExportMissing if !completely_missing => continue,
             _ => {}
         }
         missing.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1073,7 +1073,7 @@ pub fn export_fixdat(lib: &GameLibrary, method: AuditMethod, out: &Path) -> std:
         ));
         for r in &missing {
             // origin: exportDat writes name/size/crc only — nodump roms are
-            // marked available during the audit, so they never reach this list
+            // marked available during the verify, so they never reach this list
             xml.push_str(&format!(
                 "\t\t<rom name=\"{}\" size=\"{}\" crc=\"{:08x}\"/>\r\n",
                 x(r.effective_name()),
@@ -1104,9 +1104,9 @@ mod tests {
     use crate::core::model::GameMeta;
 
     /// 枚举阶段必须真的往句柄上报，否则状态栏在分母出现之前只能显示
-    /// "正在审计"——那正是这次要修的东西。
+    /// "正在校验"——那正是这次要修的东西。
     ///
-    /// 难点：`audit_all` **返回时**标签必然已被清空（结尾那行
+    /// 难点：`verify_all` **返回时**标签必然已被清空（结尾那行
     /// `set_progress(0, 0, "")` 是故意的，好让转发线程最后观察到的是
     /// "已完成"）。所以不能在跑完之后断言。
     ///
@@ -1123,12 +1123,12 @@ mod tests {
         });
         lib.rebuild_indexes();
 
-        let base = std::env::temp_dir().join("mvui-audit-enum-test");
+        let base = std::env::temp_dir().join("mvui-verify-enum-test");
         let _ = std::fs::remove_dir_all(&base);
         let real_dir = base.join("roms");
         std::fs::create_dir_all(&real_dir).unwrap();
 
-        let handle = AuditHandle::new();
+        let handle = VerifyHandle::new();
         // 枚举阶段每次上报都记下来
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         {
@@ -1137,7 +1137,7 @@ mod tests {
                 seen.lock().unwrap().push((d, t, u));
             });
         }
-        audit_all(
+        verify_all(
             &mut lib,
             &[real_dir, base.join("does-not-exist")],
             &HashMap::new(),
@@ -1165,7 +1165,7 @@ mod tests {
     /// 状态栏会安静地退化成纯文案（不报错，所以必须两边都有测试）。
     #[test]
     fn the_enumeration_label_has_the_shape_the_ui_expects() {
-        let handle = AuditHandle::new();
+        let handle = VerifyHandle::new();
         handle.set_enumerating(2, 5, 13824);
         let (_, _, cur) = handle.snapshot();
         assert_eq!(cur, "enum 2/5 dirs, 13824 units");
@@ -1255,7 +1255,7 @@ mod tests {
     /// 空的 / 不存在的 rompath 不能 panic，也不能凭空造出单元。
     ///
     /// 顺带钉住越界的 `gi`：`find_units_for` 是 `pub` 的，调用方未必都像
-    /// `audit_scope` 那样给出合法下标。
+    /// `verify_scope` 那样给出合法下标。
     #[test]
     fn direct_lookup_tolerates_missing_rompaths_and_out_of_range_indexes() {
         let lib = GameLibrary::new("test".into());
@@ -1267,7 +1267,7 @@ mod tests {
         assert!(units.is_empty());
     }
 
-    /// 造一个真 zip，让单游戏审计跑在真的解析器上而不是桩上。
+    /// 造一个真 zip，让单游戏校验跑在真的解析器上而不是桩上。
     fn make_zip(dir: &Path, name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
         use std::io::Write;
         let p = dir.join(name);
@@ -1283,9 +1283,9 @@ mod tests {
         p
     }
 
-    /// 审计是**按 crc 匹配**的（`scan_units` 建 crc → 槽位的表），所以测试里
+    /// 校验是**按 crc 匹配**的（`scan_units` 建 crc → 槽位的表），所以测试里
     /// 造的 `RomInfo` 必须带**条目内容的真实 crc32**，不能编一个假的。
-    /// 编错时的症状很误导人：包明明在、文件名明明对，审计就是找不到。
+    /// 编错时的症状很误导人：包明明在、文件名明明对，校验就是找不到。
     fn crc32(data: &[u8]) -> u32 {
         // 与 zip 里的 crc32 同算法（IEEE 反射多项式 0xEDB88320）
         let mut table = [0u32; 256];
@@ -1313,16 +1313,16 @@ mod tests {
         }
     }
 
-    /// **单游戏审计最要命的不变量：范围外的游戏一个字节都不能被改。**
+    /// **单游戏校验最要命的不变量：范围外的游戏一个字节都不能被改。**
     ///
-    /// `audit_all` 的重置循环会扫 5 万台游戏；单游戏审计照抄它就会把 4.9
-    /// 万台未参与审计的游戏的"已拥有"全抹成"缺失"，那等于毁掉整个审计
+    /// `verify_all` 的重置循环会扫 5 万台游戏；单游戏校验照抄它就会把 4.9
+    /// 万台未参与校验的游戏的"已拥有"全抹成"缺失"，那等于毁掉整个校验
     /// 缓存——而这个错误**不会报错**，只会让用户的收藏看起来全丢了。
     #[test]
-    fn auditing_one_game_leaves_every_other_game_untouched() {
+    fn verifying_one_game_leaves_every_other_game_untouched() {
         const TARGET_DATA: &[u8] = b"target data";
         const BYSTANDER_DATA: &[u8] = b"bystander data";
-        let dir = std::env::temp_dir().join("mvui-auditgame-untouched");
+        let dir = std::env::temp_dir().join("mvui-verifygame-untouched");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         make_zip(&dir, "target.zip", &[("t.rom", TARGET_DATA)]);
@@ -1335,7 +1335,7 @@ mod tests {
         };
         target.roms.push(rom_named("t.rom", TARGET_DATA));
         target.roms.push(rom_named("missing.rom", b"never in the zip"));
-        // 旁观者：审计前先标成"已拥有"，审计后必须还是
+        // 旁观者：校验前先标成"已拥有"，校验后必须还是
         let mut bystander = GameMeta {
             name: "bystander".into(),
             ..Default::default()
@@ -1347,8 +1347,8 @@ mod tests {
         lib.games.push(bystander);
         lib.rebuild_indexes();
 
-        let handle = AuditHandle::new();
-        audit_game(&mut lib, "target", &[dir.clone()], &handle);
+        let handle = VerifyHandle::new();
+        verify_game(&mut lib, "target", &[dir.clone()], &handle);
 
         // 目标：包里的那个找到了
         assert!(
@@ -1373,7 +1373,7 @@ mod tests {
     /// 范围要含 romof 父集：父集自己的包也要被扫到。
     ///
     /// 注意父集的包**不会**把条目记到克隆集头上——`scan_units` 建的
-    /// crc 表只含"本机种 + 其克隆集"（这是 1.8.2 的口径，也是全库审计
+    /// crc 表只含"本机种 + 其克隆集"（这是 1.8.2 的口径，也是全库校验
     /// 不把 4.4 万个包的 crc 互相串起来的原因）。共享条目靠第 6 步的
     /// romof 回填补上，而那一步要求父集在范围内。所以这里断言的是
     /// "父集的包被打开过，且回填能功。
@@ -1381,7 +1381,7 @@ mod tests {
     fn the_scope_covers_the_romof_parent() {
         const SHARED: &[u8] = b"from parent";
         const OWN: &[u8] = b"from child";
-        let dir = std::env::temp_dir().join("mvui-auditgame-parent");
+        let dir = std::env::temp_dir().join("mvui-verifygame-parent");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         make_zip(&dir, "parent.zip", &[("shared.rom", SHARED)]);
@@ -1405,13 +1405,13 @@ mod tests {
         lib.rebuild_indexes();
 
         // 范围必须含父集，否则父集的包根本不会被打开、romof 回填也无从起谈
-        let scope = audit_scope(&lib, "child").expect("child 在库里");
+        let scope = verify_scope(&lib, "child").expect("child 在库里");
         assert_eq!(scope.game, 0);
         assert_eq!(scope.parents, vec![1], "父集在范围内");
         assert_eq!(scope.len(), 2);
 
-        let handle = AuditHandle::new();
-        let n = audit_game(&mut lib, "child", &[dir.clone()], &handle);
+        let handle = VerifyHandle::new();
+        let n = verify_game(&mut lib, "child", &[dir.clone()], &handle);
         assert_eq!(n, 2, "child.zip 和 parent.zip 都被扫（父集在范围内）");
         assert!(lib.games[0].roms[1].available, "own.rom 直接命中");
         assert!(
@@ -1455,7 +1455,7 @@ mod tests {
         lib.games.push(sample);
         lib.rebuild_indexes();
 
-        let scope = audit_scope(&lib, "game").expect("game 在库里");
+        let scope = verify_scope(&lib, "game").expect("game 在库里");
         assert_eq!(scope.devices, vec![1], "设备在范围内");
         assert_eq!(scope.samples, vec![2], "样本在范围内");
         assert_eq!(scope.len(), 3);
@@ -1464,9 +1464,9 @@ mod tests {
 
     /// 设备包的可用性要被这一轮更新（设备 rom 也是这盘游戏要的文件）。
     #[test]
-    fn device_roms_get_audited_too() {
+    fn device_roms_get_verified_too() {
         const CPU_DATA: &[u8] = b"cpu data";
-        let dir = std::env::temp_dir().join("mvui-auditgame-device");
+        let dir = std::env::temp_dir().join("mvui-verifygame-device");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         make_zip(&dir, "m68000.zip", &[("mc68000.bin", CPU_DATA)]);
@@ -1492,8 +1492,8 @@ mod tests {
         lib.games.push(cpu);
         lib.rebuild_indexes();
 
-        let handle = AuditHandle::new();
-        let n = audit_game(&mut lib, "game", &[dir.clone()], &handle);
+        let handle = VerifyHandle::new();
+        let n = verify_game(&mut lib, "game", &[dir.clone()], &handle);
         assert_eq!(n, 1, "设备的包被扫了");
         assert!(
             lib.games[1].roms[0].available,
@@ -1505,12 +1505,12 @@ mod tests {
 
     /// 库里没有这台游戏时不能 panic：静默返回 0 个归档。
     #[test]
-    fn auditing_an_unknown_game_is_a_no_op() {
+    fn verifying_an_unknown_game_is_a_no_op() {
         let mut lib = GameLibrary::new("test".into());
         lib.rebuild_indexes();
-        let handle = AuditHandle::new();
+        let handle = VerifyHandle::new();
         assert_eq!(
-            audit_game(&mut lib, "nope", &[], &handle),
+            verify_game(&mut lib, "nope", &[], &handle),
             0,
             "不存在的游戏不该炸，也不该扫任何东西"
         );
@@ -1537,19 +1537,19 @@ mod tests {
         lib.games.push(b);
         lib.rebuild_indexes();
 
-        let scope = audit_scope(&lib, "a").expect("a 在库里");
+        let scope = verify_scope(&lib, "a").expect("a 在库里");
         assert_eq!(scope.parents, vec![1], "b 进范围，a 不再进");
     }
 
     /// 取消必须把范围内的旧结论**原样还原**。
     ///
-    /// 这是"就地改库"才有的风险：`audit_game` 先把范围内那几台的 `available`
+    /// 这是"就地改库"才有的风险：`verify_game` 先把范围内那几台的 `available`
     /// 全清成 false，再去扫包。扫到一半取消的话，那次清零就成了最终结论——
-    /// 一台本来齐备的游戏被判成"全缺失"，而调用方还会把它当审计结果落盘。
-    /// 所以取消路径必须回滚，而 `audit_game` 手上只有它自己留的那份备份。
+    /// 一台本来齐备的游戏被判成"全缺失"，而调用方还会把它当校验结果落盘。
+    /// 所以取消路径必须回滚，而 `verify_game` 手上只有它自己留的那份备份。
     #[test]
     fn cancelling_restores_the_previous_verdicts() {
-        let dir = std::env::temp_dir().join("mvui-auditgame-cancel");
+        let dir = std::env::temp_dir().join("mvui-verifygame-cancel");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         make_zip(&dir, "game.zip", &[("g.rom", b"g data")]);
@@ -1560,24 +1560,24 @@ mod tests {
             ..Default::default()
         };
         g.roms.push(rom_named("g.rom", b"g data"));
-        // 审计前的状态：齐备
+        // 校验前的状态：齐备
         g.roms[0].available = true;
         g.available = GAME_COMPLETE;
         lib.games.push(g);
         lib.rebuild_indexes();
 
-        let handle = AuditHandle::new();
+        let handle = VerifyHandle::new();
         handle.cancel.store(true, Ordering::Relaxed);
-        let n = audit_game(&mut lib, "game", &[dir.clone()], &handle);
+        let n = verify_game(&mut lib, "game", &[dir.clone()], &handle);
 
-        assert_eq!(n, 0, "取消的审计不报扫了几个");
+        assert_eq!(n, 0, "取消的校验不报扫了几个");
         assert!(
             lib.games[0].roms[0].available,
-            "取消后 rom 的可用性必须回到审计前——不能停在「刚清零」那个中间态"
+            "取消后 rom 的可用性必须回到校验前——不能停在「刚清零」那个中间态"
         );
         assert_eq!(
             lib.games[0].available, GAME_COMPLETE,
-            "取消后整机的定级也必须回到审计前"
+            "取消后整机的定级也必须回到校验前"
         );
         assert!(handle.finished.load(Ordering::Relaxed), "句柄必须收尾");
 

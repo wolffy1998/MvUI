@@ -1,23 +1,23 @@
-//! Persistent cache of archive entry lists, for the ROM audit.
+//! Persistent cache of archive entry lists, for the ROM verify.
 //!
-//! The audit's cost is almost entirely *opening 44 000 zip archives* to read
+//! The verify's cost is almost entirely *opening 44 000 zip archives* to read
 //! their central directories. Measured on the reference machine: 0.55 ms per
 //! archive when the drive is warm, 19–27 ms when it is cold — so a cold run is
 //! 10–20 minutes of pure head movement, and a warm one is under a minute.
-//! Nothing about that is algorithmic; `the original GUI`'s own auditor does the same
+//! Nothing about that is algorithmic; `the original GUI`'s own verifyor does the same
 //! work and takes the same time on a cold disk.
 //!
 //! The entry list of a romset changes only when the file does, and a file's
 //! `(mtime, size)` pair is enough to tell. So: remember each archive's listing
 //! keyed by that pair, in memory for the run and on disk for the next one.
-//! Re-auditing then costs one `stat` per archive (≈2–5 s for the whole set)
+//! Re-verifying then costs one `stat` per archive (≈2–5 s for the whole set)
 //! instead of one open, and the 10–20 minutes is paid once per changed file
-//! rather than once per audit.
+//! rather than once per verify.
 //!
 //! **This is a cache, not a source of truth.** Anything that looks wrong —
 //! unreadable file, unparsable archive, stale stamp, version bump — falls back
 //! to actually opening the archive and rewrites the entry. A corrupt cache can
-//! therefore cost time but never produce a wrong audit result.
+//! therefore cost time but never produce a wrong verify result.
 
 use crate::core::archive::{self, EntryInfo};
 use crate::core::settings::GuiSettings;
@@ -134,7 +134,7 @@ fn cache_path() -> PathBuf {
 
 /// Read the on-disk cache once per process.
 ///
-/// Called from `audit_all` before the scan. A missing or unreadable file is not
+/// Called from `verify_all` before the scan. A missing or unreadable file is not
 /// an error — it just means every archive is opened this time round, which is
 /// exactly what happens today.
 pub fn load() {
@@ -168,7 +168,7 @@ pub fn load() {
 }
 
 /// Persist the cache. Only writes when something actually changed, so a second
-/// audit in the same session is free, and a read-only install stays quiet.
+/// verify in the same session is free, and a read-only install stays quiet.
 pub fn save() {
     let file_opt = with_state(|s| {
         if !s.loaded || !s.dirty {
@@ -187,7 +187,7 @@ fn write_cache(path: &Path, file: &CacheFile) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // tmp + rename, same atomic-swap reasoning as cache::save_library: an audit
+    // tmp + rename, same atomic-swap reasoning as cache::save_library: an verify
     // that is killed mid-save must not leave a truncated cache behind
     let tmp = path.with_extension("tmp");
     {
@@ -217,7 +217,7 @@ fn io_other(e: impl std::fmt::Display) -> std::io::Error {
 ///
 /// Returns `None` when the path does not exist or the archive cannot be read —
 /// the caller treats that as "no entries", which is what the old direct call
-/// did with an `Err`, and the audit keeps going past one bad zip. A read
+/// did with an `Err`, and the verify keeps going past one bad zip. A read
 /// failure is deliberately *not* cached: a file that is temporarily unreadable
 /// (network share asleep, antivirus holding it) is retried next time instead of
 /// being remembered as empty.
@@ -261,7 +261,7 @@ pub fn list_cached(path: &Path) -> Option<Vec<EntryInfo>> {
 /// Drop listings for archives that no longer exist or changed, so the file does
 /// not grow without bound as a user swaps romsets around.
 ///
-/// Only prunes paths the audit actually walked past — a romset directory that
+/// Only prunes paths the verify actually walked past — a romset directory that
 /// is simply not on this run's `rompath` keeps its listing, which is the point
 /// of a persistent cache.
 pub fn prune(seen: &[PathBuf], keep_limit: usize) {
@@ -275,16 +275,16 @@ pub fn prune(seen: &[PathBuf], keep_limit: usize) {
             // Live paths were every one of them just passed through
             // `list_cached`, which validated or refreshed their stamp this
             // run — restatting them here would double the stat cost of every
-            // audit without buying safety: the stamp check inside
+            // verify without buying safety: the stamp check inside
             // `list_cached` is the gate that actually decides freshness.
-            // A path the audit did not see is kept only while the file still
+            // A path the verify did not see is kept only while the file still
             // exists, so a romset that moved to another rompath keeps its
             // listing instead of being rebuilt from scratch.
             live.contains(k) || Path::new(k).exists()
         });
         if s.map.len() > keep_limit {
             // pathological growth guard — a runaway cache is worse than a slow
-            // audit. Dropping half keeps the newest entries by dropping at
+            // verify. Dropping half keeps the newest entries by dropping at
             // random, which is fine: they are all rebuildable.
             let drop_n = s.map.len() - keep_limit;
             let doomed: Vec<String> = s.map.keys().take(drop_n).cloned().collect();
@@ -337,7 +337,7 @@ mod tests {
     /// archive must come from the cache and still be correct.
     #[test]
     fn second_listing_is_served_from_cache_and_matches() {
-        let dir = std::env::temp_dir().join("mvui-auditcache-e2e");
+        let dir = std::env::temp_dir().join("mvui-verifycache-e2e");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         reset_for_test();
@@ -368,10 +368,10 @@ mod tests {
     }
 
     /// A changed archive must NOT come back from the cache — otherwise a user
-    /// who swaps a romset gets an audit against the old contents.
+    /// who swaps a romset gets an verify against the old contents.
     #[test]
     fn changed_archive_is_relisted() {
-        let dir = std::env::temp_dir().join("mvui-auditcache-changed");
+        let dir = std::env::temp_dir().join("mvui-verifycache-changed");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         reset_for_test();
@@ -396,7 +396,7 @@ mod tests {
     /// A non-archive must be a miss rather than a cached empty listing.
     #[test]
     fn non_archive_is_a_miss() {
-        let dir = std::env::temp_dir().join("mvui-auditcache-nonzip");
+        let dir = std::env::temp_dir().join("mvui-verifycache-nonzip");
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("not-a-zip.txt");
         std::fs::write(&p, b"hello").unwrap();
@@ -409,11 +409,11 @@ mod tests {
     }
 
     /// Stamps must actually distinguish a changed file, or the cache hands back
-    /// a stale listing and the audit reports a romset as present when it was
+    /// a stale listing and the verify reports a romset as present when it was
     /// swapped out.
     #[test]
     fn stamp_changes_with_size_and_mtime() {
-        let dir = std::env::temp_dir().join("mvui-auditcache-stamp");
+        let dir = std::env::temp_dir().join("mvui-verifycache-stamp");
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("a.zip");
         std::fs::write(&p, b"one").unwrap();
@@ -432,7 +432,7 @@ mod tests {
     /// A missing file is a miss, not a panic or an empty listing.
     #[test]
     fn missing_file_is_a_miss() {
-        let p = std::env::temp_dir().join("mvui-auditcache-does-not-exist.zip");
+        let p = std::env::temp_dir().join("mvui-verifycache-does-not-exist.zip");
         let _ = std::fs::remove_file(&p);
         assert!(list_cached(&p).is_none());
     }
@@ -464,7 +464,7 @@ mod tests {
             },
         );
         let file = CacheFile { entries };
-        let dir = std::env::temp_dir().join("mvui-auditcache-roundtrip");
+        let dir = std::env::temp_dir().join("mvui-verifycache-roundtrip");
         let _ = std::fs::create_dir_all(&dir);
         let p = dir.join("audit_cache.bin");
         write_cache(&p, &file).unwrap();

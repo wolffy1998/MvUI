@@ -1,13 +1,13 @@
-//! Probe: where does a **single-game** audit's wall clock actually go?
+//! Probe: where does a **single-game** verify's wall clock actually go?
 //!
-//! `audit_game` looks cheap — it only opens the few archives that belong to one
+//! `verify_game` looks cheap — it only opens the few archives that belong to one
 //! game — but the surrounding steps are sized for the *whole library*:
 //!
-//!   * `audit_cache::load()`  reads and bincode-decodes the entire archive
+//!   * `verify_cache::load()`  reads and bincode-decodes the entire archive
 //!     listing cache (every zip in the rompath, with every entry's name/size/
 //!     crc) just so a handful of `list_cached` calls can hit it.
 //!   * the unit enumeration `read_dir`s every rompath in full.
-//!   * `audit_cache::prune` `stat`s every key in the cache.
+//!   * `verify_cache::prune` `stat`s every key in the cache.
 //!   * `save_library` re-serialises all 49 676 games.
 //!
 //! This probe times each phase separately against the real rompath, so the
@@ -15,7 +15,7 @@
 //! one that looks expensive.
 //!
 //! Usage:
-//!   cargo run --release --example game_audit_probe -- <gamelist.cache> <rompath>;<rompath>... <game>
+//!   cargo run --release --example game_verify_probe -- <gamelist.cache> <rompath>;<rompath>... <game>
 
 use std::time::Instant;
 
@@ -39,23 +39,23 @@ fn main() {
     let mut lib = data.library;
     eprintln!("[0] library load           {:>7.3}s  ({} games)", secs(t), lib.len());
 
-    // ---- phase 1: the scope, i.e. which games this audit touches ----
+    // ---- phase 1: the scope, i.e. which games this verify touches ----
     let t = Instant::now();
-    let scope = mvui::core::audit::audit_scope(&lib, &game).expect("scope");
+    let scope = mvui::core::verify::verify_scope(&lib, &game).expect("scope");
     eprintln!(
-        "[1] audit_scope            {:>7.3}s  ({} games in scope: {:?})",
+        "[1] verify_scope            {:>7.3}s  ({} games in scope: {:?})",
         secs(t),
         scope.len(),
         scope.all()
     );
 
-    // ---- phase 2: audit_cache::load (the whole archive listing cache) ----
+    // ---- phase 2: verify_cache::load (the whole archive listing cache) ----
     let t = Instant::now();
-    mvui::core::audit_cache::load();
+    mvui::core::verify_cache::load();
     eprintln!(
-        "[2] audit_cache::load      {:>7.3}s  ({} cached archives)",
+        "[2] verify_cache::load      {:>7.3}s  ({} cached archives)",
         secs(t),
-        mvui::core::audit_cache::len()
+        mvui::core::verify_cache::len()
     );
 
     // ---- phase 3: unit enumeration ----
@@ -95,7 +95,7 @@ fn main() {
     );
 
     let t = Instant::now();
-    let new_units = mvui::core::audit::find_units_for(&lib, &gis, &rompaths);
+    let new_units = mvui::core::verify::find_units_for(&lib, &gis, &rompaths);
     eprintln!(
         "    find_units_for         {:>7.3}s  ({} units matched)   <- NEW",
         secs(t),
@@ -110,14 +110,14 @@ fn main() {
 
     // ---- phase 4: the actual archive scan (the part that is genuinely needed) ----
     let t = Instant::now();
-    let handle = mvui::core::audit::AuditHandle::new();
-    let n = mvui::core::audit::audit_game(&mut lib, &game, &rompaths, &handle);
-    eprintln!("[4] audit_game (total)     {:>7.3}s  ({n} archives)", secs(t));
+    let handle = mvui::core::verify::VerifyHandle::new();
+    let n = mvui::core::verify::verify_game(&mut lib, &game, &rompaths, &handle);
+    eprintln!("[4] verify_game (total)     {:>7.3}s  ({n} archives)", secs(t));
 
-    // ---- phase 5: audit_cache::prune — `exists()` on every cached key ----
+    // ---- phase 5: verify_cache::prune — `exists()` on every cached key ----
     let t = Instant::now();
-    mvui::core::audit_cache::prune(&[], 60000);
-    eprintln!("[5] audit_cache::prune     {:>7.3}s", secs(t));
+    mvui::core::verify_cache::prune(&[], 60000);
+    eprintln!("[5] verify_cache::prune     {:>7.3}s", secs(t));
 
     // ---- phase 6: save_library (re-serialise all 49 676 games) ----
     let t = Instant::now();
@@ -126,8 +126,8 @@ fn main() {
     eprintln!("[6] save_library           {:>7.3}s  ({:?})", secs(t), r.is_ok());
     let _ = std::fs::remove_file(&out);
 
-    // ---- phase 7: audit_cache::save ----
+    // ---- phase 7: verify_cache::save ----
     let t = Instant::now();
-    mvui::core::audit_cache::save();
-    eprintln!("[7] audit_cache::save      {:>7.3}s", secs(t));
+    mvui::core::verify_cache::save();
+    eprintln!("[7] verify_cache::save      {:>7.3}s", secs(t));
 }

@@ -1,7 +1,7 @@
-//! Benchmark the ROM audit, cold vs warm, with and without the listing cache.
+//! Benchmark the ROM verify, cold vs warm, with and without the listing cache.
 //!
 //! Usage:
-//!   cargo run --release --example audit_bench -- <listxml.xml> <rompath> [rompath...]
+//!   cargo run --release --example verify_bench -- <listxml.xml> <rompath> [rompath...]
 //!
 //! What it measures, and why each number matters:
 //!
@@ -16,17 +16,17 @@
 //!   "restarted the app" case the persistent file exists for.
 //!
 //! The library is parsed once and cloned per run, so the parse cost is not
-//! counted in the audit figures.
+//! counted in the verify figures.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use mvui::core::audit::{audit_all, AuditHandle};
+use mvui::core::verify::{verify_all, VerifyHandle};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let xml = args.next().expect("usage: audit_bench <listxml.xml> <rompath...>");
+    let xml = args.next().expect("usage: verify_bench <listxml.xml> <rompath...>");
     let rom_paths: Vec<PathBuf> = args.map(PathBuf::from).collect();
     if rom_paths.is_empty() {
         eprintln!("need at least one rompath");
@@ -53,9 +53,9 @@ fn main() {
     let _ = std::fs::remove_file(&cache);
 
     let run = |label: &str, lib: &mut mvui::core::library::GameLibrary| -> f64 {
-        let h = Arc::new(AuditHandle::new());
+        let h = Arc::new(VerifyHandle::new());
         let t = Instant::now();
-        audit_all(lib, &rom_paths, &Default::default(), &h);
+        verify_all(lib, &rom_paths, &Default::default(), &h);
         let secs = t.elapsed().as_secs_f64();
         let complete = lib
             .games
@@ -69,21 +69,21 @@ fn main() {
     // ---- run 1: cache empty, every archive opened ----
     let mut lib = base.clone();
     lib.rebuild_indexes();
-    let cold = run("1. audit, empty cache", &mut lib);
+    let cold = run("1. verify, empty cache", &mut lib);
 
     // ---- run 2: same process, listings now cached ----
     let mut lib2 = base.clone();
     lib2.rebuild_indexes();
-    let warm = run("2. audit, cache warm (mem)", &mut lib2);
+    let warm = run("2. verify, cache warm (mem)", &mut lib2);
 
     // ---- run 3: reload from disk — the "restarted the app" case ----
-    // audit_all reloads from disk itself, but the in-memory map survives within
+    // verify_all reloads from disk itself, but the in-memory map survives within
     // a process. To model a restart faithfully, drop the file's consumers by
     // re-reading it here and confirming the saved cache is non-empty.
     let saved = std::fs::metadata(&cache).map(|m| m.len()).unwrap_or(0);
     let mut lib3 = base.clone();
     lib3.rebuild_indexes();
-    let reload = run("3. audit, cache warm (again)", &mut lib3);
+    let reload = run("3. verify, cache warm (again)", &mut lib3);
 
     println!();
     println!("listing cache on disk: {saved} bytes");

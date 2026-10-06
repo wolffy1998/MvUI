@@ -241,34 +241,34 @@ pub struct MameApp {
     /// instead of being recomputed every frame.
     pub doc_parsed: HashMap<(usize, String), Arc<Vec<crate::core::dat::DatLine>>>,
 
-    // ---- Rom 信息（面板 + 单游戏审计）--------------------------------
+    // ---- Rom 信息（面板 + 单游戏校验）--------------------------------
     /// 缓存的 Rom 信息视图，键是游戏名。
     ///
     /// egui 在**每帧**调这个渲染器，而 `rominfo::view_of` 要扫库（父集链、
-    /// 设备、样本），5 万台游戏的库上一帧 60 次是白烧 CPU。审计结果只在一轮
-    /// 审计结束时变一次，所以按游戏名缓存、审计完清空。
+    /// 设备、样本），5 万台游戏的库上一帧 60 次是白烧 CPU。校验结果只在一轮
+    /// 校验结束时变一次，所以按游戏名缓存、校验完清空。
     pub rom_views: HashMap<String, crate::core::rominfo::RomInfoView>,
-    /// 全库审计过没有（= `gamelist.cache` 的 `audited` 标志）。
+    /// 全库校验过没有（= `gamelist.cache` 的 `verified` 标志）。
     ///
-    /// false 时 `rominfo::view_of` 把所有缺失降级成"未审计"——冷启动后审计还
+    /// false 时 `rominfo::view_of` 把所有缺失降级成"未校验"——冷启动后校验还
     /// 没跑，此时 `available` 全是默认值，一律显示"缺失"会让用户以为自己的
     /// 盘是空的。
-    pub lib_audited: bool,
-    /// 单游戏审计的进度句柄（非空 = 正在跑）。
-    pub game_audit: Option<Arc<crate::core::audit::AuditHandle>>,
-    /// 单游戏审计的目标游戏名，用来防止结果弹到别的游戏上。
+    pub lib_verified: bool,
+    /// 单游戏校验的进度句柄（非空 = 正在跑）。
+    pub game_verify: Option<Arc<crate::core::verify::VerifyHandle>>,
+    /// 单游戏校验的目标游戏名，用来防止结果弹到别的游戏上。
     ///
-    /// **当前没有菜单入口**（2026-10-05 用户要求删掉菜单里的审计项，统一走
-    /// 「刷新档案」）。字段与配套的 `GameAuditDone` 事件一并保留：
-    /// 它们是单游戏审计这条路的完整实现，`start_game_audit` 一接回菜单就能用。
+    /// **当前没有菜单入口**（2026-10-05 用户要求删掉菜单里的校验项，统一走
+    /// 「刷新档案」）。字段与配套的 `GameVerifyDone` 事件一并保留：
+    /// 它们是单游戏校验这条路的完整实现，`start_game_verify` 一接回菜单就能用。
     #[allow(dead_code)]
-    pub game_audit_target: String,
-    /// 单游戏审计跑完的结果弹窗：`(游戏名, 视图)`。
+    pub game_verify_target: String,
+    /// 单游戏校验跑完的结果弹窗：`(游戏名, 视图)`。
     ///
     /// 用**视图**而不是裸数据，是因为弹窗要和 dock 面板同款渲染（复用
     /// `rompanel::render`）。跑完的视图是那一瞬间的快照，不受之后切换游戏
     /// 影响——这正是"单独审一次然后看结果"要的语义。
-    pub game_audit_result: Option<(String, crate::core::rominfo::RomInfoView)>,
+    pub game_verify_result: Option<(String, crate::core::rominfo::RomInfoView)>,
 
     // dialogs
     pub show_options_win: Option<usize>,
@@ -286,7 +286,7 @@ pub struct MameApp {
     pub play_dialog: Option<(PlayKind, String)>,
     pub show_verify: bool,
     pub verify_lines: Vec<String>,
-    pub audit_handle: Option<Arc<crate::core::audit::AuditHandle>>,
+    pub verify_handle: Option<Arc<crate::core::verify::VerifyHandle>>,
     pub mounted: HashMap<(String, String), String>,
     pub dirs_target_option: Option<String>,
     /// Working copy of every path in Settings ▸ Directories, keyed by setting
@@ -295,7 +295,7 @@ pub struct MameApp {
     /// can always see what the default *is* without having to remember it.
     pub dir_edits: std::collections::BTreeMap<String, String>,
     pub show_csv_win: Option<String>,
-    pub exporting_method: Option<crate::core::audit::AuditMethod>,
+    pub exporting_method: Option<crate::core::verify::VerifyMethod>,
     pub export_target: Option<PathBuf>,
 
     /// §12 of the design doc: preview/DAT/icon loads are debounced against a
@@ -306,10 +306,10 @@ pub struct MameApp {
     /// the frame loop, which is the one place every selection path passes through
     pub published_game: String,
     pub progress_open: bool,
-    /// audit running as part of first boot (progress via `AuditProgress`)
-    pub boot_auditing: bool,
-    /// 冷启动那次审计的进度：`(已扫, 总数, 当前系统)`。
-    pub audit_stage: (usize, usize, String),
+    /// verify running as part of first boot (progress via `VerifyProgress`)
+    pub boot_verifying: bool,
+    /// 冷启动那次校验的进度：`(已扫, 总数, 当前系统)`。
+    pub verify_stage: (usize, usize, String),
     pub frame_count: u32,
     /// window background: `None` = the flat theme colour, `Some(file)` = an
     /// image from the `background_directory` (origin: 1.8.2 `background_file` +
@@ -397,7 +397,7 @@ impl MameApp {
             }
         }
 // 文本面板（含第 6 个 Rom 信息）默认**全开**。用户要过 Rom 信息
-        // 默认勾选：它是审计结果的直接视图，面板本身只读缓存、不占后台线程，
+        // 默认勾选：它是校验结果的直接视图，面板本身只读缓存、不占后台线程，
         // 没有理由藏着。ini 里存过的开关照旧优先（用户手动关掉就尊重它）。
         let mut text_dock_visible = [true; crate::core::dat::TEXT_DOCK_COUNT];
         if let Some(csv) = gui.get("text_docks") {
@@ -528,11 +528,11 @@ impl MameApp {
             dat_requested: HashSet::new(),
             doc_parsed: HashMap::new(),
             rom_views: HashMap::new(),
-            // 引导流程会按缓存里的 `audited` 标志纠正它（`LibraryReady`）
-            lib_audited: false,
-            game_audit: None,
-            game_audit_target: String::new(),
-            game_audit_result: None,
+            // 引导流程会按缓存里的 `verified` 标志纠正它（`LibraryReady`）
+            lib_verified: false,
+            game_verify: None,
+            game_verify_target: String::new(),
+            game_verify_result: None,
             show_options_win: None,
             opt_level: 1,
             opt_category: "Core Video".into(),
@@ -546,7 +546,7 @@ impl MameApp {
             play_dialog: None,
             show_verify: false,
             verify_lines: Vec::new(),
-            audit_handle: None,
+            verify_handle: None,
             exporting_method: None,
             export_target: None,
             mounted: HashMap::new(),
@@ -556,8 +556,8 @@ impl MameApp {
             sel_changed_at: None,
             published_game: String::new(),
             progress_open: false,
-            boot_auditing: false,
-            audit_stage: (0, 0, String::new()),
+            boot_verifying: false,
+            verify_stage: (0, 0, String::new()),
             frame_count: 0,
             running: HashSet::new(),
             log_lines: Vec::new(),
@@ -713,7 +713,7 @@ impl MameApp {
     /// 写盘的内容与 [`save_settings`] 完全一样，只是不记账：那条定时器
     /// 每 200 帧跑一次，是防崩溃丢设置的兜底而不是用户动作，每次往
     /// boot.log 里塞一条"保存 N 条"只会稀释真正值得看的信息——而且
-    /// 一次审计动辄几十分钟，那段时间里它就是日志里的全部内容。
+    /// 一次校验动辄几十分钟，那段时间里它就是日志里的全部内容。
     pub fn save_settings_quiet(&mut self) {
         self.write_settings(false)
     }
@@ -900,7 +900,7 @@ impl MameApp {
     }
 
     pub fn boot(&mut self) {
-        dlog!("引导: 启动后台线程（读缓存 → listxml → showconfig → 审计）");
+        dlog!("引导: 启动后台线程（读缓存 → listxml → showconfig → 校验）");
         self.need_mame_pick = false;
         self.lib_status = LibStatus::Loading;
         self.progress_open = true;
@@ -1034,23 +1034,23 @@ impl MameApp {
     }
 
     pub fn refresh_all(&mut self) {
-        // origin actionRefresh: romAuditor->audit() (internal audit + re-init)
+        // origin actionRefresh: romVerifyor->verify() (internal verify + re-init)
         if self.lib.is_none() {
             return;
         }
-        self.start_internal_audit();
+        self.start_internal_verify();
     }
 
-    pub fn start_internal_audit(&mut self) {
-        if self.audit_handle.is_some() {
+    pub fn start_internal_verify(&mut self) {
+        if self.verify_handle.is_some() {
             return;
         }
         let Some(lib) = self.lib.clone() else { return };
-        let handle = Arc::new(crate::core::audit::AuditHandle::new());
-        self.audit_handle = Some(handle.clone());
+        let handle = Arc::new(crate::core::verify::VerifyHandle::new());
+        self.verify_handle = Some(handle.clone());
         let opts = self.opts.clone().unwrap_or_else(|| Arc::new(Mutex::new(crate::core::options::OptionCore::default())));
         let is_mess = self.is_mess;
-        crate::background::run_audit(
+        crate::background::run_verify(
             lib,
             opts,
             handle,
@@ -1060,13 +1060,13 @@ impl MameApp {
         );
     }
 
-    pub fn export_fixdat(&mut self, method: crate::core::audit::AuditMethod) {
+    pub fn export_fixdat(&mut self, method: crate::core::verify::VerifyMethod) {
         let Some(lib) = self.lib.clone() else { return };
         let target = self.export_target.clone().unwrap_or_else(|| {
             std::env::temp_dir().join("mvui_fixdat.dat")
         });
         let guard = lib.lock().unwrap();
-        match crate::core::audit::export_fixdat(&guard, method, &target) {
+        match crate::core::verify::export_fixdat(&guard, method, &target) {
             Ok(n) => self.log(format!("fixdat written: {n} sets -> {}", target.display())),
             Err(e) => self.poplog(format!("fixdat export failed: {e}")),
         }
@@ -1124,19 +1124,19 @@ impl MameApp {
                 AppEvent::LibProgress { done, total } => {
                     self.lib_progress = (done, total);
                 }
-                AppEvent::AuditProgress { done, total, system } => {
-                    self.audit_stage = (done, total, system);
+                AppEvent::VerifyProgress { done, total, system } => {
+                    self.verify_stage = (done, total, system);
                 }
                 AppEvent::LibraryReady(res) => {
                     dlog!("事件: LibraryReady 到达");
                     match res {
                         Ok(payload) => {
-                            let ReadyPayload { lib, folders, from_cache, audited } = payload;
+                            let ReadyPayload { lib, folders, from_cache, verified } = payload;
                             let machine_count = {
                                 let mut guard = lib.lock().unwrap();
                                 // the localized list is applied here, not during the
-                                // audit: it is a plain text file the user edits by
-                                // hand, so re-reading it must not require re-auditing
+                                // verify: it is a plain text file the user edits by
+                                // hand, so re-reading it must not require re-verifying
                                 // 40 000 roms
                                 self.apply_localized_list(&mut guard);
                                 self.maps = FolderMaps::build(&guard);
@@ -1148,10 +1148,10 @@ impl MameApp {
                             // empty Ready branch, and every lookup returned None
                             self.lib = Some(lib);
                             self.folder_cache = Some(folders);
-                            self.boot_auditing = !from_cache;
-                            // 审计前发布的那一次 `audited == false`：Rom 信息
-                            // 面板这时把所有条目显示成"未审计"而不是"缺失"
-                            self.lib_audited = audited;
+                            self.boot_verifying = !from_cache;
+                            // 校验前发布的那一次 `verified == false`：Rom 信息
+                            // 面板这时把所有条目显示成"未校验"而不是"缺失"
+                            self.lib_verified = verified;
                             self.rom_views.clear();
                             self.lib_status = LibStatus::Ready;
                             self.progress_open = false;
@@ -1166,7 +1166,7 @@ impl MameApp {
                                 machine_count,
                                 from_cache
                             );
-                            dlog!("事件: 库审计标志 audited={audited}");
+                            dlog!("事件: 库校验标志 verified={verified}");
                         }
                         Err(e) => {
                             self.lib_status = LibStatus::Error;
@@ -1210,22 +1210,22 @@ impl MameApp {
                     }
                     self.needs_refilter = true;
                 }
-                AppEvent::AuditStarted(h) => {
-                    // boot audit: keep the handle so the status bar can read its
-                    // counter and label the run "Auditing"
-                    self.audit_handle = Some(h);
+                AppEvent::VerifyStarted(h) => {
+                    // boot verify: keep the handle so the status bar can read its
+                    // counter and label the run "Verifying"
+                    self.verify_handle = Some(h);
                 }
-                AppEvent::AuditDone(res) => {
-                    self.audit_handle = None;
-                    self.boot_auditing = false;
-                    // 全库审计结束：每条 rom 的 available 都变了，而面板缓存的正是那些
-                    // 旧结论。清掉，下一帧按当前游标重算。同时把 `lib_audited`
-                    // 置真：之前面板把一切缺失都降级成"未审计"显示，现在该让它说真话了。
-                    self.lib_audited = true;
+                AppEvent::VerifyDone(res) => {
+                    self.verify_handle = None;
+                    self.boot_verifying = false;
+                    // 全库校验结束：每条 rom 的 available 都变了，而面板缓存的正是那些
+                    // 旧结论。清掉，下一帧按当前游标重算。同时把 `lib_verified`
+                    // 置真：之前面板把一切缺失都降级成"未校验"显示，现在该让它说真话了。
+                    self.lib_verified = true;
                     self.rom_views.clear();
                     match res {
                         Ok(m) => self.log(m),
-                        Err(m) => self.log(format!("audit: {m}")),
+                        Err(m) => self.log(format!("verify: {m}")),
                     }
                     if let Some((method, target)) = self.exporting_method.zip(self.export_target.clone()) {
                         self.export_target = Some(target);
@@ -1235,8 +1235,8 @@ impl MameApp {
                     }
                     self.needs_refilter = true;
                 }
-                AppEvent::GameAuditDone { game, result } => {
-                    self.game_audit = None;
+                AppEvent::GameVerifyDone { game, result } => {
+                    self.game_verify = None;
                     match result {
                         Ok(view) => {
                             // 面板缓存里的是旧结论，先把这次的新结论放进去——用户正好在看
@@ -1244,7 +1244,7 @@ impl MameApp {
                             if let Some(slot) = self.rom_views.get_mut(&game) {
                                 *slot = view.clone();
                             }
-                            self.game_audit_result = Some((game, view));
+                            self.game_verify_result = Some((game, view));
                         }
                         Err(m) => self.poplog(m),
                     }
@@ -1303,7 +1303,7 @@ impl MameApp {
                 AppEvent::VerifyLine(line) => {
                     self.verify_lines.push(line);
                 }
-                AppEvent::VerifyDone => {}
+                AppEvent::VerifyOutputDone => {}
                 AppEvent::MameExited { game, code } => {
                     self.running.remove(&game);
                     self.cleanup_temp_roms(Some(&game));

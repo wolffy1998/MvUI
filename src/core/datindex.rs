@@ -152,7 +152,7 @@ impl DatIndex {
     }
 
     /// Every record carrying `tag` — the recursive cloneof walk wants all of
-    /// them, and so does anyone auditing what the index actually holds.
+    /// them, and so does anyone verifying what the index actually holds.
     pub fn lookup_all(&self, tag: &str) -> &[RecordRange] {
         self.records.get(tag).map(|v| v.as_slice()).unwrap_or(&[])
     }

@@ -1,6 +1,6 @@
-//! Probe: time MvUI's ROM audit against the real rompath, phase by phase.
+//! Probe: time MvUI's ROM verify against the real rompath, phase by phase.
 //!
-//! Usage: cargo run --release --example audit_probe -- <listxml.xml> <rompath>;<rompath>...
+//! Usage: cargo run --release --example verify_probe -- <listxml.xml> <rompath>;<rompath>...
 
 use std::io::BufReader;
 use std::time::Instant;
@@ -22,7 +22,7 @@ fn main() {
     lib.complete_data();
     eprintln!("[probe] lib ready in {:.1}s ({} games)", t.elapsed().as_secs_f64(), lib.games.len());
 
-    // ---- 单元收集（与 audit.rs 117-143 相同的口径）----
+    // ---- 单元收集（与 verify.rs 117-143 相同的口径）----
     let t = Instant::now();
     let mut n_dir = 0usize;
     let mut n_zip = 0usize;
@@ -95,7 +95,7 @@ fn main() {
     }
 
     // ---- 完整审计 + 看门狗每 10s 打进度 ----
-    let handle = mvui::core::audit::AuditHandle::new();
+    let handle = mvui::core::verify::VerifyHandle::new();
     let h2 = handle.clone();
     let wd = std::thread::spawn(move || {
         let start = Instant::now();
@@ -114,10 +114,10 @@ fn main() {
     });
 
     let t = Instant::now();
-    mvui::core::audit::audit_all(&mut lib, &rompaths, &std::collections::HashMap::new(), &handle);
-    let audit = t.elapsed().as_secs_f64();
+    mvui::core::verify::verify_all(&mut lib, &rompaths, &std::collections::HashMap::new(), &handle);
+    let verify = t.elapsed().as_secs_f64();
     let complete = lib.games.iter().filter(|g| g.available == 1).count();
-    eprintln!("[probe] audit_all 总耗时 {:.2}s，审计后可用 {} 套", audit, complete);
+    eprintln!("[probe] verify_all 总耗时 {:.2}s，审计后可用 {} 套", verify, complete);
     handle.finish();
     let _ = wd.join();
 }

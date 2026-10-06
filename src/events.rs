@@ -18,14 +18,14 @@ pub struct ReadyPayload {
     pub lib: SharedLib,
     pub folders: Arc<FolderCache>,
     pub from_cache: bool,
-    /// 库里的可用性数据**是否已经过审计**（`gamelist.cache` 的 `audited`
+    /// 库里的可用性数据**是否已经过校验**（`gamelist.cache` 的 `verified`
     /// 标志）。
     ///
-    /// Rom 信息面板靠它区分"缺失"和"还没查"：审计前发布的那一次是 `false`
-    /// （界面刚出来、审计还在跑），此时每条 rom 的 `available` 都还是默认值
-    /// `false`。拿它当"缺失"显示，用户会看到一屏红色，而实际上审计正要把它
+    /// Rom 信息面板靠它区分"缺失"和"还没查"：校验前发布的那一次是 `false`
+    /// （界面刚出来、校验还在跑），此时每条 rom 的 `available` 都还是默认值
+    /// `false`。拿它当"缺失"显示，用户会看到一屏红色，而实际上校验正要把它
     /// 变成绿色。
-    pub audited: bool,
+    pub verified: bool,
 }
 
 pub enum AppEvent {
@@ -35,26 +35,26 @@ pub enum AppEvent {
     /// `total == 0` 表示还在收子进程输出——机种总数要收完整份才知道，此时只
     /// 报台数；`total > 0` 是解析阶段，分母就是收输出时数出来的真总数。
     LibProgress { done: usize, total: usize },
-    /// 审计进度。`system` 是当前正在扫的机种/系统名，状态栏会显示它。
-    AuditProgress { done: usize, total: usize, system: String },
+    /// 校验进度。`system` 是当前正在扫的机种/系统名，状态栏会显示它。
+    VerifyProgress { done: usize, total: usize, system: String },
     LibraryReady(Result<ReadyPayload, String>),
-    /// the boot chain's audit handle, so the UI can report "Auditing nn%" from
+    /// the boot chain's verify handle, so the UI can report "Verifying nn%" from
     /// the first tick (the handle owns the counter the progress thread reads)
-    AuditStarted(Arc<crate::core::audit::AuditHandle>),
+    VerifyStarted(Arc<crate::core::verify::VerifyHandle>),
     OptionsReady(Result<SharedOpts, String>),
-    /// folder tree rebuilt after an audit changed availability
+    /// folder tree rebuilt after an verify changed availability
     FoldersReady(Arc<FolderCache>),
-    AuditDone(Result<String, String>),
-    /// 单游戏审计跑完。
+    VerifyDone(Result<String, String>),
+    /// 单游戏校验跑完。
     ///
-    /// 视图是**那一瞬间的快照**，不是"回头去库里读"——审计在后台线程上
+    /// 视图是**那一瞬间的快照**，不是"回头去库里读"——校验在后台线程上
     /// 改了共享的库，而用户可能在这期间点了别的游戏。带着快照回来，弹窗
     /// 讲的一定是它自己审的那个游戏。
     ///
-    /// **当前没有菜单入口**（2026-10-05 用户要求把菜单里的审计项删掉，
-    /// 统一走「刷新档案」）。保留给 `start_game_audit` 复用。
+    /// **当前没有菜单入口**（2026-10-05 用户要求把菜单里的校验项删掉，
+    /// 统一走「刷新档案」）。保留给 `start_game_verify` 复用。
     #[allow(dead_code)]
-    GameAuditDone {
+    GameVerifyDone {
         game: String,
         result: Result<crate::core::rominfo::RomInfoView, String>,
     },
@@ -66,12 +66,17 @@ pub enum AppEvent {
     DatReady { dock: usize, game: String, text: Option<String> },
     /// `-verifyroms` / `-verifysamples` 的逐行输出与结束标记。
     ///
-    /// **当前没有菜单入口**（同 `GameAuditDone`）。来自 1.8.2 那条原样搬来的
+    /// **当前没有菜单入口**（同 `GameVerifyDone`）。来自 1.8.2 那条原样搬来的
     /// 输出泵，保留以便接回 MAME 原生校验。
     #[allow(dead_code)]
     VerifyLine(String),
+    /// `-verifyroms` 输出泵的结束标记。
+    ///
+    /// **与上面的 `VerifyDone(Result<..>)` 是两回事**：那个是「全库校验结束」，
+    /// 这个是「MAME 自己的校验输出读完」。原先两者都叫 `AuditDone`，靠后定义
+    /// 那个把前面的**整个覆盖**了（E0428），全库校验结束的事件因此消失。
     #[allow(dead_code)]
-    VerifyDone,
+    VerifyOutputDone,
     MameExited { game: String, code: Option<i32> },
     Log(String),
 }

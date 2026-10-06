@@ -73,18 +73,18 @@ pub enum CacheError {
 pub struct CacheData {
     pub mame_version: String,
     pub library: GameLibrary,
-    /// false = cached right after -listxml, before the audit ran
+    /// false = cached right after -listxml, before the verify ran
     #[serde(default)]
-    pub audited: bool,
+    pub verified: bool,
 }
 
 pub fn save(path: &Path, data: &CacheData) -> Result<(), CacheError> {
-    save_library(path, &data.mame_version, &data.library, data.audited)
+    save_library(path, &data.mame_version, &data.library, data.verified)
 }
 
 /// 直接从一份**借用**的游戏库写缓存。
 ///
-/// `save()` 要求传入 owned 的 `CacheData`，那会迫使每次审计刷新都先
+/// `save()` 要求传入 owned 的 `CacheData`，那会迫使每次校验刷新都先
 /// 深拷贝整个游戏库；这个版本是就地序列化的。两者产出的布局逐字节
 /// 一致（同一个结构、同样的字段顺序）。
 ///
@@ -93,8 +93,8 @@ pub fn save(path: &Path, data: &CacheData) -> Result<(), CacheError> {
 /// （README P2-15）。
 ///
 /// **写必须带缓冲，这不是可有可无的优化。** 冷启动会把这个文件写
-/// 两次——审计前一次（`audited = false`），审计后一次
-/// （`audited = true`，见 `background.rs::finish_boot`）——所以每换
+/// 两次——校验前一次（`verified = false`），校验后一次
+/// （`verified = true`，见 `background.rs::finish_boot`）——所以每换
 /// 一次 MAME 版本这个代价都要付两遍。直接往 `File` 上序列化在这台
 /// 机器上是每次约 50 秒（49 676 个机种，写出 58 MB）；走 1 MiB
 /// 的 `BufWriter` 是约 0.12 秒。别把它"简化"回裸 `File`：这种退化
@@ -108,16 +108,16 @@ pub fn save_library(
     path: &Path,
     mame_version: &str,
     library: &GameLibrary,
-    audited: bool,
+    verified: bool,
 ) -> Result<(), CacheError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     dlog!(
-        "缓存: 开始写入 {}（{} 台机种, audited={}）",
+        "缓存: 开始写入 {}（{} 台机种, verified={}）",
         path.display(),
         library.len(),
-        audited
+        verified
     );
     let write_t0 = std::time::Instant::now();
     let tmp = path.with_extension("tmp");
@@ -141,13 +141,13 @@ pub fn save_library(
         #[cfg(test)]
         let f = write_probe::CountingFile(f);
         let mut f = drain_buffer(io::BufWriter::with_capacity(WRITE_BUFFER_BYTES, f), |w| {
-            write_payload(w, mame_version, library, audited)
+            write_payload(w, mame_version, library, verified)
         })?;
         f.flush()?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path)?;
-    // 耗时值得记：这个文件在冷启动要被写两次（审计前后各一次），而
+    // 耗时值得记：这个文件在冷启动要被写两次（校验前后各一次），而
     // 去掉 BufWriter 会让它从 0.12 秒变成约 50 秒——日志里没有这个
     // 数字的话，那次退化只能靠用户投诉才发现。
     dlog!(
@@ -171,13 +171,13 @@ fn write_payload<W: Write>(
     w: &mut W,
     mame_version: &str,
     library: &GameLibrary,
-    audited: bool,
+    verified: bool,
 ) -> Result<(), CacheError> {
     #[derive(Serialize)]
     struct Borrowed<'a> {
         mame_version: &'a str,
         library: &'a GameLibrary,
-        audited: bool,
+        verified: bool,
     }
     w.write_all(MAGIC)?;
     w.write_all(&FORMAT_VERSION.to_le_bytes())?;
@@ -186,7 +186,7 @@ fn write_payload<W: Write>(
         &Borrowed {
             mame_version,
             library,
-            audited,
+            verified,
         },
     )
     .map_err(|e| CacheError::Corrupt(e.to_string()))?;
@@ -259,10 +259,10 @@ pub fn load(path: &Path, current_mame_version: &str) -> Result<CacheData, CacheE
     // 都返回 None，半个界面会变成死的
     data.library.rebuild_indexes();
     dlog!(
-        "缓存: 命中 {}（{} 台机种, audited={}, {} 字节, 读+反序列化耗时 {:?}）",
+        "缓存: 命中 {}（{} 台机种, verified={}, {} 字节, 读+反序列化耗时 {:?}）",
         path.display(),
         data.library.len(),
-        data.audited,
+        data.verified,
         bytes.len(),
         load_t0.elapsed()
     );
@@ -334,7 +334,7 @@ mod tests {
         let data = CacheData {
             mame_version: "0.261".into(),
             library: lib,
-            audited: true,
+            verified: true,
         };
         save(&p, &data).unwrap();
         // 热启动读回来必须带着可用的索引
@@ -351,7 +351,7 @@ mod tests {
     /// 只是慢得灾难性，因为 bincode 对每个字符串和长度前缀各发一次
     /// `write`。参考机实测（49 676 个机种，写出 58 MB）：不带缓冲约
     /// 50 秒，走 1 MiB 缓冲约 0.12 秒，而冷启动要付**两次**，因为
-    /// `finish_boot` 在审计前后各写一次缓存。
+    /// `finish_boot` 在校验前后各写一次缓存。
     ///
     /// 故意**不**断言的：墙钟时间上限。它是最容易想到的手段，在这里
     /// 却没用——0.12 秒和 50 秒的差距只在完整的 5 万机种库上才显现，
@@ -458,7 +458,7 @@ mod tests {
 
         // 而且它产出的文件仍然能读回来，索引也重建好了
         let back = load(&p, "0.261").unwrap();
-        assert!(back.audited);
+        assert!(back.verified);
         assert!(back.library.get_idx("machine0000").is_some());
         let _ = std::fs::remove_file(&p);
     }

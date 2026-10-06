@@ -40,7 +40,7 @@ pub struct RomInfo {
     pub merge: String,
     pub region: String,
     pub status: String,
-    /// audit result (nodump counts as available)
+    /// verify result (nodump counts as available)
     #[serde(default)]
     pub available: bool,
 }
@@ -221,7 +221,7 @@ pub struct GameMeta {
     pub lc_mftr: String,
     #[serde(default)]
     pub icondata: Vec<u8>,
-    /// overall audit: GAME_MISSING/COMPLETE/INCOMPLETE
+    /// overall verify: GAME_MISSING/COMPLETE/INCOMPLETE
     #[serde(default)]
     pub available: u8,
 }

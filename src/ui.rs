@@ -1,5 +1,5 @@
 //! All egui drawing: menu tree, dockable tab area (egui_dock), folder dock,
-//! status bar with parse/audit progress (origin: mainwindow.ui + QDockWidget tabify).
+//! status bar with parse/verify progress (origin: mainwindow.ui + QDockWidget tabify).
 
 use crate::app::{MameApp, PlayKind, ListMode, COL_LAST, COLUMN_TITLES};
 use crate::icons;
@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 /// `done / total` 的百分比，**值域 0..100**。
 ///
 /// 别写成 `done as f32 / total as f32`（那是 0..1）再直接 `{:.0}%` 打印——
-/// 审计进度就踩过这个：44000 个单元扫到一半显示的是 "0%"，看着像卡死。
+/// 校验进度就踩过这个：44000 个单元扫到一半显示的是 "0%"，看着像卡死。
 /// `total == 0` 返回 0，调用方自己判断要不要显示。
 pub(crate) fn percent(done: usize, total: usize) -> f32 {
     if total == 0 {
@@ -20,12 +20,12 @@ pub(crate) fn percent(done: usize, total: usize) -> f32 {
     (done as f32 / total as f32 * 100.0).clamp(0.0, 100.0)
 }
 
-/// 解析审计"枚举中"阶段的标签，认出 `core::audit::AuditHandle::
+/// 解析校验"枚举中"阶段的标签，认出 `core::verify::VerifyHandle::
 /// set_enumerating` 写的 `enum 2/5 dirs, 13824 units`。
 ///
 /// 返回 `(已扫目录数, 目录总数, 已收单元数)`，任何一段认不出来就是
 /// `None` —— 调用方据此退回纯文案。**认不出必须安全失败**：这个标签走
-/// 的是一把 `Mutex<String>`，格式万一变了，状态栏该退化成"正在审计"，
+/// 的是一把 `Mutex<String>`，格式万一变了，状态栏该退化成"正在校验"，
 /// 而不是把一段原始英文 `enum 2/5 dirs` 甩给用户看。
 pub(crate) fn parse_enumerating(cur: &str) -> (Option<usize>, Option<usize>, Option<usize>) {
     // `?` 只能用在返回 Option 的函数里，所以内部先算一个 Option，
@@ -291,8 +291,8 @@ impl eframe::App for MameApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if self.lib_status != crate::app::LibStatus::Ready
-            || self.boot_auditing
-            || self.audit_handle.is_some()
+            || self.boot_verifying
+            || self.verify_handle.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
@@ -367,7 +367,7 @@ impl MameApp {
         if self.frame_count % 200 == 0 {
             // 静默版本：这是防崩溃丢设置的兜底定时器，不是用户动作，
             // 每次记一条"保存 N 条"只会稀释 boot.log 里真正值得看的东西
-            // （一次审计几十分钟，期间日志里就只剩它了）。
+            // （一次校验几十分钟，期间日志里就只剩它了）。
             self.save_settings_quiet();
         }
     }
@@ -458,7 +458,7 @@ impl MameApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    self.audit_submenu(ui);
+                    self.verify_submenu(ui);
                     ui.separator();
                     let exit = self.tr("Exit");
                     if ui.button(exit).clicked() {
@@ -616,16 +616,16 @@ impl MameApp {
 
     /// 文件菜单里的 "导出列表" 二级菜单。
     ///
-    /// **这里只剩导出项**：单游戏审计 / 审计全部 ROM / 审计全部样本三个按钮
-    /// 已按用户要求删掉——「刷新档案」(F5) 本来就做的是 re-audit + re-init，
+    /// **这里只剩导出项**：单游戏校验 / 校验全部 ROM / 校验全部样本三个按钮
+    /// 已按用户要求删掉——「刷新档案」(F5) 本来就做的是 re-verify + re-init，
     /// 重复入口只会让人以为这是两件事。
-    pub fn audit_submenu(&mut self, ui: &mut egui::Ui) {
+    pub fn verify_submenu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button(self.tr("Export List"), |ui| {
             for (key, method) in [
-                ("Export All Set Issues...", crate::core::audit::AuditMethod::ExportAll),
-                ("Export Incomplete Sets Only...", crate::core::audit::AuditMethod::ExportIncomplete),
-                ("Export Completely Missing Sets Only...", crate::core::audit::AuditMethod::ExportMissing),
-                ("Export All Sets...", crate::core::audit::AuditMethod::ExportComplete),
+                ("Export All Set Issues...", crate::core::verify::VerifyMethod::ExportAll),
+                ("Export Incomplete Sets Only...", crate::core::verify::VerifyMethod::ExportIncomplete),
+                ("Export Completely Missing Sets Only...", crate::core::verify::VerifyMethod::ExportMissing),
+                ("Export All Sets...", crate::core::verify::VerifyMethod::ExportComplete),
             ] {
                 let text = self.tr(key);
                 if ui.button(text).clicked() {
@@ -841,7 +841,7 @@ impl MameApp {
 
             ui.separator();
 
-            // origin actionRefresh: re-audit + re-init. F5 is bound to the same
+            // origin actionRefresh: re-verify + re-init. F5 is bound to the same
             // action in `update`, so the shortcut keeps working from anywhere.
             let r = self.tr("Refresh Database");
             if ui.button(format!("{r}    (F5)")).clicked() {
@@ -916,7 +916,7 @@ impl MameApp {
                 if ui.add_enabled(self.has_game(), egui::Button::new(play)).clicked() {
                     self.launch(RunMode::Normal, vec![]);
                 }
-                // 原来这里还有一项「审计」调`refresh_all()`，与文件菜单的
+                // 原来这里还有一项「校验」调`refresh_all()`，与文件菜单的
                 // 「刷新档案」完全同源（同一个动作、同一份 F5 快捷键），
                 // 用户要求删掉。
             });
@@ -1346,36 +1346,36 @@ impl MameApp {
         parsed
     }
 
-    /// 该不该让「审计 Rom」可点。
+    /// 该不该让「校验 Rom」可点。
     ///
-    /// 审计要占着库写 `available`，所以两个正在跑的审计都得让位：一个是它自己
-    /// （`game_audit`），一个是全库那个（`audit_handle`）——两者同时跑出来的
+    /// 校验要占着库写 `available`，所以两个正在跑的校验都得让位：一个是它自己
+    /// （`game_verify`），一个是全库那个（`verify_handle`）——两者同时跑出来的
     /// 结论是交集，谁最后落盘谁赢，用户看到的是"刚审完就又变了"。
     ///
-    /// **当前没有菜单入口**（2026-10-05 用户要求：右键与文件菜单里的「审计
+    /// **当前没有菜单入口**（2026-10-05 用户要求：右键与文件菜单里的「校验
     /// Rom」都删掉，全走「刷新档案」F5）。逻辑留着：它仍在
-    /// `start_game_audit` 内部做前置判断，且将来要恢复入口时不必重写。
+    /// `start_game_verify` 内部做前置判断，且将来要恢复入口时不必重写。
     #[allow(dead_code)]
-    pub fn can_audit(&self) -> bool {
-        self.game_audit.is_none() && self.audit_handle.is_none()
+    pub fn can_verify(&self) -> bool {
+        self.game_verify.is_none() && self.verify_handle.is_none()
     }
 
-    /// 只审计当前选中的这一款游戏。
+    /// 只校验当前选中的这一款游戏。
     ///
     /// 范围是它自己 + 依赖的主 ROM 文件 + BIOS + 设备 + 样本 + CHD，见
-    /// `core::audit::audit_scope`。**不**重扫全库，所以通常一秒内结束
-    /// （`audit_cache` 记着每个包的内容，包没变就只stat 不重开）。
+    /// `core::verify::verify_scope`。**不**重扫全库，所以通常一秒内结束
+    /// （`verify_cache` 记着每个包的内容，包没变就只stat 不重开）。
     ///
-    /// 旧版 1.8.2 的 `actionAudit` 是把 `mame -verifyroms <game>` 的 stdout
-    /// 显示在一个文本框里；这里改成读审计缓存的同一份结论（`audit_game`），
+    /// 旧版 1.8.2 的 `actionVerify` 是把 `mame -verifyroms <game>` 的 stdout
+    /// 显示在一个文本框里；这里改成读校验缓存的同一份结论（`verify_game`），
     /// 因此比 `-verifyroms` 快得多，而且拥有/缺失是结构化的、能直接显示状态色。
     ///
-    /// **当前没有菜单入口**（同上，`can_audit` 的注释）。整套单游戏审计是
-    /// 有价值的实现——`core::audit::find_units_for` 的提速就是为它做的
+    /// **当前没有菜单入口**（同上，`can_verify` 的注释）。整套单游戏校验是
+    /// 有价值的实现——`core::verify::find_units_for` 的提速就是为它做的
     /// （5.8s → 0.002s）——所以**不删**，留着备用。
     #[allow(dead_code)]
-    pub fn start_game_audit(&mut self) {
-        if !self.can_audit() {
+    pub fn start_game_verify(&mut self) {
+        if !self.can_verify() {
             return;
         }
         let game = self.current_game.clone();
@@ -1383,11 +1383,11 @@ impl MameApp {
             return;
         }
         let Some(lib) = self.lib.clone() else { return };
-        let handle = Arc::new(crate::core::audit::AuditHandle::new());
-        self.game_audit = Some(handle.clone());
-        self.game_audit_target = game.clone();
-        self.log(format!("auditing rom: {game}"));
-        crate::background::run_game_audit(
+        let handle = Arc::new(crate::core::verify::VerifyHandle::new());
+        self.game_verify = Some(handle.clone());
+        self.game_verify_target = game.clone();
+        self.log(format!("verifying rom: {game}"));
+        crate::background::run_game_verify(
             lib,
             self.opts
                 .clone()
@@ -1401,12 +1401,12 @@ impl MameApp {
 
     /// Rom 信息面板（View ▸ 自定义信息栏 ▸ RomInfo）。
     ///
-    /// 数据来自**审计缓存**：`gamelist.cache` 里的每条 `RomInfo::available`。
+    /// 数据来自**校验缓存**：`gamelist.cache` 里的每条 `RomInfo::available`。
     /// 所以切游戏立刻就有内容，不需要碰磁盘、不需要等 dat 文件。
     ///
     /// 整份视图按游戏名缓存（`rom_views`）：egui 每帧都调这个函数，而
-    /// `rominfo::view_of` 要扫库（父集链 + 设备 + 样本）。审计结束时清空
-    /// 缓存（`lib_audited` 的写入点都在那儿）。
+    /// `rominfo::view_of` 要扫库（父集链 + 设备 + 样本）。校验结束时清空
+    /// 缓存（`lib_verified` 的写入点都在那儿）。
     pub fn rom_info_content(&mut self, ui: &mut egui::Ui, game: &str) {
         if game.is_empty() || self.lib.is_none() {
             ui.weak(self.tr("Select a game to see its roms."));
@@ -1418,17 +1418,17 @@ impl MameApp {
                 let guard = lib.lock().unwrap();
                 // 缓存容量：用户快速点过 50 款游戏就该有 50 份视图，每份
                 // 几 KB。上限比 dat 缓存小，因为一个游戏一份、且切回来看时
-                // 大概率已经审计完了（要最新的可以按 F5 或右键重审）。
+                // 大概率已经校验完了（要最新的可以按 F5 或右键重审）。
                 //
                 // 超限就**整体清空**，不做逐出记账：一个游戏一份、几 KB，
-                // 64 份还超了说明用户在一轮审计前点了 64 款以上——而那轮审计
+                // 64 份还超了说明用户在一轮校验前点了 64 款以上——而那轮校验
                 // 一结束本来就要清空一次。为这点流量维护 LRU 链表不值得，
                 // 而且逐出写错的表现是"面板偶发空白"，很难查。
                 const VIEW_CACHE_CAP: usize = 64;
                 if self.rom_views.len() >= VIEW_CACHE_CAP {
                     self.rom_views.clear();
                 }
-                crate::core::rominfo::view_of(&guard, game, self.lib_audited)
+                crate::core::rominfo::view_of(&guard, game, self.lib_verified)
             };
             self.rom_views.insert(game.to_string(), view);
         }
@@ -1444,7 +1444,7 @@ impl MameApp {
         // the lookup key, the cache key and the renderer in one index space.
         let dock = crate::core::dat::text_dock(tab);
         let game = self.current_game.clone();
-        // Rom 信息面板**不走外部 dat**：它要的是审计结果，而审计结果躺在
+        // Rom 信息面板**不走外部 dat**：它要的是校验结果，而校验结果躺在
         // 游戏库里（`RomInfo::available`，随 `gamelist.cache` 落盘）。所以在
         // `request_dat` 之前就分出去——否则 `dock_file_option(DOCK_ROMINFO)`
         // 返回 `None`，面板会一直等一个永远不会来的文件。
@@ -1635,14 +1635,14 @@ impl MameApp {
                     if !self.running.is_empty() {
                         ui.colored_label(icons::GREEN, "▶ MAME");
                     }
-                    let (done, total, cur) = if let Some(h) = &self.audit_handle {
+                    let (done, total, cur) = if let Some(h) = &self.verify_handle {
                         h.snapshot()
-                    } else if self.boot_auditing {
-                        self.audit_stage.clone()
+                    } else if self.boot_verifying {
+                        self.verify_stage.clone()
                     } else {
                         (0, 0, String::new())
                     };
-                    // Audit progress: text only. The bar that used to sit here
+                    // Verify progress: text only. The bar that used to sit here
                     // was redundant — `{pct:.0}%` already says the same thing in
                     // the same amount of space. The counts are shown as well:
                     // on a cold first scan the percentage crawls (a 44 k-set
@@ -1653,39 +1653,52 @@ impl MameApp {
                         let pct = percent(done, total);
                         ui.weak(format!(
                             "{} {pct:.0}% ({done}/{total})",
-                            self.tr("Auditing")
+                            self.tr("Verifying")
                         ));
-                    } else if self.boot_auditing || self.audit_handle.is_some() {
+                    } else if self.boot_verifying || self.verify_handle.is_some() {
                         // 分母还不存在的那一段：正在枚举待扫单元
                         // （`set_total` 排在全量 `read_dir` 之后，见
-                        // `core/audit.rs`）。这段过去只打"正在审计"四个
+                        // `core/verify.rs`）。这段过去只打"正在校验"四个
                         // 字，在冷盘上十几秒到几十秒看起来像卡死。
                         // `cur` 形如 `enum 2/5 dirs, 13824 units`。
+                        //
+                        // **枚举阶段只说"正在枚举"，不前缀"正在校验"**
+                        // （用户 2026-06 要求）：枚举是校验的第一阶段，不是
+                        // 校验本身。前面挂个"正在校验"会让用户以为校验已经
+                        // 开始、百分比却始终不出来。**并且一定要带上已读取的
+                        // 数量** —— 那才是"它在动"的证据。
                         let (dirs_done, dirs_total, units) = parse_enumerating(&cur);
-                        // 目录数已知就报"第几个/共几个 + 已收单元"，
-                        // 认不出（空串、格式漂移）就退回纯文案。
                         let label = match (dirs_done, dirs_total, units) {
+                            // 目录数已知：`正在枚举 2/5 个目录 · 13824 个包`
                             (Some(d), Some(t), Some(u)) if t > 0 => format!(
-                                "{} {} {d}/{t} · {u}",
-                                self.tr("Auditing"),
-                                self.tr("scanning"),
+                                "{} · {}",
+                                self.tr("scanning {d}/{t}")
+                                    .replace("{d}", &d.to_string())
+                                    .replace("{t}", &t.to_string()),
+                                self.tr("{} archives").replace("{}", &u.to_string()),
                             ),
-                            _ => self.tr("Auditing"),
+                            // 只认出单元数（目录总数为 0 的退化情况）
+                            (_, _, Some(u)) => {
+                                self.tr("{} archives").replace("{}", &u.to_string())
+                            }
+                            // 认不出（空串、格式漂移）：宁可退回纯文案，
+                            // 也不把原始英文标签甩给用户
+                            _ => self.tr("scanning"),
                         };
                         ui.weak(label);
                     }
-                    // No cancel affordance: the audit runs in the background and
+                    // No cancel affordance: the verify runs in the background and
                     // is not something the user should have to babysit. It is
-                    // also not safe to abandon halfway — `AuditDone` is what
+                    // also not safe to abandon halfway — `VerifyDone` is what
                     // persists `audit_cache.bin`, so cancelling meant repeating
-                    // the whole first scan next boot. `AuditHandle::cancel` is
+                    // the whole first scan next boot. `VerifyHandle::cancel` is
                     // kept for the headless examples, which do want a stop.
                     if self.lib_status == crate::app::LibStatus::Loading {
                         let (done, total) = self.lib_progress;
                         if total > 0 {
                             // 阶段二：分母是收输出时数出来的机种总数，真百分比。
                             // 封顶 99% —— 100% 留给"加载完成"，否则解析完还要等
-                            // 审计，进度条会先顶到头再纹丝不动
+                            // 校验，进度条会先顶到头再纹丝不动
                             let pct = percent(done, total).min(99.0);
                             ui.weak(format!(
                                 "{} {pct:.0}% ({done}/{total})",
@@ -1782,10 +1795,10 @@ mod tests {
 
     /// `parse_enumerating` 必须认出 `set_enumerating` 写的格式。
     ///
-    /// 两侧是对偶的：`core/audit.rs` 改格式而这里没跟上，状态栏就会
-    /// 静默退化成"正在审计"（这正是它认不出时的行为，不报错）。
+    /// 两侧是对偶的：`core/verify.rs` 改格式而这里没跟上，状态栏就会
+    /// 静默退化成"正在校验"（这正是它认不出时的行为，不报错）。
     #[test]
-    fn parse_enumerating_reads_the_audit_label() {
+    fn parse_enumerating_reads_the_verify_label() {
         let (d, t, u) = parse_enumerating("enum 2/5 dirs, 13824 units");
         assert_eq!(d, Some(2));
         assert_eq!(t, Some(5));

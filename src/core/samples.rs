@@ -1,4 +1,4 @@
-//! 样本集（sample set）的定位与审计。
+//! 样本集（sample set）的定位与校验。
 //!
 //! # 为什么需要这个模块
 //!
@@ -42,7 +42,7 @@ use crate::core::rominfo::{RomState, SampleRow};
 // `GameMeta::samples` 里也是基名，两边同形态直接比。曾在这里给样本名拼 `.wav`
 // 去查 Set，于是永远匹配不上、`have` 恒 0、整个 Samples 段全变"缺失"。
 
-/// 某个样本集的审计结果：一个包里有哪些采样文件名。
+/// 某个样本集的校验结果：一个包里有哪些采样文件名。
 ///
 /// 用 `HashSet` 是因为**同一个包被上千台游戏共用**（`genpin` 被1438 台
 /// pinball 游戏引用），每次都比对前先构造一次 Set。
@@ -58,11 +58,11 @@ pub type SampleSet = HashSet<String>;
 /// | 归档 | `dir/{name}.7z` | 部分整合包
 /// | 散目录 | `dir/{name}/` | 0.289 那套（`samples/` 空，只有 `floppy/*.wav` 散装）
 ///
-/// 三候选口径与 `audit::find_units_for`（按名字定位 rom 归档）**故意一致**：
+/// 三候选口径与 `verify::find_units_for`（按名字定位 rom 归档）**故意一致**：
 /// 那已经是本项目验证过的"一个名字三个去处"惯例，抄它比另立一套好。
 ///
 /// 只查 `dirs` 里的目录，不做 `read_dir` 全量枚举——样本集总共 76 个包，
-/// 按名字直接stat 就够（这也是 `find_units_for` 把单游戏审计从 11s 降到
+/// 按名字直接stat 就够（这也是 `find_units_for` 把单游戏校验从 11s 降到
 /// 0.002s 的原因）。
 pub fn find_sample_archive(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     if name.is_empty() {
@@ -121,7 +121,7 @@ pub fn list_have(archive_or_dir: &Path) -> SampleSet {
     out
 }
 
-/// 审计一台机种的样本集，产出面板要显示的那一行。
+/// 校验一台机种的样本集，产出面板要显示的那一行。
 ///
 /// **只判"包在不在"**（2026-10-06 用户要求）：`{samplepath}/{sampleof}.zip`
 /// 有 → `拥有`，没有 → `未拥有`。**不显示图标、不显示 `9/9` 数量。**
@@ -131,11 +131,11 @@ pub fn list_have(archive_or_dir: &Path) -> SampleSet {
 /// 引用），每台只要其中几个文件，`18/18` 那个分母是这台机器的、分子是整包的，
 /// 混在一起并不说明任何事。用户真正要回答的是"这个游戏要的采样包我下了没"。
 ///
-/// **`Unknown` 只在没审计时出现**（`audited=false`）。包找不到现在报
+/// **`Unknown` 只在没校验时出现**（`verified=false`）。包找不到现在报
 /// `Missing`（红）而不是 `Unknown`（灰）——用户明确说"红色，缺失"。
 /// 之前的理由是"用户可能压根没下采样包，报缺失会误导"，但既然显示的是
 /// "这个包在不在"，那不在就是不在，红色是准确的。
-pub fn audit_game_sample(g: &GameMeta, dirs: &[PathBuf], audited: bool) -> Option<SampleRow> {
+pub fn verify_game_sample(g: &GameMeta, dirs: &[PathBuf], verified: bool) -> Option<SampleRow> {
     if g.sampleof.is_empty() || g.samples.is_empty() {
         return None;
     }
@@ -145,7 +145,7 @@ pub fn audit_game_sample(g: &GameMeta, dirs: &[PathBuf], audited: bool) -> Optio
         return None;
     }
     let present = find_sample_archive(dirs, &g.sampleof).is_some();
-    let state = if !audited {
+    let state = if !verified {
         RomState::Unknown
     } else if present {
         RomState::Good
@@ -222,8 +222,8 @@ mod tests {
     /// 面板上不该出现"样本: -"这种噪音。
     #[test]
     fn a_game_without_samples_produces_no_row() {
-        assert!(audit_game_sample(&meta_with("x", "", &[]), &[], true).is_none());
-        assert!(audit_game_sample(&meta_with("x", "genpin", &[]), &[], true).is_none());
+        assert!(verify_game_sample(&meta_with("x", "", &[]), &[], true).is_none());
+        assert!(verify_game_sample(&meta_with("x", "genpin", &[]), &[], true).is_none());
     }
 
     /// `sampleof` 指向自己的机种（实测 61 个）不算样本集。
@@ -231,7 +231,7 @@ mod tests {
     fn a_self_referencing_sampleof_is_not_a_sample_set() {
         let g = meta_with("3bagfull", "3bagfull", &["a", "b"]);
         assert!(
-            audit_game_sample(&g, &[], true).is_none(),
+            verify_game_sample(&g, &[], true).is_none(),
             "自己不是自己的样本集"
         );
     }
@@ -244,17 +244,17 @@ mod tests {
     #[test]
     fn a_missing_archive_is_reported_as_not_owned() {
         let g = meta_with("rctycn", "genpin", &["bumper", "chime1"]);
-        let row = audit_game_sample(&g, &[PathBuf::from(r"Z://definitely//not//here")], true)
+        let row = verify_game_sample(&g, &[PathBuf::from(r"Z://definitely//not//here")], true)
             .expect("仍要出行，只是状态是未拥有");
         assert_eq!(row.name, "genpin");
         assert_eq!(row.state, RomState::Missing, "包不在 = 未拥有");
     }
 
-    /// 没审计时一律 Unknown，不能报"拥有"——那是骗人。
+    /// 没校验时一律 Unknown，不能报"拥有"——那是骗人。
     #[test]
-    fn unaudited_games_report_unknown() {
+    fn unverified_games_report_unknown() {
         let g = meta_with("rctycn", "genpin", &["a"]);
-        let row = audit_game_sample(&g, &[], false).expect("出行");
+        let row = verify_game_sample(&g, &[], false).expect("出行");
         assert_eq!(row.state, RomState::Unknown);
     }
 
@@ -284,7 +284,7 @@ mod tests {
         // 本机要 a / b / zz 三个 —— zz 不在包里，但**照样报拥有**：
         // 样本集是共享包，逐个比对算出来的分母没有意义。
         let g = meta_with("rctycn", "genpin", &["a", "b", "zz"]);
-        let row = audit_game_sample(&g, &[dir.clone()], true).expect("出行");
+        let row = verify_game_sample(&g, &[dir.clone()], true).expect("出行");
         assert_eq!(row.name, "genpin");
         assert_eq!(row.state, RomState::Good, "zip 在就是拥有");
 
@@ -302,7 +302,7 @@ mod tests {
             std::fs::write(set.join(format!("{n}.wav")), b"x").expect("写 wav");
         }
         let g = meta_with("rctycn", "genpin", &["a", "b"]);
-        let row = audit_game_sample(&g, &[base.clone()], true).expect("出行");
+        let row = verify_game_sample(&g, &[base.clone()], true).expect("出行");
         // 散目录形态也认（0.289 那套是纯散装，`samples/{name}/`）
         assert_eq!(row.state, RomState::Good, "散目录形态要能认出来");
         let _ = std::fs::remove_dir_all(&base);
@@ -344,11 +344,11 @@ mod tests {
         set_sample_dirs(Vec::new());
     }
 
-    /// 全局目录表驱动的审计：设进去就能查到，查不到就是空表。
+    /// 全局目录表驱动的校验：设进去就能查到，查不到就是空表。
     /// 这条正是"热启动 Samples 段恒灰"的形状——`sample_dirs()` 返回空表时，
     /// 有样本的游戏也只能是 Unknown。
     #[test]
-    fn the_global_table_drives_the_audit() {
+    fn the_global_table_drives_the_verify() {
         let dir = std::env::temp_dir().join("mvui_samples_global");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
@@ -356,7 +356,7 @@ mod tests {
 
         let g = meta_with("rctycn", "genpin", &["a", "b"]);
         set_sample_dirs(vec![dir.clone()]);
-        let row = audit_game_sample(&g, &sample_dirs(), true).expect("出行");
+        let row = verify_game_sample(&g, &sample_dirs(), true).expect("出行");
         assert_eq!(row.name, "genpin");
         assert_eq!(
             row.state,
@@ -367,7 +367,7 @@ mod tests {
         // 把表清空 → 立刻变成未拥有（这正是 2026-10-06 修的那个热启动 BUG
         // 的表现：`finish_boot_cached` 漏设目录 → Samples 段全灰）
         set_sample_dirs(Vec::new());
-        let row2 = audit_game_sample(&g, &sample_dirs(), true).expect("出行");
+        let row2 = verify_game_sample(&g, &sample_dirs(), true).expect("出行");
         assert_eq!(row2.state, RomState::Missing, "空表 = 找不到包 = 未拥有");
 
         let _ = std::fs::remove_dir_all(&dir);

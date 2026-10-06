@@ -336,7 +336,7 @@ impl MameApp {
     // export dialogs (origin: exportFixDat/exportGameList)
     // ------------------------------------------------------------------
 
-    pub fn pick_fixdat_target(&mut self, method: crate::core::audit::AuditMethod) {
+    pub fn pick_fixdat_target(&mut self, method: crate::core::verify::VerifyMethod) {
         let start = self
             .mame
             .as_ref()
@@ -354,8 +354,8 @@ impl MameApp {
         };
         self.exporting_method = Some(method);
         self.export_target = Some(path);
-        // audit first, export on AuditDone (origin audit(false, method, file))
-        self.start_internal_audit();
+        // verify first, export on VerifyDone (origin verify(false, method, file))
+        self.start_internal_verify();
     }
 
     pub fn pick_list_target(&mut self, have: bool) {
@@ -548,10 +548,10 @@ impl MameApp {
     /// 跑MAME 自己的 `-verifyroms` / `-verifysamples`，把 stdout 收进
     /// `verify_lines`。
     ///
-    /// **当前没有菜单入口**（2026-10-05 用户要求删掉「审计 Rom」「审计全部
-    /// Rom」「审计全部样本」）。这三条路最后都等价于「刷新档案」(F5) 的
+    /// **当前没有菜单入口**（2026-10-05 用户要求删掉「校验 Rom」「校验全部
+    /// Rom」「校验全部样本」）。这三条路最后都等价于「刷新档案」(F5) 的
     /// `refresh_all`，留两个入口只会让人以为是两件事。
-    /// 代码留着：要接回 MAME 原生校验输出（比审计缓存更权威）时直接启用。
+    /// 代码留着：要接回 MAME 原生校验输出（比校验缓存更权威）时直接启用。
     #[allow(dead_code)]
     pub fn verify(&mut self, current_only: bool, samples: bool) {
         let Some(mame) = self.mame.clone() else { return };
@@ -561,7 +561,7 @@ impl MameApp {
         }
         self.verify_lines.clear();
         self.show_verify = true;
-        crate::background::run_verify(mame, args, self.events_tx.clone(), self.ctx());
+        crate::background::run_verify_output_pump(mame, args, self.events_tx.clone(), self.ctx());
     }
 
     /// Hand a URL to the system default browser. `rundll32 url.dll,FileProtocolHandler`
@@ -595,7 +595,7 @@ impl MameApp {
         }
         // origin: MameDat::getScreenshot recurses into `cloneof` until a picture is
         // found, so the whole clone chain is the fallback list — not `romof`, which
-        // is what the audit uses. We used to pass a single `cloneof` step and threw
+        // is what the verify uses. We used to pass a single `cloneof` step and threw
         // the second name away (README P3).
         let mut fallbacks: Vec<String> = Vec::new();
         if let Some(m) = self.current_meta() {
@@ -1429,10 +1429,10 @@ impl MameApp {
                             close = true;
                         }
                         ui.separator();
-                        // 原来这里还有一项「审计 Rom」调 `start_game_audit()`，
-                        // 与文件菜单的「刷新档案」(F5) 同源（都走审计），
+                        // 原来这里还有一项「校验 Rom」调 `start_game_verify()`，
+                        // 与文件菜单的「刷新档案」(F5) 同源（都走校验），
                         // 用户要求删掉。下面直接是「导出列表」。
-                        self.audit_submenu(ui);
+                        self.verify_submenu(ui);
                         ui.separator();
                         let src = self.src_properties_label();
                         if ui

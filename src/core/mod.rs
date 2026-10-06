@@ -6,7 +6,7 @@
 //!
 //! * **`core/` 不得依赖 UI。** 这里不允许出现 `egui`、`eframe`、`rfd`
 //!   这些类型——它们属于旁边的模块。正因为守住了这条线，MAME 进程
-//!   调用、rom 审计、选项链、归档访问、游戏库缓存才能在**没有窗口**
+//!   调用、rom 校验、选项链、归档访问、游戏库缓存才能在**没有窗口**
 //!   的情况下被测试。
 //! * **UI 侧可以用任何东西。** `app.rs`、`views.rs` 们通过
 //!   `core::mameproc` 调 MAME、通过 `core::dat` 读 DAT，不受限制。
@@ -18,8 +18,8 @@
 //! 依赖 UI），只能往那个 sink 里写，由 UI 决定最终落到哪。
 
 pub mod archive;
-pub mod audit;
-pub mod audit_cache;
+pub mod verify;
+pub mod verify_cache;
 pub mod cache;
 pub mod dat;
 pub mod datindex;

@@ -24,7 +24,7 @@ impl GameLibrary {
         }
     }
 
-    /// name → slot. The crc index was dropped: the audit matches a zip only
+    /// name → slot. The crc index was dropped: the verify matches a zip only
     /// against its own game + clones (origin behaviour), so a global crc table
     /// cost a full pass at every boot and bought nothing.
     pub fn rebuild_indexes(&mut self) {

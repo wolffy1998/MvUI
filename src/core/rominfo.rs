@@ -1,14 +1,14 @@
 //! Rom 信息面板的数据聚合：把「一个游戏 + 它依赖的一切」摊平成可展示的分段。
 //!
-//! **这个模块不读磁盘、不做审计。** 它只回答一个问题：给定一个游戏库和
+//! **这个模块不读磁盘、不做校验。** 它只回答一个问题：给定一个游戏库和
 //! 一个游戏名，Rom 信息面板该显示哪些行、每行是什么状态。数据全部来自
-//! `-listxml` 解析出来的 [`GameMeta`]，加上审计已经写在每条
+//! `-listxml` 解析出来的 [`GameMeta`]，加上校验已经写在每条
 //! [`RomInfo::available`] / [`DiskInfo::available`] 上的结果。
 //!
 //! 这也是它和现有五个文本 dock 的根本区别：History / MAMEInfo /
 //! DriverInfo / Story / Command 都走 `dat_file_option` 指向的**外部 dat
 //! 文件**（`core/dat.rs`），而 Rom 信息**不依赖任何外部文档**——它要的是
-//! 审计结果，而审计结果就躺在游戏库里，跟着 `gamelist.cache` 一起落盘。
+//! 校验结果，而校验结果就躺在游戏库里，跟着 `gamelist.cache` 一起落盘。
 //! 所以这个模块只从 `&GameLibrary` 取数，一个文件都不开。
 //!
 //! 依赖的边界（用户口径）：此 ROM + 依赖的主 ROM 文件（`romof` 父集，
@@ -26,7 +26,7 @@
 //! ```
 //!
 //! [`RomRow::state`] 用**枚举**而不是 i18n key：这一层不许出现面向用户的
-//! 文案（翻译是 UI 的事），所以「很好 / 缺失 / 未审计」是三个可辨识的状态
+//! 文案（翻译是 UI 的事），所以「很好 / 缺失 / 未校验」是三个可辨识的状态
 //! 变体，UI 各自映射成词条或颜色。
 
 use crate::core::library::GameLibrary;
@@ -34,16 +34,16 @@ use crate::core::model::{GameMeta, RomInfo};
 
 /// 一行 Rom / CHD 的展示状态。
 ///
-/// 刻意区分「审计过且缺失」和「根本没审计过」：前者是红色的坏消息，后者是
-/// 灰色的未知。把两者混成一个"缺失"会让刚装好 MAME、还没跑过审计的用户
+/// 刻意区分「校验过且缺失」和「根本没校验过」：前者是红色的坏消息，后者是
+/// 灰色的未知。把两者混成一个"缺失"会让刚装好 MAME、还没跑过校验的用户
 /// 看到一屏红色，而那不是缺失，是**还没查**。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RomState {
-    /// 审计通过。
+    /// 校验通过。
     Good,
-    /// 审计过，确实没有。
+    /// 校验过，确实没有。
     Missing,
-    /// 尚未审计（`audited=false` 的冷启动、或该条目来自未走审计的路径）。
+    /// 尚未校验（`verified=false` 的冷启动、或该条目来自未走校验的路径）。
     Unknown,
     /// `nodump`：MAME 明确说这个条目没有 dump，**算作拥有**。
     ///
@@ -65,8 +65,8 @@ impl RomState {
     /// MAME 的 `status` 属性只有三个合法值（`-listxml` 的 DTD 写死了
     /// `(baddump|nodump|good)`），所以这里穷举而不是猜子串。
     ///
-    /// `nodump` / `baddump` 的判定都在**前**：审计把 nodump 一律置成
-    /// `available = true`（`core/audit.rs` 的重置循环），所以只看
+    /// `nodump` / `baddump` 的判定都在**前**：校验把 nodump 一律置成
+    /// `available = true`（`core/verify.rs` 的重置循环），所以只看
     /// `available` 会把它并进 `Good`，而它其实压根不会被校验。
     pub fn of(rom: &RomInfo) -> Self {
         if rom.is_nodump() {
@@ -85,7 +85,7 @@ impl RomState {
     /// 这个状态算不算「这套文件齐了」。
     ///
     /// nodump 与 baddump 都算**有**（文件在盘上，只是 MAME 对它的评价不好），
-    /// 缺失和未审计才算不齐。BIOS 段 / 设备段 / 样本段的整体判定都走这里，
+    /// 缺失和未校验才算不齐。BIOS 段 / 设备段 / 样本段的整体判定都走这里，
     /// 免得三处各写一遍 `all()` 而在某处忘了排除 baddump。
     pub fn counts_as_present(&self) -> bool {
         matches!(self, RomState::Good | RomState::NoDump | RomState::BadDump)
@@ -157,7 +157,7 @@ pub struct BiosRow {
     /// 该 BIOS 集自身的可用性：它自己的 roms 是否齐全。
     ///
     /// 从**这个 BIOS 自己的 `GameMeta`** 取，而不是从引用它的游戏取——一个
-    /// BIOS 集在库里是独立一条记录（`is_bios`），审计已经单独标记过它。
+    /// BIOS 集在库里是独立一条记录（`is_bios`），校验已经单独标记过它。
     pub state: RomState,
     /// 这一套底下的**实际 rom 文件**。
     ///
@@ -185,7 +185,7 @@ pub struct DeviceRow {
     pub description: String,
     /// 引用它的设备标签（`maincpu` / `igs023:sprcol`）。
     pub tag: String,
-    /// 该设备 rom 的整体状态：全齐 / 缺东西 / 没审计。
+    /// 该设备 rom 的整体状态：全齐 / 缺东西 / 没校验。
     pub state: RomState,
 }
 
@@ -233,7 +233,7 @@ pub struct SlotRow {
 pub struct SampleRow {
     /// 样本集包名（`sampleof` 的值，如 `genpin`）。
     pub name: String,
-    /// 包在 = `Good`，不在 = `Missing`，没审计 = `Unknown`。
+    /// 包在 = `Good`，不在 = `Missing`，没校验 = `Unknown`。
     pub state: RomState,
 }
 
@@ -241,7 +241,7 @@ pub struct SampleRow {
 ///
 /// 一次性算完、整份交给 UI：dock 是在**每帧**里被调用的（egui 的
 /// display-refresh-rate 渲染），在里面现查库会是 5 万台游戏的一次线性扫描
-/// ×60 次/秒。UI 侧按 `(game, audited)` 缓存这个结果。
+/// ×60 次/秒。UI 侧按 `(game, verified)` 缓存这个结果。
 #[derive(Debug, Clone, Default)]
 pub struct RomInfoView {
     /// 被查看的游戏名，面板标题用。
@@ -271,7 +271,7 @@ pub struct RomInfoView {
     /// 样本音频。
     pub samples: Vec<SampleRow>,
     /// 依赖的主 ROM 文件（`romof` 父集 / 祖父集）里那些**本机种没有**的
-    /// 条目。父集自己的 roms 已经在审计时回填进本机种的 `available` 了，
+    /// 条目。父集自己的 roms 已经在校验时回填进本机种的 `available` 了，
     /// 但**条目本身**不会出现在本机种的 `roms` 里——参考样式要看到
     /// "这个文件其实来自 pgm（父集）"，就得把父集的条目也列出来。
     ///
@@ -280,8 +280,8 @@ pub struct RomInfoView {
     /// 拆成"本体 / 继承"两个列表只会让调用方自己再拼一次。
     inherited: Vec<RomRow>,
 
-    /// 全库是否审计过。为 false 时所有缺失都只是"未知"。
-    pub audited: bool,
+    /// 全库是否校验过。为 false 时所有缺失都只是"未知"。
+    pub verified: bool,
 }
 
 impl Default for RomState {
@@ -299,9 +299,9 @@ impl RomInfoView {
         self.roms.iter().filter(|r| r.state == RomState::Missing).count()
     }
 
-    /// 面板是否该显示"去审计"的提示：没审计过，或者确实缺东西。
-    pub fn needs_audit_hint(&self) -> bool {
-        !self.audited || self.missing_count() > 0
+    /// 面板是否该显示"去校验"的提示：没校验过，或者确实缺东西。
+    pub fn needs_verify_hint(&self) -> bool {
+        !self.verified || self.missing_count() > 0
     }
 
     /// 全空的判断：连一段内容都没有（既无 rom 也无 chd）。
@@ -438,12 +438,12 @@ fn device_name_of(d: &crate::core::model::DeviceInfo) -> String {
 
 /// 引用设备行的状态：设备机种自己的 roms 全齐（或本来就没有 rom）即
 /// "全部获得"。
-fn device_state(dev: Option<&GameMeta>, audited: bool) -> RomState {
+fn device_state(dev: Option<&GameMeta>, verified: bool) -> RomState {
     let Some(d) = dev else {
         // 设备机种不在库里（裁剪过的 dat）——仍要列出来，标成未知
         return RomState::Unknown;
     };
-    if !audited {
+    if !verified {
         RomState::Unknown
     } else if d.roms.is_empty() || d.roms.iter().all(|r| RomState::of(r).counts_as_present()) {
         // 没有 rom 的设备（纯外部设备）不算缺失
@@ -463,7 +463,7 @@ fn device_state(dev: Option<&GameMeta>, audited: bool) -> RomState {
 fn device_rom_rows(
     lib: &GameLibrary,
     names: &[(String, String)],
-    audited: bool,
+    verified: bool,
 ) -> Vec<RomRow> {
     let mut out: Vec<RomRow> = Vec::new();
     for (dev_name, tag) in names {
@@ -472,7 +472,7 @@ fn device_rom_rows(
         };
         for r in &lib.games[gi].roms {
             let mut row = row_of(r, Some(dev_name.clone()), Some(tag.clone()));
-            if !audited {
+            if !verified {
                 row.state = RomState::Unknown;
             }
             out.push(row);
@@ -497,14 +497,14 @@ fn row_of(rom: &RomInfo, from: Option<String>, tag: Option<String>) -> RomRow {
 
 /// 算出一台机种的完整 Rom 信息视图。
 ///
-/// `audited` 是**全库**是否审计过（`gamelist.cache` 的 `audited` 标志，
+/// `verified` 是**全库**是否校验过（`gamelist.cache` 的 `verified` 标志，
 /// 挂在 `cache::CacheData` 上而不在 `GameLibrary` 上，所以由调用方传进来）。
-/// 为 false 时把每个缺失都降级成 [`RomState::Unknown`]：冷启动后审计还没跑，
+/// 为 false 时把每个缺失都降级成 [`RomState::Unknown`]：冷启动后校验还没跑，
 /// 此时 `available` 全是默认值，一律显示"缺失"会让用户以为自己的盘是空的。
-pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
+pub fn view_of(lib: &GameLibrary, game: &str, verified: bool) -> RomInfoView {
     let mut view = RomInfoView {
         game: game.to_string(),
-        audited,
+        verified,
         ..Default::default()
     };
     let Some(gi) = lib.get_idx(game) else { return view };
@@ -518,7 +518,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
     // 1) 本机种 CHD
     for d in &g.disks {
         let mut state = RomState::of_disk(d);
-        if !audited {
+        if !verified {
             state = RomState::Unknown;
         }
         view.disks.push(DiskRow {
@@ -533,7 +533,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
     }
 
     // 2) 依赖的主 ROM 文件：父集/祖父集里本机种**没有**的条目。
-    //    审计已经把父集里"有"的回填进本机种的 `available` 了（romof 回填
+    //    校验已经把父集里"有"的回填进本机种的 `available` 了（romof 回填
     //    那一段），所以这里只补"条目本身"——否则一个克隆集在面板里会
     //    看不到自己其实依赖了父集的文件。
     //
@@ -585,7 +585,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
                 continue;
             }
             let mut row = row_of(r, Some(parent.name.clone()), None);
-            if !audited {
+            if !verified {
                 row.state = RomState::Unknown;
             }
             view.inherited.push(row);
@@ -605,7 +605,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
         // 注意是"该套的"，不是"全部 rom"——一台机器的 rom 列表里同时躺着
         // 三套 BIOS 的文件，只看其中一套。
         let members: Vec<&RomInfo> = g.roms.iter().filter(|r| &r.bios == bname).collect();
-        let state = if !audited {
+        let state = if !verified {
             RomState::Unknown
         } else if members.is_empty() {
             // 声明了这一套却没有属于它的 rom（裁剪过的 dat）
@@ -630,7 +630,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
                 .iter()
                 .map(|r| {
                     let mut row = row_of(r, Some(g.name.clone()), Some(bname.clone()));
-                    if !audited {
+                    if !verified {
                         row.state = RomState::Unknown;
                     }
                     row
@@ -647,7 +647,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
             .filter(|r| r.bios.is_empty())
             .map(|r| {
                 let mut row = row_of(r, None, None);
-                if !audited {
+                if !verified {
                     row.state = RomState::Unknown;
                 }
                 row
@@ -667,7 +667,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
         if dev_name.is_empty() || !seen_dev.insert(dev_name.clone()) {
             continue;
         }
-        let state = device_state(lib.get(&dev_name), audited);
+        let state = device_state(lib.get(&dev_name), verified);
         view.devices.push(DeviceRow {
             name: dev_name.clone(),
             description: lib
@@ -700,7 +700,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
                 .join(","),
         });
     }
-    view.device_roms = device_rom_rows(lib, &dev_names, audited);
+    view.device_roms = device_rom_rows(lib, &dev_names, verified);
 
     // 6) 样本。**这里原来靠 `lib.get_idx(&g.sampleof)` 反查"样本集机种"** ——
     // 而 MAME 根本不把样本集输出成 `<machine>`（全量 listxml 里 `genpin`
@@ -711,7 +711,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
     // `sample_dirs()` 返回 `Vec`（内部是 `RwLock`，不能借出 `&'static`），
     // 先绑到局部再借引用，别把临时值的引用传下去。
     let sdirs = crate::core::samples::sample_dirs();
-    if let Some(row) = crate::core::samples::audit_game_sample(g, &sdirs, audited) {
+    if let Some(row) = crate::core::samples::verify_game_sample(g, &sdirs, verified) {
         view.samples.push(row);
     }
 
@@ -748,7 +748,7 @@ mod tests {
         lib
     }
 
-    /// 状态判定：`nodump` 必须排在 `available` 前面。审计把 nodump 一律置成
+    /// 状态判定：`nodump` 必须排在 `available` 前面。校验把 nodump 一律置成
     /// `available = true`，只按 `available` 判会把它并进 `Good`。
     #[test]
     fn nodump_outranks_available() {
@@ -769,14 +769,14 @@ mod tests {
     /// `baddump` 必须单独成一个状态，不能被并进 `Good`。
     ///
     /// MAME 的 `status` 只有 `good|baddump|nodump` 三值（`-listxml` 的 DTD
-    /// 写死的）。baddump 的文件**在盘上但内容是坏的**——审计会把它算成
+    /// 写死的）。baddump 的文件**在盘上但内容是坏的**——校验会把它算成
     /// `available`，所以如果只按 `available` 判，它会显示成绿色对勾，用户
     /// 以为没问题，而实际跑起来是花的。必须显示成黄色「坏 dump」。
     #[test]
     fn a_baddump_is_not_reported_as_owned() {
         let mut r = rom("bad.rom", 1, "maincpu");
         r.status = "baddump".into();
-        // 审计把 baddump 算成"文件在"（available = true）
+        // 校验把 baddump 算成"文件在"（available = true）
         r.available = true;
         assert_eq!(
             RomState::of(&r),
@@ -797,9 +797,9 @@ mod tests {
         assert!(!RomState::Unknown.counts_as_present());
     }
 
-    /// 没审计过时，缺失必须降级成 Unknown——否则冷启动后一屏红色。
+    /// 没校验过时，缺失必须降级成 Unknown——否则冷启动后一屏红色。
     #[test]
-    fn unaudited_library_reports_unknown_not_missing() {
+    fn unverified_library_reports_unknown_not_missing() {
         let mut g = meta("pacman");
         let mut r = rom("pacman.6e", 0xaaa, "maincpu");
         r.available = false;
@@ -807,10 +807,10 @@ mod tests {
         let lib = lib_with(vec![g]);
 
         let v = view_of(&lib, "pacman", false);
-        assert!(!v.audited);
+        assert!(!v.verified);
         assert_eq!(v.roms[0].state, RomState::Unknown);
-        assert_eq!(v.missing_count(), 0, "没审计不该报缺失");
-        assert!(v.needs_audit_hint(), "但要提示去审计");
+        assert_eq!(v.missing_count(), 0, "没校验不该报缺失");
+        assert!(v.needs_verify_hint(), "但要提示去校验");
     }
 
     /// 依赖的父集条目要能列出来，且不与本机种重复。

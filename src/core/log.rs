@@ -77,7 +77,7 @@ pub fn set_sink(f: fn(&str)) -> bool {
 /// 是否真的会写日志。为假时 [`debug`] 与 [`dlog!`] 都是空操作。
 ///
 /// `dlog!` 先问这个再格式化，所以两种关闭方式（没接落点、release 构建）
-/// 都**连 `format!` 的开销都省掉了**——审计循环里那些逐条调用不会拖慢
+/// 都**连 `format!` 的开销都省掉了**——校验循环里那些逐条调用不会拖慢
 /// 热路径，release 构建里它们也彻底不存在。
 pub fn has_sink() -> bool {
     ENABLED && SINK.get().is_some()
@@ -142,7 +142,7 @@ mod tests {
     /// `dlog!` 在没有落点时整句跳过，**包括 `format!` 里的表达式**。
     ///
     /// 断言的是"实参没被求值"，不是"日志没出现"——后者在测试里看不见。
-    /// 审计循环里逐单元调用 `dlog!`，一旦这条退化，release 构建就会
+    /// 校验循环里逐单元调用 `dlog!`，一旦这条退化，release 构建就会
     /// 在热路径上白算一遍 `format!`。
     #[test]
     fn dlog_does_not_evaluate_its_arguments() {

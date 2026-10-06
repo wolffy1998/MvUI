@@ -35,9 +35,9 @@ fn main() {
     match mvui::core::cache::load(&path, &version) {
         Ok(data) => {
             println!(
-                "load OK in {:.2?}: audited={} games={} cached_version={:?}",
+                "load OK in {:.2?}: verified={} games={} cached_version={:?}",
                 t.elapsed(),
-                data.audited,
+                data.verified,
                 data.library.games.len(),
                 data.mame_version
             );

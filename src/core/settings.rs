@@ -201,7 +201,7 @@ pub fn ensure_mame_binary(
 
 /// 缓存目录助手，挂在配置根目录下。
 impl GuiSettings {
-    /// `<配置根>/cache`。清单缓存、审计缓存、boot.log 都住这里。
+    /// `<配置根>/cache`。清单缓存、校验缓存、boot.log 都住这里。
     pub fn cache_dir() -> PathBuf {
         let p = GuiSettings::cfg_prefix().join("cache");
         let _ = std::fs::create_dir_all(&p);

@@ -1,10 +1,10 @@
-//! Micro-bench: is the audit IO-bound in a way that multithreading helps?
+//! Micro-bench: is the verify IO-bound in a way that multithreading helps?
 //! Same `list_archive` workload, sequential (1 thread) vs N threads, over two
 //! disjoint samples of the real rompath.
 //!
 //! Usage: cargo run --release --example par_scan_probe -- <rom-dir> [per-sample]
 //!
-//! **The answer on a spinning disk is "no", and that is why `audit.rs` is
+//! **The answer on a spinning disk is "no", and that is why `verify.rs` is
 //! sequential.** Measured here: ~52 zips/s with one thread vs ~37 zips/s with
 //! four — four readers make the head seek between them and every unit pays for
 //! it. Run this again before reintroducing parallelism, and run it against the
@@ -12,7 +12,7 @@
 //! probe is the cheap way to check rather than guessing.
 //!
 //! (It used to depend on `rayon`; that dependency was dropped from the build
-//! when the audit went sequential, so the threads here are plain `std::thread`
+//! when the verify went sequential, so the threads here are plain `std::thread`
 //! and the probe stays runnable.)
 
 use std::sync::atomic::{AtomicUsize, Ordering};

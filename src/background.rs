@@ -1,9 +1,9 @@
-//! Background job spawners (listxml+showconfig boot chain, audit, previews, dats).
-//! Long jobs never hold the library mutex while the UI renders: boot audits a
-//! local library before publishing; refresh audits a snapshot and swaps it back.
+//! Background job spawners (listxml+showconfig boot chain, verify, previews, dats).
+//! Long jobs never hold the library mutex while the UI renders: boot verifys a
+//! local library before publishing; refresh verifys a snapshot and swaps it back.
 
 use crate::events::{AppEvent, ReadyPayload, SharedLib, SharedOpts};
-use crate::core::audit::{self, AuditHandle};
+use crate::core::verify::{self, VerifyHandle};
 use crate::core::cache;
 use crate::core::dat;
 use crate::core::folders;
@@ -31,13 +31,13 @@ fn panic_text(e: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// 冷启动的完整链路：读缓存 → `mame -listxml` → `mame -showconfig` → 审计。
+/// 冷启动的完整链路：读缓存 → `mame -listxml` → `mame -showconfig` → 校验。
 pub fn boot_library(mame: MameBinary, tx: Sender<AppEvent>, ctx: egui::Context) {
     thread::spawn(move || {
         // set as soon as `LibraryReady` has been sent: from that moment on the
         // UI already owns a usable library, so a later panic must not be
         // reported as a boot failure (that used to overwrite the ready state
-        // with an error and leave `AuditDone` pending forever)
+        // with an error and leave `VerifyDone` pending forever)
         let published = Arc::new(AtomicBool::new(false));
         let published_for_run = Arc::clone(&published);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -47,7 +47,7 @@ pub fn boot_library(mame: MameBinary, tx: Sender<AppEvent>, ctx: egui::Context) 
             let msg = panic_text(e.as_ref());
             if published.load(Ordering::Relaxed) {
                 let _ = tx.send(AppEvent::Log(format!("boot: {msg}")));
-                let _ = tx.send(AppEvent::AuditDone(Err(msg)));
+                let _ = tx.send(AppEvent::VerifyDone(Err(msg)));
             } else {
                 let _ = tx.send(AppEvent::LibraryReady(Err(format!("boot failed: {msg}"))));
             }
@@ -64,26 +64,26 @@ fn boot_run(mame: &MameBinary, tx: &Sender<AppEvent>, published: &Arc<AtomicBool
     // 1) cache (origin: pMameDat->load(); version mismatch → rebuild)
     dlog!("引导: 读缓存 {}", cache_path.display());
     match cache::load(&cache_path, &mame.version) {
-        Ok(data) if data.audited => {
-            dlog!("引导: 缓存命中且已审计（{} 台），跳过 listxml 与审计", data.library.len());
+        Ok(data) if data.verified => {
+            dlog!("引导: 缓存命中且已校验（{} 台），跳过 listxml 与校验", data.library.len());
             let _ = tx.send(AppEvent::Log("loaded games from cache.".into()));
-            // a fully audited cache needs neither -listxml nor a re-audit
+            // a fully verified cache needs neither -listxml nor a re-verify
             finish_boot_cached(data.library, mame, tx, published);
             dlog!("引导: 热启动完成，耗时 {:?}", boot_t0.elapsed());
             return;
         }
         Ok(data) => {
-            // -listxml result is cached but the audit never finished last time
-            // (closed mid-audit): skip the parse, just finish the audit
+            // -listxml result is cached but the verify never finished last time
+            // (closed mid-verify): skip the parse, just finish the verify
             dlog!(
-                "引导: 缓存命中但未审计（{} 台），跳过 listxml 解析，只补审计",
+                "引导: 缓存命中但未校验（{} 台），跳过 listxml 解析，只补校验",
                 data.library.len()
             );
             let _ = tx.send(AppEvent::Log(
-                "loaded games from cache, audit still pending.".into(),
+                "loaded games from cache, verify still pending.".into(),
             ));
-            finish_boot(data.library, mame, tx, published);
-            dlog!("引导: 补审计完成，耗时 {:?}", boot_t0.elapsed());
+            finish_boot(data.library, mame, tx, published, true);
+            dlog!("引导: 补校验完成，耗时 {:?}", boot_t0.elapsed());
             return;
         }
         Err(cache::CacheError::Missing) => {
@@ -155,7 +155,7 @@ fn boot_run(mame: &MameBinary, tx: &Sender<AppEvent>, published: &Arc<AtomicBool
     library.rebuild_indexes();
     library.complete_data();
 
-    finish_boot(library, mame, tx, published);
+    finish_boot(library, mame, tx, published, false);
     dlog!("引导: 冷启动完成，耗时 {:?}", boot_t0.elapsed());
 }
 
@@ -221,8 +221,8 @@ fn parse_listxml(
 /// 从已加载的选项链里取 `samplepath`，写进 `core::samples` 的全局目录表。
 ///
 /// **热启动和冷启动都必须调它。** 这正是本轮修的那个 BUG：`set_sample_dirs`
-/// 原先只写在 `finish_boot`（冷启动/补审计）里，而 `finish_boot_cached`
-/// （缓存命中且 `audited=true`——**绝大多数正常启动都走这条**）完全没有这一段。
+/// 原先只写在 `finish_boot`（冷启动/补校验）里，而 `finish_boot_cached`
+/// （缓存命中且 `verified=true`——**绝大多数正常启动都走这条**）完全没有这一段。
 /// 于是热启动时全局目录表恒为空，`find_sample_archive` 一律返回 `None`，
 /// Samples 段对**所有**游戏恒为灰色"未知"，永远不显示 `拥有 18/18`。
 /// 单独跑 `examples/samples_probe` 却能验出 `genpin 18/18 Good`——因为探针
@@ -247,14 +247,14 @@ fn publish_sample_dirs(opts: &SharedOpts) {
     );
 }
 
-/// warm start: publish options + library as-is (audit state comes from cache)
+/// warm start: publish options + library as-is (verify state comes from cache)
 fn finish_boot_cached(
     library: GameLibrary,
     mame: &MameBinary,
     tx: &Sender<AppEvent>,
     published: &Arc<AtomicBool>,
 ) {
-    dlog!("引导: 热启动路径，发布选项与游戏库（不审计）");
+    dlog!("引导: 热启动路径，发布选项与游戏库（不校验）");
     let mame_dir = mame.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let gui: HashMap<String, String> = HashMap::new();
     let is_mess = mame
@@ -286,19 +286,28 @@ fn finish_boot_cached(
         lib: Arc::new(Mutex::new(library)),
         folders: folder_cache,
         from_cache: true,
-        // 这条路径只在 `data.audited` 为真时走到（boot_run 的三分支），
-        // 所以这里一定是已审计的库
-        audited: true,
+        // 这条路径只在 `data.verified` 为真时走到（boot_run 的三分支），
+        // 所以这里一定是已校验的库
+        verified: true,
     })));
     published.store(true, Ordering::Relaxed);
 }
 
-/// cold start: options + audit + cache — all on the local (unlocked) library
+/// cold start: options + verify + cache — all on the local (unlocked) library
+///
+/// `from_cache` = 这次的游戏库是从 `gamelist.cache` 读出来的（上次校验没跑完就
+/// 关了程序）。那条路上**跳过校验前那次落盘** —— 缓存**刚读过、内容一模一样**，
+/// 再写一遍是纯浪费：`save_library` 要把 49676 台序列化一遍（实测 ~2s），
+/// 而它挡在 `LibraryReady` 之前，于是用户看到的是"重启后卡在黑屏两秒才出列表"。
+///
+/// 冷启动（`-listxml` 刚解析出来）那次落盘**必须留着**：那是把解析结果存下来，
+/// 否则中途关掉下次得重新解析 40 秒。
 fn finish_boot(
     mut library: GameLibrary,
     mame: &MameBinary,
     tx: &Sender<AppEvent>,
     published: &Arc<AtomicBool>,
+    from_cache: bool,
 ) {
     let mame_dir = mame.path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let gui: HashMap<String, String> = HashMap::new();
@@ -336,7 +345,7 @@ fn finish_boot(
         }
     };
     dlog!(
-        "引导: 审计 rompath {} 个: {}",
+        "引导: 校验 rompath {} 个: {}",
         rom_paths.len(),
         rom_paths
             .iter()
@@ -345,28 +354,32 @@ fn finish_boot(
             .join("; ")
     );
     // 样本目录（`mame.ini` 的 `samplepath`）。**与 rompath 分开取**：样本集
-    // 是独立包（`samples/{name}.zip`），不跟 rom 放一起，而且它不进审计
+    // 是独立包（`samples/{name}.zip`），不跟 rom 放一起，而且它不进校验
     // 单元——只用来算面板上那一行 `拥有 9/9`。
-    // 没有这一段时样本行全是"未审计"（灰），而不是错的"缺失"。
+    // 没有这一段时样本行全是"未校验"（灰），而不是错的"缺失"。
     publish_sample_dirs(&opts);
-    let _ = tx.send(AppEvent::Log(format!("audit: {} rom dirs", rom_paths.len())));
+    let _ = tx.send(AppEvent::Log(format!("verify: {} rom dirs", rom_paths.len())));
 
-    // Persist the parsed library *before* auditing. The audit is the slow part
-    // and used to be the only thing that wrote the cache, so closing the app
-    // mid-audit meant a full -listxml re-parse on every single start.
+    // 把游戏库落盘，**必须在校验之前** —— 校验是慢的那一步，而校验跑完才落盘
+    // 的话，中途关掉程序下次得从 `-listxml` 重新解析 40 秒。
     let cache_path = GuiSettings::cache_dir().join("gamelist.cache");
-    let save_t0 = std::time::Instant::now();
-    match cache::save_library(&cache_path, &mame.version, &library, false) {
-        Ok(()) => {
-            dlog!(
-                "引导: 审计前落盘缓存（audited=false），耗时 {:?}",
-                save_t0.elapsed()
-            );
-            let _ = tx.send(AppEvent::Log("parsed library cached.".into()));
-        }
-        Err(e) => {
-            dlog!("引导: 审计前落盘缓存失败：{e}");
-            let _ = tx.send(AppEvent::Log(format!("cache save failed: {e}")));
+    if from_cache {
+        // 缓存刚读过，内容一样，不必再写（见 `finish_boot` 的参数注释）
+        dlog!("引导: 库来自缓存，跳过校验前落盘（verified 仍是 false）");
+    } else {
+        let save_t0 = std::time::Instant::now();
+        match cache::save_library(&cache_path, &mame.version, &library, false) {
+            Ok(()) => {
+                dlog!(
+                    "引导: 校验前落盘缓存（verified=false），耗时 {:?}",
+                    save_t0.elapsed()
+                );
+                let _ = tx.send(AppEvent::Log("parsed library cached.".into()));
+            }
+            Err(e) => {
+                dlog!("引导: 校验前落盘缓存失败：{e}");
+                let _ = tx.send(AppEvent::Log(format!("cache save failed: {e}")));
+            }
         }
     }
 
@@ -379,9 +392,9 @@ fn finish_boot(
     let folder_cache = Arc::new(folders::compute_folder_cache(&library, is_mess));
 
     // publish the list FIRST (UI appears right after listxml),
-    // then audit in a background thread and swap results in
+    // then verify in a background thread and swap results in
     dlog!(
-        "引导: LibraryReady 已发布（审计前, {} 台机种）",
+        "引导: LibraryReady 已发布（校验前, {} 台机种）",
         library.len()
     );
     let lib_shared: SharedLib = Arc::new(Mutex::new(library.clone()));
@@ -389,29 +402,29 @@ fn finish_boot(
         lib: lib_shared.clone(),
         folders: folder_cache,
         from_cache: false,
-        // 审计**还没跑**（这一步就是为审计腾出界面），所以是 false
-        audited: false,
+        // 校验**还没跑**（这一步就是为校验腾出界面），所以是 false
+        verified: false,
     })));
     published.store(true, Ordering::Relaxed);
 
     let extra = extra_software_for(&library);
     dlog!(
-        "引导: 审计开始前准备就绪（{} 个 extra_software 条目, {} 台机种）",
+        "引导: 校验开始前准备就绪（{} 个 extra_software 条目, {} 台机种）",
         extra.len(),
         lib_shared.lock().map(|g| g.len()).unwrap_or(0)
     );
-    let handle = Arc::new(AuditHandle::new());
-    // hand the handle to the UI before the (slow) audit starts, so the status
-    // bar can show "Auditing nn%" from the first tick instead of waiting for
-    // the audit to report anything itself
-    let _ = tx.send(AppEvent::AuditStarted(handle.clone()));
+    let handle = Arc::new(VerifyHandle::new());
+    // hand the handle to the UI before the (slow) verify starts, so the status
+    // bar can show "Verifying nn%" from the first tick instead of waiting for
+    // the verify to report anything itself
+    let _ = tx.send(AppEvent::VerifyStarted(handle.clone()));
     {
-        // forward audit progress to the status bar
+        // forward verify progress to the status bar
         let tx2 = tx.clone();
         let h2 = handle.clone();
         thread::spawn(move || loop {
             let (done, total, cur) = h2.snapshot();
-            let _ = tx2.send(AppEvent::AuditProgress {
+            let _ = tx2.send(AppEvent::VerifyProgress {
                 done,
                 total,
                 system: cur,
@@ -422,30 +435,30 @@ fn finish_boot(
             thread::sleep(std::time::Duration::from_millis(200));
         });
     }
-    // The audit works on a private copy, so a panic in it must not escape to the
-    // outer handler: the library has already been published and `AuditDone` has
+    // The verify works on a private copy, so a panic in it must not escape to the
+    // outer handler: the library has already been published and `VerifyDone` has
     // to arrive anyway, or the status bar spins forever and the start button
     // stays disabled (README P1-8).
-    let audit_t0 = std::time::Instant::now();
-    let audit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        audit::audit_all(&mut library, &rom_paths, &extra, &handle);
+    let verify_t0 = std::time::Instant::now();
+    let verify_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify::verify_all(&mut library, &rom_paths, &extra, &handle);
     }));
-    dlog!("引导: 审计返回，耗时 {:?}", audit_t0.elapsed());
-    if let Err(p) = audit_result {
+    dlog!("引导: 校验返回，耗时 {:?}", verify_t0.elapsed());
+    if let Err(p) = verify_result {
         // the progress forwarder waits on `finished` — make sure it exits
         handle.finish();
-        let msg = format!("audit failed: {}", panic_text(p.as_ref()));
-        dlog!("引导: 审计 panic：{msg}");
+        let msg = format!("verify failed: {}", panic_text(p.as_ref()));
+        dlog!("引导: 校验 panic：{msg}");
         let _ = tx.send(AppEvent::Log(msg.clone()));
-        let _ = tx.send(AppEvent::AuditDone(Err(msg)));
+        let _ = tx.send(AppEvent::VerifyDone(Err(msg)));
         return;
     }
     if handle.cancelled() {
-        // discard the half-audited snapshot: the published library stays as it
-        // was and the cache keeps audited=false, so the next start resumes
-        dlog!("引导: 审计被取消，丢弃半成品快照（缓存保持 audited=false）");
-        let _ = tx.send(AppEvent::Log("audit cancelled.".into()));
-        let _ = tx.send(AppEvent::AuditDone(Err("cancelled".into())));
+        // discard the half-verified snapshot: the published library stays as it
+        // was and the cache keeps verified=false, so the next start resumes
+        dlog!("引导: 校验被取消，丢弃半成品快照（缓存保持 verified=false）");
+        let _ = tx.send(AppEvent::Log("verify cancelled.".into()));
+        let _ = tx.send(AppEvent::VerifyDone(Err("cancelled".into())));
         return;
     }
     {
@@ -453,29 +466,29 @@ fn finish_boot(
         let mut guard = lib_shared.lock().unwrap();
         *guard = library;
     }
-    // Availability / Unavailability counts depend on the audit result, so the
-    // folder tree has to be rebuilt once the audit is in.
+    // Availability / Unavailability counts depend on the verify result, so the
+    // folder tree has to be rebuilt once the verify is in.
     let folders = {
         let guard = lib_shared.lock().unwrap();
         folders::compute_folder_cache(&guard, is_mess)
     };
     let _ = tx.send(AppEvent::FoldersReady(Arc::new(folders)));
-    // re-save with audited = true: from now on a start is cache-only
+    // re-save with verified = true: from now on a start is cache-only
     {
         let guard = lib_shared.lock().unwrap();
         match cache::save_library(&cache_path, &mame.version, &guard, true) {
             Ok(()) => {
-                dlog!("引导: 审计后落盘缓存（audited=true）");
-                let _ = tx.send(AppEvent::Log("gamelist.cache saved (audited).".into()));
+                dlog!("引导: 校验后落盘缓存（verified=true）");
+                let _ = tx.send(AppEvent::Log("gamelist.cache saved (verified).".into()));
             }
             Err(e) => {
-                dlog!("引导: 审计后落盘缓存失败：{e}");
+                dlog!("引导: 校验后落盘缓存失败：{e}");
                 let _ = tx.send(AppEvent::Log(format!("cache save failed: {e}")));
             }
         }
     }
-    dlog!("引导: 审计完成，AuditDone 已发出");
-    let _ = tx.send(AppEvent::AuditDone(Ok("audit finished".into())));
+    dlog!("引导: 校验完成，VerifyDone 已发出");
+    let _ = tx.send(AppEvent::VerifyDone(Ok("verify finished".into())));
 
 }
 
@@ -486,9 +499,9 @@ fn extra_software_for(lib: &GameLibrary) -> HashMap<String, String> {
 
 /// Same, with the (disk-backed) settings already in hand.
 ///
-/// The manual-audit path used to call `extra_software_for` while holding the
+/// The manual-verify path used to call `extra_software_for` while holding the
 /// library lock — reading and parsing `the original GUI ini` inside the critical section
-/// stalled the UI for the frame that started the audit (README P2-18).
+/// stalled the UI for the frame that started the verify (README P2-18).
 fn extra_software_with(lib: &GameLibrary, settings: &GuiSettings) -> HashMap<String, String> {
     let mut m = HashMap::new();
     for g in &lib.games {
@@ -502,24 +515,24 @@ fn extra_software_with(lib: &GameLibrary, settings: &GuiSettings) -> HashMap<Str
     m
 }
 
-/// refresh audit on a snapshot; UI keeps rendering (origin: RomAuditor thread)
-pub fn run_audit(
+/// refresh verify on a snapshot; UI keeps rendering (origin: RomVerifyor thread)
+pub fn run_verify(
     lib: SharedLib,
     opts: SharedOpts,
-    handle: Arc<AuditHandle>,
+    handle: Arc<VerifyHandle>,
     tx: Sender<AppEvent>,
     ctx: egui::Context,
     is_mess: bool,
 ) {
-    dlog!("手动审计: 后台线程启动（F5 刷新）");
+    dlog!("手动校验: 后台线程启动（F5 刷新）");
     thread::spawn(move || {
-        let audit_t0 = std::time::Instant::now();
+        let verify_t0 = std::time::Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // read the settings file *before* taking the library lock (README P2-18)
             let settings = GuiSettings::load();
             // Lock order: the option chain on the UI thread takes `opts` and
             // then `lib` (`MameApp::ensure_chain`), so taking the two the other
-            // way round here can deadlock an audit against an options dialog
+            // way round here can deadlock an verify against an options dialog
             // opened while it runs. Read the paths first, then the library.
             let rom_paths = {
                 let core = opts.lock().unwrap();
@@ -533,24 +546,24 @@ pub fn run_audit(
                 (guard.clone(), extra_software_with(&guard, &settings))
             };
             dlog!(
-                "手动审计: 快照 {} 台机种, {} 个 rompath, {} 个 extra_software",
+                "手动校验: 快照 {} 台机种, {} 个 rompath, {} 个 extra_software",
                 snapshot.len(),
                 rom_paths.len(),
                 extra.len()
             );
-            audit::audit_all(&mut snapshot, &rom_paths, &extra, &handle);
+            verify::verify_all(&mut snapshot, &rom_paths, &extra, &handle);
 
             // A cancelled run leaves `snapshot` only half marked. Swapping it in
-            // and persisting it as audited=true would freeze wrong availability
+            // and persisting it as verified=true would freeze wrong availability
             // data into the cache, so drop it and keep the previous state
             // (README P1-9).
             if handle.cancelled() {
-                dlog!("手动审计: 已取消，丢弃快照，不改缓存");
+                dlog!("手动校验: 已取消，丢弃快照，不改缓存");
                 return Err("cancelled".into());
             }
-            dlog!("手动审计: 审计完成，开始回填（耗时 {:?}）", audit_t0.elapsed());
+            dlog!("手动校验: 校验完成，开始回填（耗时 {:?}）", verify_t0.elapsed());
 
-            // Swap the audited snapshot back (move, not clone) and persist
+            // Swap the verified snapshot back (move, not clone) and persist
             // under one lock. The original only wrote the cache on exit —
             // reading the whole cache back here just to overwrite it was
             // pure overhead on every refresh.
@@ -565,11 +578,11 @@ pub fn run_audit(
                 let guard = lib.lock().unwrap();
                 match cache::save_library(&cache_path, &guard.mame_version, &guard, true) {
                     Ok(()) => {
-                        dlog!("手动审计: 缓存已落盘（audited=true）");
+                        dlog!("手动校验: 缓存已落盘（verified=true）");
                         let _ = tx.send(AppEvent::Log("gamelist.cache saved.".into()));
                     }
                     Err(e) => {
-                        dlog!("手动审计: 缓存落盘失败：{e}");
+                        dlog!("手动校验: 缓存落盘失败：{e}");
                         let _ = tx.send(AppEvent::Log(format!("cache save failed: {e}")));
                     }
                 }
@@ -583,58 +596,58 @@ pub fn run_audit(
                 let guard = lib.lock().unwrap();
                 guard.games.iter().filter(|g| g.available == 1).count()
             };
-            Ok(format!("audit finished: {complete} complete"))
+            Ok(format!("verify finished: {complete} complete"))
         }));
         let msg = match result {
             Ok(m) => m,
             // `panic!("literal")` hands over a `&str`, not a `String`: matching
             // only the String case reported an empty reason for half of all
             // panics (README N9)
-            Err(e) => Err(format!("audit panicked: {}", panic_text(e.as_ref()))),
+            Err(e) => Err(format!("verify panicked: {}", panic_text(e.as_ref()))),
         };
         dlog!(
-            "手动审计: 结束（{}），总耗时 {:?}",
+            "手动校验: 结束（{}），总耗时 {:?}",
             match &msg {
                 Ok(m) => m.as_str(),
                 Err(m) => m.as_str(),
             },
-            audit_t0.elapsed()
+            verify_t0.elapsed()
         );
-        let _ = tx.send(AppEvent::AuditDone(msg));
+        let _ = tx.send(AppEvent::VerifyDone(msg));
         ctx.request_repaint();
     });
 }
 
-/// 单游戏审计（右键/菜单「审计 ROM」）。
+/// 单游戏校验（右键/菜单「校验 ROM」）。
 ///
-/// 与 [`run_audit`] 的关键差别：**就地改共享库，不做快照**。全库审计要动
+/// 与 [`run_verify`] 的关键差别：**就地改共享库，不做快照**。全库校验要动
 /// 5 万台游戏，所以宁可克隆一份再换回去；单游戏只碰 3~5 台，就地改的窗口是
 /// 毫秒级，而克隆一份 5 万台 `GameMeta`（每个带几十条 rom）要几百毫秒——
 /// 为了这一秒的操作付那个代价不划算。
 ///
-/// 代价是审计期间 UI 那条线程会被 `lib` 锁挡住几毫秒。那点卡顿比"克隆半秒"
+/// 代价是校验期间 UI 那条线程会被 `lib` 锁挡住几毫秒。那点卡顿比"克隆半秒"
 /// 好，而且这期间用户唯一能做的就是等弹窗。
 ///
 /// 锁顺序照旧：先 `opts` 读 rompath（**不持锁**），再 `lib`。反过来的话会和
 /// `MameApp::ensure_chain`（opts → lib）死锁。
 ///
-/// **当前没有菜单入口**（2026-10-05 用户要求把菜单里的审计项删掉，统一走
-/// 「刷新档案」）。整套保留：它是单游戏秒级审计的唯一实现，
-/// `core::audit::find_units_for` 的提速（5.8s → 0.002s）就是为它做的。
+/// **当前没有菜单入口**（2026-10-05 用户要求把菜单里的校验项删掉，统一走
+/// 「刷新档案」）。整套保留：它是单游戏秒级校验的唯一实现，
+/// `core::verify::find_units_for` 的提速（5.8s → 0.002s）就是为它做的。
 #[allow(dead_code)]
-pub fn run_game_audit(
+pub fn run_game_verify(
     lib: SharedLib,
     opts: SharedOpts,
     game: String,
-    handle: Arc<AuditHandle>,
+    handle: Arc<VerifyHandle>,
     tx: Sender<AppEvent>,
     ctx: egui::Context,
 ) {
-    dlog!("单游戏审计: 后台线程启动（{game}）");
+    dlog!("单游戏校验: 后台线程启动（{game}）");
     thread::spawn(move || {
         let t0 = std::time::Instant::now();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // 与 run_audit 同一个锁序：opts 在前、lib 在后，且读路径时不持锁
+            // 与 run_verify 同一个锁序：opts 在前、lib 在后，且读路径时不持锁
             let rom_paths = {
                 let core = opts.lock().unwrap();
                 match core.opts.get("rompath") {
@@ -644,19 +657,19 @@ pub fn run_game_audit(
             };
             let (view, scanned) = {
                 let mut guard = lib.lock().unwrap();
-                let scanned = audit::audit_game(&mut guard, &game, &rom_paths, &handle);
+                let scanned = verify::verify_game(&mut guard, &game, &rom_paths, &handle);
                 // 视图在锁内算：它要读的就是刚改完的这份库
                 let view = crate::core::rominfo::view_of(&guard, &game, true);
                 (view, scanned)
             };
-            // 落盘：单游戏审计改了 available，缓存必须跟着更新，否则重启
-            // 后又变回旧结论。用 audited=true——它确实是一次完整审计的局部。
+            // 落盘：单游戏校验改了 available，缓存必须跟着更新，否则重启
+            // 后又变回旧结论。用 verified=true——它确实是一次完整校验的局部。
             //
             // 两种情况不能落：
-            // - **被取消**：`audit_game` 已把范围内的旧结论原样还原，这一步
-            //   一个字节都没改，落盘只会把 `audited` 置真——那等于告诉下次
-            //   启动"别审计了"。
-            // - **库里没这个游戏**：`audit_game` 直接返回，同样什么都没改。
+            // - **被取消**：`verify_game` 已把范围内的旧结论原样还原，这一步
+            //   一个字节都没改，落盘只会把 `verified` 置真——那等于告诉下次
+            //   启动"别校验了"。
+            // - **库里没这个游戏**：`verify_game` 直接返回，同样什么都没改。
             //
             // 注意 `scanned == 0` 本身**不是**不能落的理由：包一个都没找到
             // 恰恰是有效结论（把过期的"完整"纠正成"缺失"），必须落下去。
@@ -666,11 +679,11 @@ pub fn run_game_audit(
                 let guard = lib.lock().unwrap();
                 if let Err(e) = cache::save_library(&cache_path, &guard.mame_version, &guard, true)
                 {
-                    dlog!("单游戏审计: 缓存落盘失败：{e}");
+                    dlog!("单游戏校验: 缓存落盘失败：{e}");
                 }
             } else {
                 dlog!(
-                    "单游戏审计: 未落盘（取消={} 已知={} 扫了 {} 个归档）",
+                    "单游戏校验: 未落盘（取消={} 已知={} 扫了 {} 个归档）",
                     handle.cancelled(),
                     known,
                     scanned
@@ -681,11 +694,11 @@ pub fn run_game_audit(
         let msg = match result {
             Ok(v) => v,
             // `panic!("literal")` 交过来的是 `&str` 不是 `String`：只 match
-            // String 那半边会让一半的 panic 报不出原因（与 run_audit 同理）
-            Err(e) => Err(format!("audit panicked: {}", panic_text(e.as_ref()))),
+            // String 那半边会让一半的 panic 报不出原因（与 run_verify 同理）
+            Err(e) => Err(format!("verify panicked: {}", panic_text(e.as_ref()))),
         };
         dlog!(
-            "单游戏审计: {} 结束（{}），耗时 {:?}",
+            "单游戏校验: {} 结束（{}），耗时 {:?}",
             game,
             match &msg {
                 Ok(_) => "ok",
@@ -693,7 +706,7 @@ pub fn run_game_audit(
             },
             t0.elapsed()
         );
-        let _ = tx.send(AppEvent::GameAuditDone { game, result: msg });
+        let _ = tx.send(AppEvent::GameVerifyDone { game, result: msg });
         ctx.request_repaint();
     });
 }
@@ -1008,13 +1021,13 @@ fn is_xml(path: &std::path::Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("xml"))
 }
 
-/// pump mame -verifyroms/-verifysamples output (origin: MameExeRomAuditor)
+/// pump mame -verifyroms/-verifysamples output (origin: MameExeRomVerifyor)
 ///
-/// **当前没有菜单入口**（见 `run_game_audit` 的注释：菜单里的审计项已按
+/// **当前没有菜单入口**（见 `run_game_verify` 的注释：菜单里的校验项已按
 /// 用户要求删除，统一走「刷新档案」）。这是 1.8.2 那条原样搬过来的输出泵，
 /// 保留以便将来接回 MAME 原生校验。
 #[allow(dead_code)]
-pub fn run_verify(mame: MameBinary, args: Vec<String>, tx: Sender<AppEvent>, ctx: egui::Context) {
+pub fn run_verify_output_pump(mame: MameBinary, args: Vec<String>, tx: Sender<AppEvent>, ctx: egui::Context) {
     thread::spawn(move || {
         match mame.spawn_run(&args) {
             Ok(mut child) => {
@@ -1028,7 +1041,63 @@ pub fn run_verify(mame: MameBinary, args: Vec<String>, tx: Sender<AppEvent>, ctx
                 let _ = tx.send(AppEvent::VerifyLine(format!("failed to start mame: {e}")));
             }
         }
-        let _ = tx.send(AppEvent::VerifyDone);
+        let _ = tx.send(AppEvent::VerifyOutputDone);
         ctx.request_repaint();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    /// **重启续校验时，必须先发布游戏列表，再开始枚举/校验。**
+    ///
+    /// 用户 2026-10-06 明确要求：「已经解析了 listxml 且已经缓存，但是没校验完
+    /// 就重启，第二次重启应该是先加载 XML 缓存，等游戏信息显示出来后再重新开始
+    /// 枚举、校验」。
+    ///
+    /// 这条用**源码结构**钉住而不是跑真的引导（真引导要 40 秒起，而且要真MAME）。
+    /// 它守的不变量很具体：`finish_boot` 里发`LibraryReady` 的那一行必须排在
+    /// 调 `verify_all` 的那一行**之前**。一旦有人把发布挪到校验后面（比如"等数据
+    /// 齐了再一次性给 UI"，听起来很合理），用户就要盯着黑屏等几分钟。
+    #[test]
+    fn the_library_is_published_before_the_verify_starts() {
+        let src = include_str!("background.rs");
+        let body = src
+            .split("fn finish_boot(")
+            .nth(1)
+            .expect("找不到 finish_boot");
+        let ready = body
+            .find("AppEvent::LibraryReady")
+            .expect("finish_boot 里没有发 LibraryReady");
+        let work = body
+            .find("verify::verify_all")
+            .expect("finish_boot 里没有调 verify_all");
+        assert!(
+            ready < work,
+            "LibraryReady({ready}) 必须排在 verify_all({work}) 之前，\
+             否则用户要等校验完才看到游戏列表"
+        );
+    }
+
+    /// 缓存命中那条路**不许再落一次盘**。
+    ///
+    /// `save_library` 要把 49676 台序列化一遍（实测 ~2s），而它挡在
+    /// `LibraryReady` 之前 —— 每次"校验没跑完就重启"都要白等这两秒才出列表。
+    /// 缓存**刚读过、内容一模一样**，重写是纯浪费。
+    ///
+    /// 反过来冷启动那次落盘**必须留着**：那是把刚解析出来的 listxml 存下来，
+    /// 否则中途关掉下次得重新解析 40 秒。所以判据是"来自缓存"这个flag。
+    #[test]
+    fn the_cached_boot_does_not_rewrite_the_cache() {
+        let src = include_str!("background.rs");
+        let body = src.split("fn finish_boot(").nth(1).expect("找不到 finish_boot");
+        // 落盘必须在 `if from_cache` 的 else 分支里
+        let guard = body.find("if from_cache {").expect("没有 from_cache 分支");
+        let save = body
+            .find("cache::save_library")
+            .expect("finish_boot 里没有落盘");
+        assert!(
+            guard < save,
+            "落盘必须在 `if from_cache {{` 之后（缓存路径要跳过它）"
+        );
+    }
 }

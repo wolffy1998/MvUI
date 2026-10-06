@@ -1,4 +1,4 @@
-//! Benchmark: MvUI's listxml parse chain WITHOUT the ROM audit, phase by
+//! Benchmark: MvUI's listxml parse chain WITHOUT the ROM verify, phase by
 //! phase, plus a bincode serialization buffering comparison.
 //!
 //! Usage: cargo run --release --example parse_bench -- <path-to-listxml.xml>

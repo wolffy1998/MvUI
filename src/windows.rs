@@ -140,7 +140,7 @@ pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_cmd(app, ctx);
     draw_about(app, ctx);
     draw_verify(app, ctx);
-    draw_rom_audit(app, ctx);
+    draw_rom_verify(app, ctx);
     draw_filter(app, ctx);
 }
 
@@ -967,7 +967,7 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
         app.bg_choices = crate::app::scan_backgrounds(&app.bg_dir);
         app.load_ext_folders();
         app.reload_localized_list();
-        // rompath feeds the audit, so a change there invalidates the results
+        // rompath feeds the verify, so a change there invalidates the results
         app.refresh_all();
     }
 
@@ -1199,16 +1199,16 @@ fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {    let mut show = app.s
     app.show_verify = show;
 }
 
-/// 单游戏审计的结果弹窗（右键 / File ► Audit ROM）。
+/// 单游戏校验的结果弹窗（右键 / File ► Verify ROM）。
 ///
 /// 版式与 Rom 信息面板**完全一致**（同一个 `rompanel::render`）——用户只需学习
-/// 一种样式。区别只在顶部那行说明：面板写"来自审计缓存"，弹窗写
-/// "刚刚重新审计"——后者是现场重审的结论，不是缓存里的。
-fn draw_rom_audit(app: &mut MameApp, ctx: &egui::Context) {
-    let Some((game, view)) = app.game_audit_result.clone() else {
+/// 一种样式。区别只在顶部那行说明：面板写"来自校验缓存"，弹窗写
+/// "刚刚重新校验"——后者是现场重审的结论，不是缓存里的。
+fn draw_rom_verify(app: &mut MameApp, ctx: &egui::Context) {
+    let Some((game, view)) = app.game_verify_result.clone() else {
         return;
     };
-    let title = format!("{} — {}", app.tr("Audit ROM"), game);
+    let title = format!("{} — {}", app.tr("Verify ROM"), game);
     let close_label = app.tr("Close").to_string();
     let bar_h = title_bar_height(ctx);
     let mut show = true;
@@ -1222,8 +1222,8 @@ fn draw_rom_audit(app: &mut MameApp, ctx: &egui::Context) {
         .collapsible(false)
         .frame(opaque_frame(ctx))
         // the title carries the game name, which changes with the selection —
-        // pin the id so the window does not jump when another game is audited
-        .id(egui::Id::new("mvui_rom_audit"))
+        // pin the id so the window does not jump when another game is verified
+        .id(egui::Id::new("mvui_rom_verify"))
         .show(ctx, |ui| {
             paint_title_logo(ui, ctx, bar_h);
             ui.separator();
@@ -1240,6 +1240,6 @@ fn draw_rom_audit(app: &mut MameApp, ctx: &egui::Context) {
             });
         });
     if close || !show {
-        app.game_audit_result = None;
+        app.game_verify_result = None;
     }
 }

@@ -1,6 +1,6 @@
 //! Micro-bench: list_archive cost on 7z variants (solid / non-solid /
 //! compressed header) vs a real MAME game zip. Also checks CRC presence —
-//! the audit matcher skips entries without a CRC.
+//! the verify matcher skips entries without a CRC.
 //!
 //! Usage: cargo run --release --example sevenz_probe -- <dir-with-7zs> <control-zip>
 

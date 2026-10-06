@@ -26,7 +26,7 @@ fn main() -> Result<(), eframe::Error> {
     //
     // core 不许反向依赖 UI，所以它不能自己调 `app::perf_log`；反过来，
     // 不注册这个 sink，core 里那些 `dlog!` 就全是空操作，boot.log 里
-    // 只会有 UI 侧的记录。必须在启动**早期**注册，连解析和审计之前
+    // 只会有 UI 侧的记录。必须在启动**早期**注册，连解析和校验之前
     // 的过程才记得到。
     //
     // **只有 debug 构建真的注册。** `set_sink` 在 release 下直接返回

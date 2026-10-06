@@ -6,7 +6,7 @@
 //!
 //! # Layout
 //!
-//! * [`core`] — the domain layer. MAME I/O, the rom audit, the option chain,
+//! * [`core`] — the domain layer. MAME I/O, the rom verify, the option chain,
 //!   archive access, the game-list cache. It must not depend on the UI; see
 //!   [`core`]'s own docs for why that boundary is worth keeping.
 //! * everything beside it — the egui front end. Those modules are private to
