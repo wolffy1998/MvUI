@@ -420,16 +420,36 @@ fn state_with_icon(ui: &mut egui::Ui, w: f32, text: impl AsRef<str>, state: RomS
     job.wrap.max_width = f32::MAX;
     let galley = ui.fonts(|f| f.layout_job(job));
     let word_w = galley.size().x;
+    // 文字行框高（实测 14px；不是图标那 16px）。整格按它占高，文字就不溢出。
+    let text_h = galley.size().y;
+    let row_h = text_h.max(cols::ICON_W);
     // 2) 整格死占 w（列宽刚性由外部栅格保证，见 [`Grid`]）
-    let (_id, rect) = ui.allocate_space(egui::vec2(w, cols::ICON_W));
+    let (_id, rect) = ui.allocate_space(egui::vec2(w, row_h));
     ui.painter()
         .galley(rect.min, galley, ui.visuals().text_color());
-    // 3) 图标贴在词尾 + 4px
+    // 3) 图标贴在词尾 + 4px，**纵向对齐到文字的中线**
+    //
+    // 这里对齐的是**文字行的中线**（`rect.min.y + text_h / 2`），不是整格
+    // 的中线、也不是图标自身 16px 的中心。差1px 就看得出来（用户
+    // 2026-10-06：「这个 logo 要和文字上下对齐」）。
+    //
+    // 为什么不能居中于格子：文字行框实测 **14px**、图标 **16px**，格子取
+    // 两者较大值 16px。居中于格子 → 图标中心在 8px，而文字中线在 7px
+    // → 图标比文字低 1px（探针 `examples/col_probe.rs` 实测）。
+    //
+    // 也不能顶对齐（原先那样）：图标中心 8px、文字 7px，图标比文字高 1px。
+    // 两个方向的偏差都是 1px，肉眼却读成"没对齐"—— 因为图标是有色实心
+    // 块，1px 的错位比留白更容易被看见。
     let ctx = ui.ctx().clone();
+    let icon_y = rect.min.y + text_h / 2.0 - cols::ICON_W / 2.0;
     let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.min.x + word_w + cols::ICON_GAP, rect.min.y),
+        egui::pos2(rect.min.x + word_w + cols::ICON_GAP, icon_y),
         egui::vec2(cols::ICON_W, cols::ICON_W),
     );
+    // `icons::put` 内部是 `painter().image(...)`，**不碰游标** —— 这条很关键：
+    // 它若走 `ui.put`（widget），游标会被额外推一次且推的量随词宽变化，
+    // crc 与区域列的起点就逐行漂（见 `icons::put` 的注释与
+    // `examples/col_probe.rs` 的实测）。
     let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
     if !drawn {
         // 纹理还没解码完（第一帧）或图标名写错了：退回文字符号
@@ -1027,6 +1047,100 @@ mod tests {
             (3.0..=12.0).contains(&cols::ICON_GAP),
             "图标与状态词之间留 1 个空格（约 4px），不能是 0 也不能太大：{}",
             cols::ICON_GAP
+        );
+    }
+
+    /// **图标必须与状态词上下对齐**（用户 2026-10-06：「这个 logo 要和
+    /// 文字上下对齐」）。
+    ///
+    /// 差 1px 就看得出来，因为图标是**有色实心块**：文字之间的错位靠留白
+    /// 吸收，而一个 16×16 的绿圆点偏上 1px 立刻读成"浮在字上面"。
+    ///
+    /// 对齐的基准是**文字行框的中线**，不是整格的中线、也不是图标自身 16px
+    /// 的中心：
+    ///
+    /// | 基准 | 图标中心 y | 文字中线 y | 差 |
+    /// |---|---|---|---|
+    /// |顶对齐（原先）| 8.0 | 7.0 | 图标高 1px |
+    /// | 居中于整格（试过）| 8.0 | 7.0 | 图标低 1px |
+    /// | **对齐文字中线** | **7.0** | **7.0** | **0** |
+    ///
+    /// **这条测试为什么查源码而不复刻公式**：第一版把公式抄进测试里自己算，
+    /// 结果"改回顶对齐"与"改成居中于整格"两个变异**都全绿** —— 测试算的是
+    /// 自己那份副本，真实代码改了它不知道（同义反复）。所以改成**断言源码
+    /// 里那一行的字面形状**。真实字体下的数值验证交给探针
+    /// `examples/font_metrics.rs`（行框 14px）与 `examples/col_probe.rs`
+    /// （中心差 0.00px）。
+    #[test]
+    fn the_icon_is_vertically_centred_on_the_state_word() {
+        let body = fn_body("fn state_with_icon(");
+        // 必须是「文字中线 - 图标半高」，且必须用 text_h（文字行框高）
+        let ok = "rect.min.y + text_h / 2.0 - cols::ICON_W / 2.0";
+        assert!(
+            body.contains(ok),
+            "图标必须对齐**文字中线**（{ok}）—— 顶对齐偏高 1px、居中于整格偏低 1px：\n{body}"
+        );
+        // 不许用整格高 row_h 来算居中（那正是 1px 错位的来源）
+        assert!(
+            !body.contains("(row_h - cols::ICON_W) / 2.0"),
+            "不能用整格高居中：格子 16px 而文字行框 14px，那样图标低 1px：\n{body}"
+        );
+        // 文字行框高必须单独取出来（`galley.size().y`），不能被 row_h 顶掉
+        assert!(
+            body.contains("let text_h = galley.size().y;"),
+            "要单独留文字行框高 text_h，居中公式才用得对：\n{body}"
+        );
+        assert!(
+            body.contains("let row_h = text_h.max(cols::ICON_W);"),
+            "整格高取文字与图标较大者：\n{body}"
+        );
+    }
+
+    /// **图标比文字行框高 2px，所以对齐后必然上下各溢出 1px —— 这是允许的。**
+    ///
+    /// 真实字体下状态词行框 **14px**、图标 **16px**（`examples/font_metrics.rs`
+    /// 实测）。要让两者中线重合，16px 的图标在 14px 的行里必然一头出 1px。
+    ///
+    /// 关键在于**溢出是对称的**（上下各 1px）：对称的溢出读起来仍像"这一行的
+    /// 图标"，而单边溢出（只往上/ 只往下）会被读成错位。这条钉住"对称"这个
+    /// 性质，并说明**为什么允许越界** —— 补的是上面那条查公式测试的**前提**。
+    #[test]
+    fn the_icon_overflows_the_text_row_symmetrically_by_one_pixel() {
+        const TEXT_H: f32 = 14.0; // 探针实测
+        let over_top = (TEXT_H - cols::ICON_W) / 2.0;
+        let over_bottom = (TEXT_H - cols::ICON_W) / 2.0;
+        // 对称
+        assert_eq!(
+            over_top, over_bottom,
+            "溢出必须上下对称，单边溢出会被读成错位"
+        );
+        // 且各只有 1px（允许的前提是行间距为 0，见下面那条测试）
+        assert!(
+            over_top.abs() <= 1.01,
+            "溢出应各不超过 1px，实际 {over_top}"
+        );
+        assert!(
+            TEXT_H < cols::ICON_W,
+            "这条测试的前提是「图标比文字行框高」；若字体变了行框更高，\
+             就不该再有溢出，请重新算公式"
+        );
+    }
+
+    /// **图标上下各溢出 1px 是安全的——因为行间距是0。**
+    ///
+    /// 上面那条对齐测试让图标对齐文字中线，于是它比文字行框上下各多出 1px。
+    /// 这条钉住那个前提：**行布局的 `item_spacing.y` 必须归零**，否则这 1px
+    /// 会去侵邻居行的字（图标是有色实心块，压到字上非常明显）。
+    ///
+    /// `item_spacing.y` 归零还有另一个理由（更贵）：不归零时每行之间多出
+    /// 十几像素，一屏能看的行数被吃掉一半（用户要"每行间距紧凑一些"）。
+    #[test]
+    fn rows_leave_no_vertical_gap_for_the_icon_to_bump_into() {
+        let body = fn_body("fn tight_horizontal(");
+        assert!(
+            body.contains("item_spacing.y = 0.0"),
+            "行间距必须归零 —— 图标对齐文字中线后会上下各溢出 1px，\
+             有间距时就会压到相邻行的字：\n{body}"
         );
     }
 

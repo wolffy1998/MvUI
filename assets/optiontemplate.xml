@@ -1,16 +1,7 @@
 ﻿<?xml version="1.0"?>
-<!-- mame .154 / sdlmame .129 -->
 <optiontemplate version="1">
-	<!--
-	  ══ 选项元数据模板 ══
-	  本文件不保存用户设置，只声明每个选项的：控件类型(type)、取值范围(min/max)、
-	  枚举值(<value>)、默认值(default)、显示名(guiname)、在哪层属性页可见(*visible)。
-	  用户值存于 mame.ini 六层继承链 (GUI→Global→Source→Bios→Cloneof→Game) 与前端
-	  pGuiSettings。解析逻辑见 src/core/options/mod.rs::load_template。
-	-->
-	<!-- ══ GUI 自有选项（guivisible="1"，共 14 项）：存前端 pGuiSettings，不写入 mame.ini，侧栏归 "GUI Paths" ══ -->
 
-	<!-- 美术资源目录：游戏列表图标/截图/详情页素材的查找位置 -->
+	<!-- 周边资源文件位置，guivisible="1" 表示仅 GUI 可见 -->
 	<option name="cabinet_directory" default="cabinets" type="dirs" guivisible="1" />
 	<option name="cpanel_directory" default="cpanel" guiname="control panel directory" type="dirs" guivisible="1" />
 	<option name="flyer_directory" default="flyers" type="dirs" guivisible="1" />
@@ -20,15 +11,14 @@
 	<option name="icons_directory" default="icons" type="dirs" guivisible="1" />
 	<option name="background_directory" default="bkground" type="dir" guivisible="1" />
 	<option name="folder_directory" default="folders" guiname="external folder list" type="dirs" guivisible="1" />
-
-	<!-- 资料 .dat 与外部程序：history/story/mameinfo 资料库、M1 音效播放器、mame.exe 位置 -->
 	<option name="m1_directory" default="bin/m1" type="dir" guivisible="1" />
 	<option name="history_file" default="history.dat" type="datfile" guivisible="1" />
 	<option name="story_file" default="story.dat" type="datfile" guivisible="1" />
 	<option name="mameinfo_file" default="mameinfo.dat" type="datfile" guivisible="1" />
 	<option name="mame_binary" guiname="MAME binary" type="exefile" guivisible="1" />
 
-	<!-- 特殊项：driver_config=驱动级配置占位；readconfig=是否让 MAME 读取 mame.ini（二者均不在各层属性页展示） -->
+	<!-- ══ 以下所有选项均为【mame.ini】项：Global 层全量写出；Source/Bios/Cloneof/Game 子层只写与父层不同的项 ══ -->
+	<!-- 特殊项：driver_config=驱动级配置占位（不在属性页展示）；readconfig=是否读取 mame.ini（不在属性页展示，且保存时被剔除、永不写回 ini） -->
 	<option name="driver_config" type="csv" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="readconfig" type="bool" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	
@@ -60,7 +50,7 @@
 	<option name="command_file" type="datfile" />
 	<option name="hiscore_file" type="datfile" />
 	
-	<!-- 单次运行文件（回放/录制/导出）：仅命令行有意义，*visible 全 0 → 六层属性页都不显示 -->
+	<!-- 单次运行文件（回放/录制/导出）：*visible 全 0 → 六层属性页都不显示，实际只走命令行（唯一特例 ips，见"核心杂项"） -->
 	<option name="state" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="autosave" guiname="auto restore and save" type="bool" />
 	<option name="playback" type="file" globalvisible="0" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
@@ -236,7 +226,8 @@
 	<option name="debug" type="bool" />
 	<option name="debugscript" type="file" />
 
-	<!-- 核心杂项：BIOS 选择（动态枚举，按所选游戏填充）/金手指/跳过信息页/IPS 补丁/退出确认等 -->
+	<!-- 核心杂项：BIOS 选择（动态枚举，按所选游戏填充）/金手指/IPS 补丁/退出确认等。
+	     两个写 ini 特例：bios 在 GUI/Global/Source 层强制写默认值；ips 只写游戏层 ini，其余层不写 -->
 	<option name="bios" guiname="BIOS" type="string" globalvisible="0" srcvisible="0" />
 	<option name="cheat" guiname="enable game cheats" type="bool" />
 	<option name="skip_gameinfo" guiname="skip game info" type="bool" />
@@ -269,7 +260,8 @@
 	<option name="button_lime" type="color" />
 	<option name="cursor" type="color" />
 
-	<!-- 界面语言：与前端 pGuiSettings 里的同名 GUI 设置是两回事，勿混（见 mod.rs load_ini 注释） -->
+	<!-- 界面语言：与前端 pGuiSettings 里的同名 GUI 设置是两回事，勿混（见 mod.rs load_ini 注释）。
+	     保存特例：save_ini_file 会剔除 language 行，该项实际不会写回 mame.ini -->
 	<option name="language" type="string" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 	<option name="use_lang_list" type="bool" srcvisible="0" biosvisible="0" cloneofvisible="0" gamevisible="0" />
 
@@ -294,7 +286,7 @@
 	<option name="sdlvideofps" guiname="show SDL video performance" type="bool" />
 
 	<!-- ══ OSD 视频输出：渲染后端/窗口/缩放/同步 ══
-	     <value os="win|sdl"> 按平台过滤：is_sdl_port=true 取 sdl，否则取 win -->
+	     <value os="win|sdl"> 按平台过滤：is_sdl_port=true 取 sdl，否则取 win。两端选项都写进 mame.ini，但只有对应版本会读取生效 -->
 	<option name="video" guiname="video output method" type="string">
 		<value os="win">none</value>
 		<value os="win" guivalue="GDI">gdi</value>

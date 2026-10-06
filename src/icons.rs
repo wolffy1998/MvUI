@@ -143,8 +143,35 @@ pub fn draw_passive(ui: &mut egui::Ui, ctx: &egui::Context, name: &str, size: f3
     }
 }
 
-/// draw an icon into an explicit rect, without advancing the layout cursor
-/// (used for the "unavailable" badge painted on top of the status square)
+/// 在 `rect` 里画图标，**不推进布局游标**，画不出来返回 false。
+///
+/// # 为什么不能走 `ui.put`
+///
+/// `Ui::put(rect, widget)` 的文档说"allocate a specific part of the Ui"，
+/// 听着像纯定位，但它的实现（egui 0.29 `ui.rs:1617`）是
+/// `allocate_new_ui(.., |ui| ui.add(widget))`，而 `allocate_new_ui`
+/// 结尾有一句 `self.placer.advance_after_rects(rect, rect, item_spacing)`
+/// —— **它照样把游标往前推**。而且推的量取决于 rect 的位置：rect 越靠右，
+/// 游标被推得越远。
+///
+/// 在 Rom 面板里这个副作用是**肉眼可见的错位**（用户 2026-10-06 截图）：
+/// `state_with_icon` 先 `allocate_space` 死占状态列宽，紧接着调本函数画图标，
+/// 于是 crc 列的起点被多推了"图标右边缘 - 状态列左边缘"那么多。这个量随
+/// 状态词宽变化（「拥有」比「未拥有」窄），于是**同一屏里每一行的 crc 与
+/// 区域列起点都不同**——整列参差不齐。
+///
+/// 探针实测（`examples/col_probe.rs`，让 egui 自己算而不是推理）：
+///
+/// |画图标的方式|crc 起点（拥有 / 未拥有 / 未 dump）|
+/// |---|---|
+/// |`ui.put`（旧）|**150 / 163 / 172** ——逐行漂|
+/// |`painter().image`（现在）|**148 / 148 / 148** —— 一条竖线|
+///
+/// 所以这里必须用 `painter().image` 直接画：**只要不碰游标，位置就由
+/// 调用方给的 rect 唯一决定**，与同行其他内容无关。
+///
+/// uv 用 [`full_uv`]（归一化 0..1）——传 `tex.size_vec2()` 会采样到纹理外，
+/// ClampToEdge 兜底后整张图消失且不报错（这个坑踩过）。
 pub fn put(
     ui: &mut egui::Ui,
     ctx: &egui::Context,
@@ -152,7 +179,8 @@ pub fn put(
     rect: egui::Rect,
 ) -> bool {
     let Some(tex) = texture(ctx, name) else { return false };
-    ui.put(rect, egui::Image::new(&tex).fit_to_exact_size(rect.size()));
+    ui.painter()
+        .image(tex.id(), rect, full_uv(), Color32::WHITE);
     true
 }
 
@@ -321,5 +349,106 @@ mod tests {
     fn embedded_placeholder_decodes() {
         let img = image::load_from_memory(include_bytes!("../assets/images/mame.png")).unwrap();
         assert!(img.width() > 0 && img.height() > 0);
+    }
+
+    /// **`put` 绝不能推进布局游标（`LeftToRight` 行布局下）。**
+    ///
+    /// 这条钉的是一个已经真刀真枪发生过的错位（用户 2026-10-06 截图）：
+    /// Rom面板的 crc / 区域两列看着没左对齐。
+    ///
+    /// 机制：`put` 原先走 `ui.put(rect, Image)`。它的文档说"allocate a
+    /// specific part of the Ui"，听着像纯定位，但实现（egui 0.29
+    /// `ui.rs:1617`）是 `allocate_new_ui(.., |ui| ui.add(widget))`，而
+    /// `allocate_new_ui` 结尾有 `advance_after_rects` —— 在
+    /// **`LeftToRight` 行布局里它会把游标推到那个 rect 的右边缘**。
+    ///
+    /// 于是 Rom 面板里：状态词越宽（「未拥有」比「拥有」宽），图标越靠右，
+    /// crc 列的起点被推得越远。**同一屏里每一行的 crc 与区域列起点都不同**，
+    /// 整列参差 —— 截图里那台机器混着「未拥有」「未 dump」「拥有」三种词。
+    ///
+    /// **测试必须在 `LeftToRight` 里跑，这点踩过一次**：第一版用
+    /// `CentralPanel` 的默认布局（`TopDown`）写，实测 `ui.put` 在 TopDown
+    /// 下Δx/Δy **都是 0**（游标只往下走，而 rect 在它右边），于是把`put`
+    /// 改回`ui.put` 跑变异测试**照样全绿**。探针
+    /// `examples/put_probe.rs` 把两种布局并排量了出来：
+    ///
+    /// |布局|`ui.put` 后的 Δcursor|
+    /// |---|---|
+    /// |`TopDown`|Δx=0, Δy=0|
+    /// |**`LeftToRight`**|**Δx=148**|
+    ///
+    /// 探针 `examples/col_probe.rs` 是同一套量法，只是连列起点一起打。
+    #[test]
+    fn put_never_advances_the_layout_cursor() {
+        let ctx = egui::Context::default();
+        let name = "16x16/status_good.png";
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // **必须是 LeftToRight** —— `ui.put` 只在这个方向上推游标
+                ui.scope_builder(
+                    egui::UiBuilder::new().layout(egui::Layout::left_to_right(egui::Align::Min)),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for icon_x in [8.0_f32, 90.0, 200.0, 400.0] {
+                            // 先死占一段，把游标推到确定位置
+                            let (_id, _r) = ui.allocate_space(egui::vec2(60.0, 16.0));
+                            let before = ui.cursor().min.x;
+                            let rect = egui::Rect::from_min_size(
+                                egui::pos2(icon_x, ui.cursor().min.y),
+                                egui::vec2(16.0, 16.0),
+                            );
+                            // **只调 put 本身**，不要额外补一笔 painter 绘制 ——
+                            // 补了的话两笔一加一减游标正好回到原位，测试就成了
+                            // 摆设（这个也踩过一次）。
+                            let _ = put(ui, ctx, name, rect);
+                            let after = ui.cursor().min.x;
+                            assert_eq!(
+                                before, after,
+                                "图标画在 x={icon_x} 时游标被推进了 {}px —— put 又变回 widget 了",
+                                after - before
+                            );
+                        }
+                    },
+                );
+            });
+        });
+    }
+
+    /// `put` 在纹理**不存在**时也绝不能推游标。
+    ///
+    /// 上面那条走的是"查到纹理"的分支。而查不到时旧代码是提前 `return
+    /// false`、根本没画—— 也就是说**两条分支的布局副作用可能不一致**，
+    /// 而"图标忽隐忽现时版面就抖"是最难查的那种毛病。
+    ///
+    /// 同样必须在 `LeftToRight` 里跑（理由见上一条）。
+    #[test]
+    fn put_with_an_unknown_name_also_leaves_the_cursor_alone() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.scope_builder(
+                    egui::UiBuilder::new().layout(egui::Layout::left_to_right(egui::Align::Min)),
+                    |ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        let (_id, _r) = ui.allocate_space(egui::vec2(60.0, 16.0));
+                        let before = ui.cursor().min.x;
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(120.0, ui.cursor().min.y),
+                            egui::vec2(16.0, 16.0),
+                        );
+                        let drawn = put(ui, ctx, "16x16/there_is_no_such_icon.png", rect);
+                        assert!(!drawn, "不存在的图标名必须返回 false，让调用方画退路");
+                        assert_eq!(
+                            before,
+                            ui.cursor().min.x,
+                            "查不到纹理时也不能推进游标 —— 否则图标加载前后版面会抖"
+                        );
+                    },
+                );
+            });
+        });
     }
 }
