@@ -254,21 +254,9 @@ pub struct MameApp {
     /// 没跑，此时 `available` 全是默认值，一律显示"缺失"会让用户以为自己的
     /// 盘是空的。
     pub lib_verified: bool,
-    /// 单游戏校验的进度句柄（非空 = 正在跑）。
-    pub game_verify: Option<Arc<crate::core::verify::VerifyHandle>>,
-    /// 单游戏校验的目标游戏名，用来防止结果弹到别的游戏上。
-    ///
-    /// **当前没有菜单入口**（2026-10-05 用户要求删掉菜单里的校验项，统一走
-    /// 「刷新档案」）。字段与配套的 `GameVerifyDone` 事件一并保留：
-    /// 它们是单游戏校验这条路的完整实现，`start_game_verify` 一接回菜单就能用。
-    #[allow(dead_code)]
-    pub game_verify_target: String,
-    /// 单游戏校验跑完的结果弹窗：`(游戏名, 视图)`。
-    ///
-    /// 用**视图**而不是裸数据，是因为弹窗要和 dock 面板同款渲染（复用
-    /// `rompanel::render`）。跑完的视图是那一瞬间的快照，不受之后切换游戏
-    /// 影响——这正是"单独审一次然后看结果"要的语义。
-    pub game_verify_result: Option<(String, crate::core::rominfo::RomInfoView)>,
+    // 单游戏校验的三个字段（`game_verify` / `game_verify_target` /
+    // `game_verify_result`）与配套的 `GameVerifyDone` 事件已于 2026-06
+    // 一并删除。Rom 面板显示的就是 `verify_all` 的结果，要刷新按 F5。
 
     // dialogs
     pub show_options_win: Option<usize>,
@@ -530,9 +518,6 @@ impl MameApp {
             rom_views: HashMap::new(),
             // 引导流程会按缓存里的 `verified` 标志纠正它（`LibraryReady`）
             lib_verified: false,
-            game_verify: None,
-            game_verify_target: String::new(),
-            game_verify_result: None,
             show_options_win: None,
             opt_level: 1,
             opt_category: "Core Video".into(),
@@ -1234,20 +1219,6 @@ impl MameApp {
                         self.export_target = None;
                     }
                     self.needs_refilter = true;
-                }
-                AppEvent::GameVerifyDone { game, result } => {
-                    self.game_verify = None;
-                    match result {
-                        Ok(view) => {
-                            // 面板缓存里的是旧结论，先把这次的新结论放进去——用户正好在看
-                            // 这款游戏的面板，不该还看到旧的
-                            if let Some(slot) = self.rom_views.get_mut(&game) {
-                                *slot = view.clone();
-                            }
-                            self.game_verify_result = Some((game, view));
-                        }
-                        Err(m) => self.poplog(m),
-                    }
                 }
                 AppEvent::SnapReady { dock, game, width, height, rgba } => {
                     // the reply means the request is no longer in flight: drop the

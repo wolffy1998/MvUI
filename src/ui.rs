@@ -6,7 +6,6 @@ use crate::icons;
 use egui_dock::{DockArea, DockState, NodeIndex};
 use crate::core::folders::{self, FolderChild, FolderKind};
 use crate::core::launcher::RunMode;
-use std::sync::{Arc, Mutex};
 
 /// `done / total` 的百分比，**值域 0..100**。
 ///
@@ -1345,59 +1344,8 @@ impl MameApp {
         map.insert((dock, game.to_string()), parsed.clone());
         parsed
     }
-
-    /// 该不该让「校验 Rom」可点。
-    ///
-    /// 校验要占着库写 `available`，所以两个正在跑的校验都得让位：一个是它自己
-    /// （`game_verify`），一个是全库那个（`verify_handle`）——两者同时跑出来的
-    /// 结论是交集，谁最后落盘谁赢，用户看到的是"刚审完就又变了"。
-    ///
-    /// **当前没有菜单入口**（2026-10-05 用户要求：右键与文件菜单里的「校验
-    /// Rom」都删掉，全走「刷新档案」F5）。逻辑留着：它仍在
-    /// `start_game_verify` 内部做前置判断，且将来要恢复入口时不必重写。
-    #[allow(dead_code)]
-    pub fn can_verify(&self) -> bool {
-        self.game_verify.is_none() && self.verify_handle.is_none()
-    }
-
-    /// 只校验当前选中的这一款游戏。
-    ///
-    /// 范围是它自己 + 依赖的主 ROM 文件 + BIOS + 设备 + 样本 + CHD，见
-    /// `core::verify::verify_scope`。**不**重扫全库，所以通常一秒内结束
-    /// （`verify_cache` 记着每个包的内容，包没变就只stat 不重开）。
-    ///
-    /// 旧版 1.8.2 的 `actionVerify` 是把 `mame -verifyroms <game>` 的 stdout
-    /// 显示在一个文本框里；这里改成读校验缓存的同一份结论（`verify_game`），
-    /// 因此比 `-verifyroms` 快得多，而且拥有/缺失是结构化的、能直接显示状态色。
-    ///
-    /// **当前没有菜单入口**（同上，`can_verify` 的注释）。整套单游戏校验是
-    /// 有价值的实现——`core::verify::find_units_for` 的提速就是为它做的
-    /// （5.8s → 0.002s）——所以**不删**，留着备用。
-    #[allow(dead_code)]
-    pub fn start_game_verify(&mut self) {
-        if !self.can_verify() {
-            return;
-        }
-        let game = self.current_game.clone();
-        if game.is_empty() {
-            return;
-        }
-        let Some(lib) = self.lib.clone() else { return };
-        let handle = Arc::new(crate::core::verify::VerifyHandle::new());
-        self.game_verify = Some(handle.clone());
-        self.game_verify_target = game.clone();
-        self.log(format!("verifying rom: {game}"));
-        crate::background::run_game_verify(
-            lib,
-            self.opts
-                .clone()
-                .unwrap_or_else(|| Arc::new(Mutex::new(crate::core::options::OptionCore::default()))),
-            game,
-            handle,
-            self.events_tx.clone(),
-            self.ctx(),
-        );
-    }
+    // 单游戏校验（`can_verify` / `start_game_verify`）已于 2026-10-06 删除。
+    // Rom 面板显示的就是 `verify_all` 的结果，要刷新按 F5。
 
     /// Rom 信息面板（View ▸ 自定义信息栏 ▸ RomInfo）。
     ///
@@ -1656,20 +1604,20 @@ impl MameApp {
                             self.tr("Verifying")
                         ));
                     } else if self.boot_verifying || self.verify_handle.is_some() {
-                        // 分母还不存在的那一段：正在枚举待扫单元
-                        // （`set_total` 排在全量 `read_dir` 之后，见
-                        // `core/verify.rs`）。这段过去只打"正在校验"四个
-                        // 字，在冷盘上十几秒到几十秒看起来像卡死。
-                        // `cur` 形如 `enum 2/5 dirs, 13824 units`。
+                        // 枚举待扫单元的那一段：分母还不存在（`set_total` 排在全量`read_dir`
+                        // 之后，见 `core/verify.rs`）。`cur` 形如
+                        // `enum 2/5 dirs, 13824 units`。
                         //
-                        // **枚举阶段只说"正在枚举"，不前缀"正在校验"**
-                        // （用户 2026-06 要求）：枚举是校验的第一阶段，不是
-                        // 校验本身。前面挂个"正在校验"会让用户以为校验已经
-                        // 开始、百分比却始终不出来。**并且一定要带上已读取的
-                        // 数量** —— 那才是"它在动"的证据。
+                        // **文案就是"正在校验"**（用户 2026-06 定的）：枚举是
+                        // 校验的第一阶段，不是另一件事，所以不另起一个名字。
+                        // 之前这里显示"正在枚举"，而进度条一格不动，看着像
+                        // 卡在别的什么地方。
+                        //
+                        // **一定要带上已读取的数量** —— 这阶段没有百分比，
+                        // 数字才是"它在动"的证据。
                         let (dirs_done, dirs_total, units) = parse_enumerating(&cur);
                         let label = match (dirs_done, dirs_total, units) {
-                            // 目录数已知：`正在枚举 2/5 个目录 · 13824 个包`
+                            // 目录数已知：`正在校验 2/5 个目录 · 13824 个包`
                             (Some(d), Some(t), Some(u)) if t > 0 => format!(
                                 "{} · {}",
                                 self.tr("scanning {d}/{t}")

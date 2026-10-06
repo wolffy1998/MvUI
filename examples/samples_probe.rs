@@ -1,20 +1,27 @@
-//! 只读诊断：rctycn 的 samples 段为什么是空的。
+//! 只读诊断：某台机种的 samples 段为什么是那个状态。
 //!
-//! 用法：cargo run --release --example samples_probe -- <gamelist.cache> <game>
+//! 用法：
+//!   cargo run --release --example samples_probe -- <gamelist.cache|listxml> [game]
+//!   cargo run --release --example samples_probe -- <gamelist.cache|listxml> [game] <samplepath>
 //!
-//! 沿「GameMeta.sampleof → lib.get_idx → RomInfoView.samples」逐段打印，
-//! 定位到底哪一环断了。**不修改任何产品代码。**
+//! **走的是引导同一条路**（2026-06 起）：先 `set_sample_dirs` +
+//! `scan_sample_sets`（`verify_all` 开头做的事），再 `view_of`。手工绕过
+//! 扫描直接问磁盘的话，验的就不是产品代码走的那条路了 —— 2026-10-06那个
+//! 「探针 18/18 Good 而程序全灰」就是手工 `set_sample_dirs` 造成的。
+//!
+//! 不修改任何产品代码。
 
 fn main() {
-    let cache = std::env::args()
-        .nth(1)
-        .expect("gamelist.cache path");
+    let arg1 = std::env::args().nth(1).expect("用法: samples_probe <cache|listxml> [game] [samplepath]");
     let game = std::env::args().nth(2).unwrap_or_else(|| "rctycn".into());
-    // 2026-10-06：FORMAT_VERSION 升到 5，老缓存（format 4）会被拒绝。
-    // 探针改为直接吃 ，这样验证新解析不必先重建 40 秒缓存。
+    // 样本目录：第三个参数给真实目录，不给就用 MAME 0.284 的标准位置
+    let sp = std::env::args().nth(3).unwrap_or_else(|| {
+        "D:\\Game\\MAME\\MAME-0.284\\samples".to_string()
+    });
+
     let verified_flag;
-    let lib = if std::path::Path::new(&cache).extension().is_some() {
-        match mvui::core::cache::load(std::path::Path::new(&cache), "MAME v0.285 (unknown)") {
+    let lib = if std::path::Path::new(&arg1).extension().is_some() {
+        match mvui::core::cache::load(std::path::Path::new(&arg1), "MAME v0.285 (unknown)") {
             Ok(d) => {
                 println!("（读的是缓存，verified={}）", d.verified);
                 verified_flag = d.verified;
@@ -23,34 +30,29 @@ fn main() {
             Err(e) => {
                 println!("缓存不可用（{e}），改读 listxml");
                 verified_flag = true;
-                let f = std::fs::File::open(&cache).expect("open xml");
-                let mut sink = |_d: usize| {};
-                mvui::core::listxml::parse_from_reader(
-                    std::io::BufReader::new(f),
-                    false,
-                    &mut sink,
-                )
-                .expect("parse")
+                parse_xml(&arg1)
             }
         }
     } else {
-        let f = std::fs::File::open(&cache).expect("open xml");
-        let mut sink = |_d: usize| {};
-        println!("（读的是 listxml）");
         verified_flag = true;
-        mvui::core::listxml::parse_from_reader(std::io::BufReader::new(f), false, &mut sink)
-            .expect("parse")
+        println!("（读的是 listxml）");
+        parse_xml(&arg1)
     };
     println!("verified={} games={}", verified_flag, lib.games.len());
 
-    // 真实样本目录（D://Game//MAME//MAME-0.284//samples）
-    let sp = r"D://Game//MAME//MAME-0.284//samples";
-    if std::path::Path::new(sp).is_dir() {
-        mvui::core::samples::set_sample_dirs(vec![std::path::PathBuf::from(sp)]);
-        println!("sample dirs= {}", sp);
+    // ---- 引导同一条路：发布目录 → 扫一次 ----
+    let spath = std::path::PathBuf::from(&sp);
+    if spath.is_dir() {
+        mvui::core::samples::set_sample_dirs(vec![spath.clone()]);
+        println!("samplepath = {sp}");
     } else {
-        println!("!!样本目录不存在: {sp}");
+        println!("!! 样本目录不存在: {sp}（会扫到 0 个）");
+        mvui::core::samples::set_sample_dirs(vec![spath.clone()]);
     }
+    let dirs = mvui::core::samples::sample_dirs();
+    let n = mvui::core::samples::scan_sample_sets(&dirs);
+    let sets = mvui::core::samples::sample_sets();
+    println!("扫到样本集 {n} 个，前 10: {:?}", &sets[..sets.len().min(10)]);
 
     let Some(gi) = lib.get_idx(&game) else {
         println!("库里没有 {game}");
@@ -58,78 +60,62 @@ fn main() {
     };
     let g = &lib.games[gi];
     println!("\n== {game} ==");
-    println!("  sampleof          = {:?}", g.sampleof);
-    println!("  GameMeta.samples  = {} 条", g.samples.len());
+    println!("  sampleof         = {:?}", g.sampleof);
+    println!("  GameMeta.samples = {} 条", g.samples.len());
     println!("  samples 前 5= {:?}", g.samples.iter().take(5).collect::<Vec<_>>());
-    println!("  is_bios={} is_device={} is_mechanical={}", g.is_bios, g.is_device, g.is_mechanical);
-
-    // 关键：sampleof 指向的机种在不在库里？
-    if g.sampleof.is_empty() {
-        println!("\n  !! sampleof 为空 —— 解析层或缓存没拿到这个属性");
-    } else {
-        match lib.get_idx(&g.sampleof) {
-            None => println!("\n  !! get_idx({:?}) = None —— 样本机种不在库里", g.sampleof),
-            Some(si) => {
-                let s = &lib.games[si];
-                println!("\n  get_idx({:?}) = Some({})", g.sampleof, si);
-                println!("    样本机种 name={} roms={} is_bios={} is_device={}",
-                    s.name, s.roms.len(), s.is_bios, s.is_device);
-                for r in s.roms.iter().take(5) {
-                    println!("      rom {}available={} nodump={} baddump={}",
-                        r.name, r.available, r.is_nodump(), r.is_baddump());
-                }
-            }
-        }
-    }
 
     let v = mvui::core::rominfo::view_of(&lib, &game, verified_flag);
     println!("\n== view_of({game}) ==");
-    println!("  roms={} disks={} bios={} devices={} slots={} slot_decls={} samples={}",
-        v.roms.len(), v.disks.len(), v.bios.len(), v.devices.len(),
-        v.slots.len(), v.slot_decls.len(), v.samples.len());
+    println!(
+        "  roms={} disks={} bios={} devices={} samples={}",
+        v.roms.len(),
+        v.disks.len(),
+        v.bios.len(),
+        v.devices.len(),
+        v.samples.len()
+    );
     for s in &v.samples {
         println!("    sample {} {:?}", s.name, s.state);
     }
 
-    // 全库统计：有多少机种有 sampleof非空 / 有 samples / 能命中
+    // ---- 全库统计 ----
     let mut with_sampleof = 0usize;
-    let mut hit = 0usize;
     let mut with_samples_field = 0usize;
+    let mut owned = 0usize;
+    let mut self_ref = 0usize;
     for x in lib.games.iter() {
         if !x.sampleof.is_empty() {
             with_sampleof += 1;
-            if lib.get_idx(&x.sampleof).is_some() {
-                hit += 1;
+            if x.sampleof.eq_ignore_ascii_case(&x.name) {
+                self_ref += 1;
+            }
+            if mvui::core::samples::verify_game_sample(x, verified_flag).is_some() {
+                owned += 1;
             }
         }
         if !x.samples.is_empty() {
             with_samples_field += 1;
         }
     }
-    println!("\n== 全库统计 (共 {} 个机种) ==", lib.games.len());
-    println!("  sampleof 非空      {with_sampleof}");
-    println!("  其中 get_idx 命中  {hit}");
-    println!("  样本机种 get_idx 未命中 {}", with_sampleof - hit);
-    println!("  GameMeta.samples 非空  {with_samples_field}");
+    println!("\n== 全库统计（共 {} 个机种）==", lib.games.len());
+    println!("  sampleof 非空{with_sampleof}（其中自引用 {self_ref}）");
+    let rows = with_sampleof - self_ref;
+    println!("  会产出行（排除自引用后）  {rows}");
+    println!("  其中当前报拥有            {owned}");
+    println!("  GameMeta.samples 非空     {with_samples_field}");
+    println!(
+        "  盘上样本集                {n}{}",
+        if with_sampleof > 0 {
+            format!("（覆盖率 {:.0}%）", 100.0 * owned as f64 / (with_sampleof - self_ref).max(1) as f64)
+        } else {
+            String::new()
+        }
+    );
+}
 
-    // 候选：样本包在磁盘上 + 有设备或槽位的机器，用来对照 UI 截图
-    println!("\n== 候选（有样本集包+ 有 device/slot）==");
-    let dirs = mvui::core::samples::sample_dirs().to_vec();
-    let mut n = 0;
-    for x in lib.games.iter() {
-        if x.sampleof.is_empty() || x.samples.is_empty() { continue; }
-        if mvui::core::samples::find_sample_archive(&dirs, &x.sampleof).is_none() { continue; }
-        let v = mvui::core::rominfo::view_of(&lib, &x.name, verified_flag);
-        if v.slots.is_empty() && v.slot_decls.is_empty() { continue; }
-        println!("  {:<16} sampleof={:<14} samples={} devices={} slots={} slot_decls={}",
-            x.name, x.sampleof, v.samples.len(), v.devices.len(), v.slots.len(), v.slot_decls.len());
-        n += 1;
-        if n >= 8 { break; }
-    }
-
-    // genpin 到底在不在库里
-    match lib.get_idx("genpin") {
-        Some(i) => println!("\n  lib.get_idx(\"genpin\") = Some({i}) name={}", lib.games[i].name),
-        None => println!("\n  lib.get_idx(\"genpin\") = None"),
-    }
+fn parse_xml(path: &str) -> mvui::core::library::GameLibrary {
+    let f = std::fs::File::open(path).expect("open xml");
+    let mut sink = |_d: usize| {};
+    mvui::core::listxml::parse_from_reader(std::io::BufReader::new(f), false, &mut sink)
+        .expect("parse")
 }

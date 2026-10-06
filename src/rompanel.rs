@@ -63,7 +63,7 @@ fn state_icon(state: RomState) -> Option<&'static str> {
     Some(match state {
         RomState::Good => "16x16/status_good.png",
         RomState::BadDump | RomState::NoDump => "16x16/status_baddump.png",
-        RomState::Missing => "16x16/status_cross.png",
+        RomState::Missing => "16x16/status_missing.png",
         RomState::Unknown => "16x16/status_imperfect.png",
     })
 }
@@ -158,22 +158,24 @@ fn crc_text(crc: u32) -> String {
 /// 现在所有段都按 `GRID` 排，名称列统一吃 `avail - GRID`，
 /// 后面的列自然全部落在同一条竖线上。
 mod cols {
-    /// 状态词列（`未校验` / `未拥有` / `坏 dump` / `无 dump`）——中文最宽的
-    /// "未校验" 三个字，加点余量。
+    /// 状态列：图标 + 空格 + 状态词。**图标与词同格**（见 [`state_with_icon`]），
+    /// 所以这一列的宽度是"16px 图标 + 4px 间隙 + 状态词"。
+    ///
+    /// 60px 的来历：图标 16 + 间隙 4= 20，剩 40 放三个汉字（约 13px/字）。
     pub const STATE: f32 = 60.0;
     /// CRC 列：`crc(78c15fa2)` 是定宽的等宽字体串。
     pub const CRC: f32 = 104.0;
-    /// 区域 + tag 列（`maincpu` / `igs023:sprcol` / 描述 + `(tag)`）。
+    /// 区域 + tag 列（`maincpu` / `igs023:sprcol`）。
     pub const REGION: f32 = 132.0;
-    /// 继承来源标记 `(pgm)` 的宽度上限。
-    pub const FROM: f32 = 84.0;
-    /// 状态词与图标之间的空隙（用户要的"1 个空格"）。
+
+    /// 状态图标边长（1.8.2 那套 `status_*.png` 是 16×16）。
+    pub const ICON_W: f32 = 16.0;
+    /// 图标与状态词之间的空隙（用户要的"1 个空格"）。
     ///
-    /// 4px ≈ 一个空格符。**这个间隙不是列宽相减出来的**，而是量出状态词的
-    /// 实际宽度后画在词尾 —— 见 [`state_with_icon`]。
-    ///
-    /// 历史：这里曾是 `ICON(16) + ICON_GAP(8)` 两个独立列。图标独占一列导致
-    /// 「拥有」与图标之间空了 60px，看着像两列而不是一个组合。
+    /// 4px ≈ 一个空格符。**不占独立列**：图标和词在同一格里由
+    /// [`state_with_icon`] 一次画完，所以这个间隙不受 `allocate_exact_size`
+    /// 在 `LeftToRight` 里按 `min_rect` 重算的影响（那个坑踩过一次：
+    /// 列宽 22 被收成 16，间隙 0px，图标紧贴文字）。
     pub const ICON_GAP: f32 = 4.0;
 
     /// 名称列右侧的内边距。
@@ -196,7 +198,7 @@ mod cols {
     ///
     /// **不含图标**（2026-10-06）：图标改成紧跟状态词、画在 `STATE` 格子里，
     /// 不再独占列。见 [`state_with_icon`]。
-    pub const GRID: f32 = STATE + CRC + REGION + FROM;
+    pub const GRID: f32 = STATE + CRC + REGION;
 
     /// 名称列宽度：吃掉所有剩余空间，并保证不小于一个可读的下限。
     ///
@@ -208,48 +210,28 @@ mod cols {
     }
 }
 
-/// 状态词 + 图标**画在同一格里**：图标紧跟在文字后面，中间 4px。
+/// 状态图标 + 状态词**画在同一格里**：图标在左，词在右，中间 4px。
 ///
-/// 用户要求（2026-10-06）：「图标放到 拥有 / 缺失 / 未 dump 等签名，和他们
-/// 有 1 个空格的间隔」。原先图标独占一列（`ICON` + `ICON_GAP`），于是
-/// 「拥有」在 x=700、图标在 x=780、中间 60px 全是空白 —— 看着像两列而不是
-/// 一个「状态 + 图标」的组合。
+/// 用户要求（2026-06，最后一次调整）：「这对勾，X 或者感叹号图标放在拥有、
+/// 缺失、坏 dump **前面**且加个空格隔开」。先前是"词 + 图标"（图标跟在词尾），
+/// 现在反过来 —— 图标在前更像一列的**标记**，词是它的说明。
 ///
-/// **实现：先量出状态词的实际宽度，再在词尾 + 4px 处画图标。**
+/// **整格死占 [`cols::STATE`]**，所以跨段的状态起点仍落在同一条竖线上 ——
+/// 这条比"图标在前还是在后"重要得多。
 ///
-/// - 不能用 `add_sized` / `cell` 排图标 —— 它们都会居中（见 [`cell`]）。
-/// - 不能把间隙折进列宽 —— `allocate_exact_size` 在 `LeftToRight` 里会把
-///   宽度按 `min_rect` 重算，22px 被收成 16px（这个坑踩过一次）。
-/// - 图标**不占独立列**（不再有 `ICON` 常量），整格宽度
-///   仍由外部的 `STATE` 保证，所以跨段的状态词起点仍落在同一条竖线上。
+/// 图标 16px（[`cols::ICON_W`]）贴格子左端，状态词从 `16 + 4` 处起排。
+/// 图标**不染色**（1.8.2 那套 png 自带颜色：绿勾 / 红叉 / 黄叹 / 蓝问），
+/// 但**未拥有用的是新画的 `status_missing.png`（红底白叉）** —— 原来的
+/// `status_cross` 是**蓝底**白叉，跟"红色专属给确实缺的东西"这条配色约定
+/// 冲突（蓝色在深色主题下还容易被看成灰色 = 未审计）。
 ///
-/// 退路：纹理未解码时在图标格中心画文字符号。
+/// 退路：纹理未解码时在图标位置画文字符号。
 fn state_with_icon(ui: &mut egui::Ui, text: impl AsRef<str>, state: RomState) {
-    let style = ui.style().clone();
     let color = state_color(state);
-    // 1) 排版状态词，量出它的宽度（图标要贴着词尾，所以必须先知道多宽）
-    let mut job = egui::text::LayoutJob::default();
-    egui::RichText::new(text.as_ref())
-        .color(color)
-        .append_to(
-            &mut job,
-            &style,
-            egui::FontSelection::default(),
-            egui::Align::Min,
-        );
-    // 不换行：状态词最长三个字（"未拥有"），`STATE` 有60px 富余
-    job.wrap.max_width = f32::MAX;
-    let galley = ui.fonts(|f| f.layout_job(job));
-    let text_w = galley.size().x;
-    // 2) 整格死占 `STATE`（列宽刚性由外部栅格保证）
     let (_id, rect) = ui.allocate_space(egui::vec2(cols::STATE, 16.0));
-    ui.painter()
-        .galley(rect.min, galley, ui.visuals().text_color());
-    // 3) 图标画在词尾 + 4px —— 这 4px 就是用户要的"1 个空格的间隔"
+    // 1) 图标贴在格子左端
     let ctx = ui.ctx().clone();
-    let icon_x = rect.min.x + text_w + cols::ICON_GAP;
-    let icon_rect =
-        egui::Rect::from_min_size(egui::pos2(icon_x, rect.min.y), egui::vec2(16.0, 16.0));
+    let icon_rect = egui::Rect::from_min_size(rect.min, egui::vec2(cols::ICON_W, cols::ICON_W));
     let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
     if !drawn {
         // 纹理还没解码完（第一帧）或图标名写错了：退回文字符号
@@ -261,6 +243,26 @@ fn state_with_icon(ui: &mut egui::Ui, text: impl AsRef<str>, state: RomState) {
             color,
         );
     }
+    // 2) 状态词排在图标右边。宽度不参与布局（整格已被 STATE 死占），
+    //    词宽超了也只是画出去，不会把后面的列挤歪 —— 与 `cell` 不同，
+    //    这里不需要换行逻辑：状态词最长三个字（"未拥有"），60px 足够。
+    let style = ui.style().clone();
+    let mut job = egui::text::LayoutJob::default();
+    egui::RichText::new(text.as_ref())
+        .color(color)
+        .append_to(
+            &mut job,
+            &style,
+            egui::FontSelection::default(),
+            egui::Align::Min,
+        );
+    job.wrap.max_width = f32::MAX;
+    let galley = ui.fonts(|f| f.layout_job(job));
+    ui.painter().galley(
+        egui::pos2(rect.min.x + cols::ICON_W + cols::ICON_GAP, rect.min.y),
+        galley,
+        ui.visuals().text_color(),
+    );
 }
 
 /// 画一个**左对齐的定宽单元格**。
@@ -400,18 +402,15 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
             (reg, None) => reg.clone(),
         };
         cell(ui, cols::REGION, egui::RichText::new(region).monospace());
-        // 继承来的条目标一下来源，否则用户会以为这是本机种自己的文件
+        // 原来这里还有一列 `from`，显示继承来源的 `(pgm)` / `(m4acechs)`。
+        // **2026-06 按用户要求删除**："最后一列括号不需要显示"。
         //
-        // **不要 `.small()`** —— 用户要"面板里字体大小一样、字体一样"。
-        // 最后一列之前是 `.small().color(weak)`，于是`(pgz)` 这几个字
-        // 明显比别的列小一号，一眼就看出它不是同一套排版。弱化靠**颜色**
-        // （灰）就够了，字号必须与名称 / crc / 区域完全一致。
-        let from = r.from.clone().map(|f| format!("({f})")).unwrap_or_default();
-        cell(
-            ui,
-            cols::FROM,
-            egui::RichText::new(from).monospace().color(ui_weak_color()),
-        );
+        // 两条理由：① 那是 listxml 的 `merge=` 属性，对"这盘游戏能不能跑"
+        // 没有增量信息；② 它在 REGION 之后留出 84px，右侧整块空着，视觉上
+        // 像多了一列不存在的东西。
+        //
+        // `RomRow::from` 字段仍在数据层（条目的真实来源，别的功能可能要用），
+        // 只是不渲染了。
     });
 }
 
@@ -471,7 +470,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 );
                 // 补齐栅格后两列
                 gap(ui, cols::REGION);
-                gap(ui, cols::FROM);
             });
         }
     }
@@ -502,7 +500,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                         .monospace()
                         .color(ui_weak_color()),
                 );
-                gap(ui, cols::FROM);
             });
             for r in &b.roms {
                 rom_line(ui, app, r);
@@ -530,7 +527,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 // 下一行的设备 rom 就会整体前移（见 `gap` 的注释）。
                 gap(ui, cols::CRC);
                 gap(ui, cols::REGION);
-                gap(ui, cols::FROM);
             });
             // 设备自己的 rom：按设备机种名匹配回去（`device_roms` 的
             // `from` 就是设备机种名）
@@ -586,7 +582,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 // 的名称列宽度就与 Rom 段不一致（见 `cols::GRID`）。
                 gap(ui, cols::CRC);
                 gap(ui, cols::REGION);
-                gap(ui, cols::FROM);
             });
         }
     }
@@ -661,6 +656,35 @@ mod tests {
         );
     }
 
+    /// **未拥有必须是红叉**，而且不能是 1.8.2 那张 `status_cross`。
+    ///
+    /// 用户 2026-06 指出：未拥有显示的是**蓝色**叉（`status_cross.png` 是蓝底
+    /// 白叉），而配色约定里蓝色在深色主题下容易被读成灰色 = 「未审计」——
+    /// 那正是这个约定要避免的（灰色是「没查」的专属）。
+    ///
+    /// 所以新画了 `status_missing.png`（红底白叉），与绿勾同一套底色风格。
+    /// 这条钉住"别哪天又换回蓝的那张"。
+    #[test]
+    fn not_owned_uses_the_red_cross() {
+        let missing = state_icon(RomState::Missing).expect("未拥有要有图标");
+        assert!(
+            missing.contains("missing"),
+            "未拥有该用新画的 status_missing（红底白叉），现在却是 {missing}"
+        );
+        assert_ne!(
+            missing,
+            "16x16/status_cross.png",
+            "status_cross 是**蓝底**白叉，深色主题下会被读成灰色 = 未审计"
+        );
+        // 图标文件必须真的在资产表里（build.rs 按文件名生成 ICONS，名字写错
+        // 只会在运行期"图标不显示"，编译期零报错 —— 这个坑与 `full_uv` 那次
+        // 同源）。
+        assert!(
+            icons::ICONS.iter().any(|(n, _)| *n == missing),
+            "assets里没有 {missing} —— 图标会在运行期静默不显示"
+        );
+    }
+
     /// **所有段的状态列必须落在同一条竖线上。**
     ///
     /// 这条钉的是一个已经真刀真枪发生过的错位：Rom 段后面挂 5 列、CHD 段只
@@ -687,14 +711,22 @@ mod tests {
                 "名称列 + 固定列不能超出可用宽度：{avail} -> {w}"
             );
         }
-        // GRID 必须是四列之和（曾经漏算一列，导致列宽对不上）
+        // GRID 必须是三列之和（曾经漏算一列，导致列宽对不上）
         assert_eq!(
             cols::GRID,
-            cols::STATE + cols::CRC + cols::REGION + cols::FROM,
-            "GRID 必须等于状态+crc+区域+来源四列"
+            cols::STATE + cols::CRC + cols::REGION,
+            "GRID 必须等于 状态 + crc + 区域 三列（from 列2026-06 已删）"
         );
-        // 图标不再独占列（2026-10-06：改成紧跟状态词），但间隙必须仍是正数
-        // —— 它现在画在词尾 4px 处，全靠这个常量。
+        // 图标与状态词**同格**（画在 STATE 这一格里），所以状态列必须装得下
+        // 「图标 + 间隙 + 最长的三个汉字」。装不下就会压到 crc 列上。
+        assert!(
+            cols::STATE >= cols::ICON_W + cols::ICON_GAP + 39.0,
+            "STATE({}) 装不下 图标({}) + 间隙({}) + 「未拥有」三字(约 39)",
+            cols::STATE,
+            cols::ICON_W,
+            cols::ICON_GAP
+        );
+        // 间隙必须仍是正数 —— 它是用户要的"1 个空格"
         assert!(
             (3.0..=12.0).contains(&cols::ICON_GAP),
             "图标与状态词之间留 1 个空格（约 4px），不能是 0 也不能太大：{}",

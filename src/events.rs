@@ -45,19 +45,7 @@ pub enum AppEvent {
     /// folder tree rebuilt after an verify changed availability
     FoldersReady(Arc<FolderCache>),
     VerifyDone(Result<String, String>),
-    /// 单游戏校验跑完。
-    ///
-    /// 视图是**那一瞬间的快照**，不是"回头去库里读"——校验在后台线程上
-    /// 改了共享的库，而用户可能在这期间点了别的游戏。带着快照回来，弹窗
-    /// 讲的一定是它自己审的那个游戏。
-    ///
-    /// **当前没有菜单入口**（2026-10-05 用户要求把菜单里的校验项删掉，
-    /// 统一走「刷新档案」）。保留给 `start_game_verify` 复用。
-    #[allow(dead_code)]
-    GameVerifyDone {
-        game: String,
-        result: Result<crate::core::rominfo::RomInfoView, String>,
-    },
+    // `GameVerifyDone` 已于 2026-10-06 删除（单游戏校验整条路走不通了）。
     SnapReady { dock: usize, game: String, width: u32, height: u32, rgba: Vec<u8> },
     /// A machine icon arrived (or was found missing: `width == 0`).
     /// `game` is the row it belongs to even when the bytes came from a parent

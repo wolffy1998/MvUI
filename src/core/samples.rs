@@ -48,41 +48,81 @@ use crate::core::rominfo::{RomState, SampleRow};
 /// pinball 游戏引用），每次都比对前先构造一次 Set。
 pub type SampleSet = HashSet<String>;
 
-/// 定位一个样本集包，返回它的**已存在**候选路径。
+/// **本次校验扫到的样本集包名**（小写）。
 ///
-/// **三种形态都要认**（实测机器上三种都出现过）：
+/// 由 [`scan_sample_sets`] 在 `verify_all` 开头一次扫出来，`verify_game_sample`
+/// 只查这个集合。**不再按名字现场 `stat`**。
 ///
-/// | 形态 | 路径 | 谁在用
-/// |---|---|---|
-/// | 归档 | `dir/{name}.zip` | MAME 0.284 标准发行包的 `samples/`（76 个 zip）
-/// | 归档 | `dir/{name}.7z` | 部分整合包
-/// | 散目录 | `dir/{name}/` | 0.289 那套（`samples/` 空，只有 `floppy/*.wav` 散装）
+/// 为什么改成"扫一次存集合"：
 ///
-/// 三候选口径与 `verify::find_units_for`（按名字定位 rom 归档）**故意一致**：
-/// 那已经是本项目验证过的"一个名字三个去处"惯例，抄它比另立一套好。
+/// - 判据只有"包在不在"，而样本集总共**几十个包**（实测 0.284 的 `samples/`
+///   是 76 个 zip + 4 个目录）。一次 `read_dir` 毫秒级，比 44387 个条目的
+///   rom 枚举小三个数量级，完全搭得起。
+/// - 挂在 `verify_all` 里而不是渲染路径上之后，`verified` 门控**名副其实**：
+///   灰色真的表示"这一轮还没扫到"，而不是像原先那样"其实查过了但被 rom 的
+///   进度挡住了"。要刷新样本状态按 F5 即可。
+/// - 散目录形态（0.289 那套 `samples/{name}/`）与归档**混在同一个集合里**，
+///   判据统一成"三种形态任一存在"。
 ///
-/// 只查 `dirs` 里的目录，不做 `read_dir` 全量枚举——样本集总共 76 个包，
-/// 按名字直接stat 就够（这也是 `find_units_for` 把单游戏校验从 11s 降到
-/// 0.002s 的原因）。
-pub fn find_sample_archive(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
-    if name.is_empty() {
-        return None;
-    }
+/// 用 `LazyLock` 包 `RwLock`：`HashSet::new()` 不是 `const`，不能直接进
+/// `static`。`LazyLock` 首次解引用时构造，全程不需要 `OnceLock::set` 那套
+/// 「第二次返回 `Err` 且不生效」的玩法。
+static SAMPLE_SETS: std::sync::LazyLock<std::sync::RwLock<SampleSet>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(SampleSet::new()));
+
+/// 扫 `dirs` 下的样本集，把包名收进全局集合。**每次 `verify_all` 开头调一次。**
+///
+/// 三种形态都收：
+///
+/// | 形态 | 收什么
+/// |---|---|
+/// | `dir/{name}.zip` / `.7z` | `{name}`（`file_stem`，去扩展名）
+/// | `dir/{name}/` | `{name}`（`file_name`，目录名本身就是样本集名）
+///
+/// 一律转小写：Windows/macOS 文件系统不敏感，磁盘上可能是 `GENPIN.ZIP`，
+/// 而 `GameMeta::sampleof` 是小写。
+pub fn scan_sample_sets(dirs: &[PathBuf]) -> usize {
+    let mut set = SampleSet::new();
     for dir in dirs {
-        // 归档形态
-        for ext in ["zip", "7z"] {
-            let p = dir.join(format!("{name}.{ext}"));
-            if p.is_file() {
-                return Some(p);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let key = if p.is_dir() {
+                // 散目录：`samples/genpin/` → "genpin"
+                p.file_name().map(|n| n.to_string_lossy().to_lowercase())
+            } else if archive::is_zip(&p) || archive::is_7z(&p) {
+                // 归档：`samples/genpin.zip` → "genpin"
+                p.file_stem().map(|n| n.to_string_lossy().to_lowercase())
+            } else {
+                None
+            };
+            if let Some(k) = key {
+                if !k.is_empty() {
+                    set.insert(k);
+                }
             }
         }
-        // 散目录形态
-        let d = dir.join(name);
-        if d.is_dir() {
-            return Some(d);
-        }
     }
-    None
+    let n = set.len();
+    match SAMPLE_SETS.write() {
+        Ok(mut g) => *g = set,
+        // 锁 poisoned：上一次写时 panic 了。样本状态只是提示信息，宁可沿用旧值
+        // 也不要在这里 panic 把整轮校验带崩。
+        Err(p) => *p.into_inner() = set,
+    }
+    n
+}
+
+/// 已扫到的样本集包名集合（供测试与诊断用）。
+pub fn sample_sets() -> Vec<String> {
+    let Ok(g) = SAMPLE_SETS.read() else {
+        return Vec::new();
+    };
+    let mut v: Vec<String> = g.iter().cloned().collect();
+    v.sort();
+    v
 }
 
 /// 列出一个样本集里**已拥有**的采样文件名（基名，不含扩展名）。
@@ -131,20 +171,29 @@ pub fn list_have(archive_or_dir: &Path) -> SampleSet {
 /// 引用），每台只要其中几个文件，`18/18` 那个分母是这台机器的、分子是整包的，
 /// 混在一起并不说明任何事。用户真正要回答的是"这个游戏要的采样包我下了没"。
 ///
-/// **`Unknown` 只在没校验时出现**（`verified=false`）。包找不到现在报
-/// `Missing`（红）而不是 `Unknown`（灰）——用户明确说"红色，缺失"。
-/// 之前的理由是"用户可能压根没下采样包，报缺失会误导"，但既然显示的是
-/// "这个包在不在"，那不在就是不在，红色是准确的。
-pub fn verify_game_sample(g: &GameMeta, dirs: &[PathBuf], verified: bool) -> Option<SampleRow> {
+/// **`verified` 门控在这里终于是真的**（2026-06）：判据来自 [`scan_sample_sets`]
+/// 那一次扫描，而扫描挂在 `verify_all` 开头 —— 所以灰色确实表示"这一轮还没
+/// 扫到"，而不是像原先那样"其实已经 `stat` 过了，只是被 rom 的进度挡住"。
+/// 要刷新按 F5。
+///
+/// 包找不到报 `Missing`（红）不是 `Unknown`（灰）：既然显示的是"这个包在不在"，
+/// 那不在就是不在，红色是准确的（用户明确要求）。
+pub fn verify_game_sample(g: &GameMeta, verified: bool) -> Option<SampleRow> {
     if g.sampleof.is_empty() || g.samples.is_empty() {
         return None;
     }
-    // 自引用守卫：`sampleof` 指向自己的机种（实测全库61 个）不是样本集，
+    // 自引用守卫：`sampleof` 指向自己的机种（实测全库 61 个）不是样本集，
     // 拿它当包名去找会得到一个毫无意义的"缺失"。
     if g.sampleof.eq_ignore_ascii_case(&g.name) {
         return None;
     }
-    let present = find_sample_archive(dirs, &g.sampleof).is_some();
+    // 集合里存的是小写（`scan_sample_sets` 统一转的），而 `sampleof` 在
+    // listxml 里已经是小写，仍转一次以防用户手改的 dat 有大写。
+    let key = g.sampleof.to_lowercase();
+    let present = match SAMPLE_SETS.read() {
+        Ok(s) => s.contains(&key),
+        Err(p) => p.into_inner().contains(&key),
+    };
     let state = if !verified {
         RomState::Unknown
     } else if present {
@@ -199,7 +248,14 @@ pub fn sample_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::model::RomInfo;
+
+    /// **本模块的测试全部串行**：它们都改同一份全局 `SAMPLE_DIRS` /
+    /// `SAMPLE_SETS`，而 Rust 的测试默认多线程并行。
+    ///
+    /// 症状很隐蔽：单跑一个测试全绿，`cargo test` 跑全量就 FAILED，而且
+    /// 失败的那个是**无辜的**（`unverified_games_report_unknown` 报的却是
+    /// 另一个测试建好的包被它读到了）。所以每个碰全局的测试开头拿这把锁。
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn meta_with(name: &str, sampleof: &str, samples: &[&str]) -> GameMeta {
         let mut g = GameMeta {
@@ -211,61 +267,70 @@ mod tests {
         g
     }
 
-    fn rom_named(n: &str) -> RomInfo {
-        RomInfo {
-            name: n.into(),
-            ..Default::default()
-        }
-    }
-
-    /// 没有 `sampleof` 或没有 `<sample>` 的机种不产出行——
+    /// 没有 `sampleof` 或没有 `<sample>` 的机种不产而行——
     /// 面板上不该出现"样本: -"这种噪音。
     #[test]
     fn a_game_without_samples_produces_no_row() {
-        assert!(verify_game_sample(&meta_with("x", "", &[]), &[], true).is_none());
-        assert!(verify_game_sample(&meta_with("x", "genpin", &[]), &[], true).is_none());
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        scan_sample_sets(&[]);
+        assert!(verify_game_sample(&meta_with("x", "", &[]), true).is_none());
+        assert!(verify_game_sample(&meta_with("x", "genpin", &[]), true).is_none());
     }
 
     /// `sampleof` 指向自己的机种（实测 61 个）不算样本集。
     #[test]
     fn a_self_referencing_sampleof_is_not_a_sample_set() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        scan_sample_sets(&[]);
         let g = meta_with("3bagfull", "3bagfull", &["a", "b"]);
         assert!(
-            verify_game_sample(&g, &[], true).is_none(),
+            verify_game_sample(&g, true).is_none(),
             "自己不是自己的样本集"
         );
     }
 
-    /// 样本集包找不到 → **未拥有（红）**，不是灰色"未知"。
-    ///
-    /// 2026-06 用户定的口径：既然这一行显示的是"这个包在不在"，那不在就是
-    /// 不在，红是准确的。此前报Unknown 的理由是"用户可能压根没下采样包，
-    /// 报缺失会误导"—— 但判据已经简化成"包在不在"，那个理由不成立了。
-    #[test]
-    fn a_missing_archive_is_reported_as_not_owned() {
-        let g = meta_with("rctycn", "genpin", &["bumper", "chime1"]);
-        let row = verify_game_sample(&g, &[PathBuf::from(r"Z://definitely//not//here")], true)
-            .expect("仍要出行，只是状态是未拥有");
-        assert_eq!(row.name, "genpin");
-        assert_eq!(row.state, RomState::Missing, "包不在 = 未拥有");
-    }
-
     /// 没校验时一律 Unknown，不能报"拥有"——那是骗人。
+    ///
+    /// **这条在 2026-06 之后终于名副其实**：判据来自 `verify_all` 开头那次
+    /// `scan_sample_sets`，`verified=false` 就是"这一轮真的还没扫"。原先这里
+    /// 是假的——判据只做 3 次 `stat`、早就查完了，却因为 rom 还没校验完而
+    /// 灰着。
     #[test]
     fn unverified_games_report_unknown() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join("mvui_samples_unver");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建目录");
+        std::fs::write(dir.join("genpin.zip"), b"x").expect("写占位");
+        scan_sample_sets(&[dir.clone()]);
+
         let g = meta_with("rctycn", "genpin", &["a"]);
-        let row = verify_game_sample(&g, &[], false).expect("出行");
-        assert_eq!(row.state, RomState::Unknown);
+        assert_eq!(
+            verify_game_sample(&g, false).expect("出行").state,
+            RomState::Unknown,
+            "verified=false 就是没扫过，不许报拥有"
+        );
+        // 同一个包，verified=true 就该报拥有 —— 差别只在这个标志
+        assert_eq!(
+            verify_game_sample(&g, true).expect("出行").state,
+            RomState::Good
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 核心路径：磁盘上真的有 `{sampleof}.zip` → 报拥有。
+    /// 核心路径：`scan_sample_sets` 扫到 `{sampleof}.zip` → 报拥有。
     ///
-    /// **不再逐个比对包内文件**（2026-06 用户要求）。原先这里断言
-    /// `have=2, total=3, state=Missing`（包里缺 zz），现在包里有什么完全
-    /// 不影响结论 —— 只要 zip 在就是"拥有"。
+    /// **不逐个比对包内文件**（2026-06 用户要求）：包里有什么完全不影响结论。
+    /// 样本集是共享包（`genpin` 被 1438 台 pinball 游戏引用），算`9/9` 的分母
+    /// 没有意义。
     #[test]
-    fn an_existing_archive_reads_as_owned() {
-        let dir = std::env::temp_dir().join("mvui_samples_test");
+    fn a_scanned_archive_reads_as_owned() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join("mvui_samples_scan");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
         {
@@ -280,49 +345,110 @@ mod tests {
             }
             zw.finish().expect("收尾");
         }
+        assert_eq!(scan_sample_sets(&[dir.clone()]), 1, "扫到 1 个样本集");
 
-        // 本机要 a / b / zz 三个 —— zz 不在包里，但**照样报拥有**：
-        // 样本集是共享包，逐个比对算出来的分母没有意义。
+        // 本机要 a / b / zz 三个 —— zz 不在包里，但**照样报拥有**
         let g = meta_with("rctycn", "genpin", &["a", "b", "zz"]);
-        let row = verify_game_sample(&g, &[dir.clone()], true).expect("出行");
+        let row = verify_game_sample(&g, true).expect("出行");
         assert_eq!(row.name, "genpin");
         assert_eq!(row.state, RomState::Good, "zip 在就是拥有");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 散目录形态（0.289 那套的 `floppy/*.wav`）也要认。
+    /// **三种形态都要收进集合**（用户 2026-06 明确要求"散文件也需要，以文件夹名
+    /// 匹配"）：`{name}.zip` / `{name}.7z` / 散目录 `{name}/`。
     #[test]
-    fn a_loose_directory_is_also_a_valid_sample_set() {
-        let base = std::env::temp_dir().join("mvui_samples_loose");
+    fn all_three_archive_shapes_are_scanned() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let base = std::env::temp_dir().join("mvui_samples_shapes");
         let _ = std::fs::remove_dir_all(&base);
-        let set = base.join("genpin");
-        std::fs::create_dir_all(&set).expect("建目录");
-        for n in ["a", "b"] {
-            std::fs::write(set.join(format!("{n}.wav")), b"x").expect("写 wav");
-        }
-        let g = meta_with("rctycn", "genpin", &["a", "b"]);
-        let row = verify_game_sample(&g, &[base.clone()], true).expect("出行");
-        // 散目录形态也认（0.289 那套是纯散装，`samples/{name}/`）
-        assert_eq!(row.state, RomState::Good, "散目录形态要能认出来");
+        // zip
+        std::fs::create_dir_all(&base).expect("建目录");
+        std::fs::write(base.join("genpin.zip"), b"x").expect("写占位");
+        // 7z（内容不用合法，扫描只看名字与扩展名）
+        std::fs::write(base.join("ssample.7z"), b"x").expect("写占位");
+        // 散目录（0.289 那套：`samples/{name}/`）
+        std::fs::create_dir_all(base.join("ssample2")).expect("建散目录");
+
+        assert_eq!(scan_sample_sets(&[base.clone()]), 3, "三种形态各收一个");
+        let sets = sample_sets();
+        assert!(sets.contains(&"genpin".to_string()), "zip: {sets:?}");
+        assert!(sets.contains(&"ssample".to_string()), "7z: {sets:?}");
+        assert!(
+            sets.contains(&"ssample2".to_string()),
+            "散目录按文件夹名匹配: {sets:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// 三个候选（`.zip` / `.7z` / 散目录）里找到任何一个就算数，
-    /// 口径与 `find_units_for` 一致。
+    /// 大小写：磁盘上可能是 `GENPIN.ZIP`，而 `sampleof` 是小写。
     #[test]
-    fn all_three_archive_shapes_are_tried() {
-        let base = std::env::temp_dir().join("mvui_samples_shapes");
+    fn the_scan_normalises_case() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let base = std::env::temp_dir().join("mvui_samples_case");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).expect("建目录");
-        // 只放一个 7z 名字的占位文件：内容不用合法，find只看存在性
-        std::fs::write(base.join("genpin.7z"), b"x").expect("写占位");
+        std::fs::write(base.join("GENPIN.ZIP"), b"x").expect("写占位");
+        scan_sample_sets(&[base.clone()]);
         assert_eq!(
-            find_sample_archive(&[base.clone()], "genpin"),
-            Some(base.join("genpin.7z")),
-            "7z 形态要认"
+            verify_game_sample(&meta_with("rctycn", "genpin", &["a"]), true)
+                .expect("出行")
+                .state,
+            RomState::Good,
+            "文件系统不敏感，扫描必须统一转小写"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 无关文件不该被当成样本集。
+    #[test]
+    fn unrelated_files_are_not_collected() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let base = std::env::temp_dir().join("mvui_samples_junk");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("建目录");
+        for n in ["readme.txt", "notes.md", "genpin.txt"] {
+            std::fs::write(base.join(n), b"x").expect("写占位");
+        }
+        std::fs::create_dir_all(base.join("_sample")).expect("建目录");
+        assert_eq!(
+            scan_sample_sets(&[base.clone()]),
+            1,
+            "只有 `_sample` 目录算样本集，其余三个文本文件不算"
+        );
+        assert_eq!(sample_sets(), vec!["_sample".to_string()]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 扫不到就是扫不到 —— 空目录给出空集合，样本一律未拥有（红）。
+    ///
+    /// 这正是 2026-06 那个热启动 BUG 的形状：引导漏发布目录 → 扫出来是空的
+    /// → Samples 段要么全灰（未校验）或全红（已校验）。
+    #[test]
+    fn an_empty_sample_path_yields_nothing_owned() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join("mvui_samples_empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建目录");
+        assert_eq!(scan_sample_sets(&[dir.clone()]), 0);
+        assert_eq!(
+            verify_game_sample(&meta_with("rctycn", "genpin", &["a"]), true)
+                .expect("出行")
+                .state,
+            RomState::Missing
+        );
+        // 目录压根不存在也不能 panic
+        assert_eq!(
+            scan_sample_sets(&[PathBuf::from("Z:////definitely////not////here")]),
+            0
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `set_sample_dirs` **必须能覆盖**。
@@ -332,53 +458,74 @@ mod tests {
     /// 路径都要设目录，第二次设是常态。
     #[test]
     fn the_sample_dir_table_can_be_replaced() {
-        set_sample_dirs(vec![PathBuf::from("Z:\\first")]);
-        assert_eq!(sample_dirs(), vec![PathBuf::from("Z:\\first")]);
-        set_sample_dirs(vec![PathBuf::from("Y:\\second"), PathBuf::from("Y:\\third")]);
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        set_sample_dirs(vec![PathBuf::from("Z:////first")]);
+        assert_eq!(sample_dirs(), vec![PathBuf::from("Z:////first")]);
+        set_sample_dirs(vec![PathBuf::from("Y:////second"), PathBuf::from("Y:////third")]);
         assert_eq!(
             sample_dirs(),
-            vec![PathBuf::from("Y:\\second"), PathBuf::from("Y:\\third")],
+            vec![PathBuf::from("Y:////second"), PathBuf::from("Y:////third")],
             "第二次 set 必须真的替换掉第一次的值"
         );
         // 复位，免得污染同进程里其他测试的全局状态
         set_sample_dirs(Vec::new());
     }
 
-    /// 全局目录表驱动的校验：设进去就能查到，查不到就是空表。
-    /// 这条正是"热启动 Samples 段恒灰"的形状——`sample_dirs()` 返回空表时，
-    /// 有样本的游戏也只能是 Unknown。
+    /// 扫出来的集合直接驱动判定：扫一次就够，判据不再碰磁盘。
+    ///
+    /// **这条钉住"判据不碰磁盘"**：删掉磁盘上的包而**不重扫**，结论不变；
+    /// 重扫之后才变。用户新放了包要按 F5（`verify_all` 开头会重扫），
+    /// 这是显式的刷新时机，不是隐式的。
     #[test]
-    fn the_global_table_drives_the_verify() {
-        let dir = std::env::temp_dir().join("mvui_samples_global");
+    fn the_scan_result_drives_the_verdict() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join("mvui_samples_scan2");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("建临时目录");
+        std::fs::create_dir_all(&dir).expect("建目录");
         std::fs::write(dir.join("genpin.zip"), b"not a real zip").expect("写占位");
 
         let g = meta_with("rctycn", "genpin", &["a", "b"]);
         set_sample_dirs(vec![dir.clone()]);
-        let row = verify_game_sample(&g, &sample_dirs(), true).expect("出行");
+        assert_eq!(scan_sample_sets(&sample_dirs()), 1);
+        let row = verify_game_sample(&g, true).expect("出行");
         assert_eq!(row.name, "genpin");
         assert_eq!(
             row.state,
             RomState::Good,
-            "包在磁盘上就该报拥有（内容不合法也不影响 —— 只判存在）"
+            "内容不合法也不影响 —— 只判包名在不在"
         );
 
-        // 把表清空 → 立刻变成未拥有（这正是 2026-10-06 修的那个热启动 BUG
-        // 的表现：`finish_boot_cached` 漏设目录 → Samples 段全灰）
-        set_sample_dirs(Vec::new());
-        let row2 = verify_game_sample(&g, &sample_dirs(), true).expect("出行");
-        assert_eq!(row2.state, RomState::Missing, "空表 = 找不到包 = 未拥有");
+        // 把文件删掉但**不重扫** → 结论不变（判据读的是集合，不是磁盘）
+        std::fs::remove_file(dir.join("genpin.zip")).expect("删文件");
+        assert_eq!(
+            verify_game_sample(&g, true).expect("出行").state,
+            RomState::Good,
+            "没重扫就不该变 —— 这正是'按 F5 才刷新'的实现"
+        );
 
+        // 重扫之后才变
+        assert_eq!(scan_sample_sets(&sample_dirs()), 0);
+        assert_eq!(
+            verify_game_sample(&g, true).expect("出行").state,
+            RomState::Missing
+        );
+
+        set_sample_dirs(Vec::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `_sample` 前缀是 MAME 自己给"内部使用样本"的文件名约定，
-    /// 不该被当成"这台游戏要的采样"。
+    /// `list_have` 现在**没有产品代码调用**（判据改成"包在不在"之后），
+    /// 但它仍是对 zip 中央目录读取的正确性样本，留着并在下面跑一遍真实 zip。
+    ///
+    /// `_sample` 前缀是 MAME 自己给"内部使用样本"的文件名约定 —— 上面
+    /// `unrelated_files_are_not_collected` 已经钉住它算样本集（那是磁盘上的
+    /// 目录名，与包内条目名是两回事）。
     #[test]
-    fn rom_files_are_not_confused_with_samples() {
-        // 反过来验：`g.samples` 里的名字拼 `.wav` 后必须能在包里找到，
-        // 而包里的 `.rom`/`.bin` 不该被算成采样文件。
+    fn listing_a_real_archive_takes_basenames() {
+        // 串行化：本测试改全局集合，与同模块其他测试不能并行
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join("mvui_samples_rom");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建目录");
@@ -397,12 +544,8 @@ mod tests {
         let have = list_have(&dir.join("genpin.zip"));
         // 子目录里的 b.wav 也要认（取 basename）
         assert!(have.contains("a") && have.contains("b"), "a/b 都该在");
-        // `.bin` 会被收进 Set（`list_have` 只去扩展名，不筛后缀），
-        // 但**比对时不会命中**——因为 `<sample>` 里不会有叫 `c` 的采样名。
-        // 这里验的是"取 basename 生效"：`sub/b.wav` 的 b 被正确认了出来。
         assert!(have.contains("c"));
         let _ = std::fs::remove_dir_all(&dir);
-        let _ = rom_named("unused");
+        scan_sample_sets(&[]);
     }
 }
-

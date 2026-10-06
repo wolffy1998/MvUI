@@ -704,14 +704,10 @@ pub fn view_of(lib: &GameLibrary, game: &str, verified: bool) -> RomInfoView {
 
     // 6) 样本。**这里原来靠 `lib.get_idx(&g.sampleof)` 反查"样本集机种"** ——
     // 而 MAME 根本不把样本集输出成 `<machine>`（全量 listxml 里 `genpin`
-    // 出现 0 次），所以 1574/1898 恒None，Samples 段对绝大多数游戏永远空。
-    // 现在改用 `core::samples`：拿本机`<sample>` 名去 `samplepath` 的
-    // `{sampleof}.zip` 里比对条目名。
-    //
-    // `sample_dirs()` 返回 `Vec`（内部是 `RwLock`，不能借出 `&'static`），
-    // 先绑到局部再借引用，别把临时值的引用传下去。
-    let sdirs = crate::core::samples::sample_dirs();
-    if let Some(row) = crate::core::samples::verify_game_sample(g, &sdirs, verified) {
+    // 出现 0 次），所以 1574/1898 恒 None，Samples 段对绝大多数游戏永远空。
+    // 现在改用 `core::samples`：那份集合在 `verify_all` 开头扫一次
+    // `samplepath` 得出（zip / 7z / 散目录三种形态都收），这里只查集合。
+    if let Some(row) = crate::core::samples::verify_game_sample(g, verified) {
         view.samples.push(row);
     }
 
@@ -1112,18 +1108,18 @@ mod tests {
         assert_eq!(v.disks[0].state, RomState::Missing);
     }
 
-    /// 样本段现在**只判"包在不在"**（2026-10-06 用户要求）。
+    /// 样本段只判"样本集包在不在"（2026-06 用户要求）。
     ///
-    /// 原先这里逐个比对包内文件算`have/total`并在面板上显示 `2/3`，现已
-    /// 删掉：样本集是共享包（`genpin` 被 1438 台游戏引用），那个分子是整包
-    /// 的文件数、分母是这台机器需要的数量，两个口径并排显示说明不了任何事。
+    /// 判据来自 `core::samples::scan_sample_sets` 那一次扫描（`verify_all`
+    /// 开头做的事），`view_of` 只查集合。原先这里逐个比对包内文件算
+    /// `have/total` 并显示 `2/3`，现已删掉：样本集是共享包（`genpin` 被1438
+    /// 台游戏引用），那个分子是整包文件数、分母是本机需求数，两个口径并排
+    /// 显示说明不了任何事。
     ///
-    /// 判据也随之变简单：`samplepath` 下有 `{sampleof}.zip` → 拥有，没有 →
-    /// **未拥有**（红色，用户明确要求的口径，不再是灰色"未知"）。
+    /// 这条测试顺带钉住一件容易漏的事：**`view_of` 不再自己碰磁盘**。
+    /// 删掉磁盘上的包而不重扫，结论不变 —— 刷新时机是 F5（重跑 `verify_all`）。
     #[test]
     fn a_sample_row_reports_whether_the_archive_is_there() {
-        // 真造一个样本集包：包里只有 a / b，本机还要 zz —— 但**不重要**了，
-        // 判据只看 zip 在不在。
         let dir = std::env::temp_dir().join("mvui_rominfo_samples");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
@@ -1139,7 +1135,7 @@ mod tests {
             }
             zw.finish().expect("收尾");
         }
-        crate::core::samples::set_sample_dirs(vec![dir.clone()]);
+        crate::core::samples::scan_sample_sets(&[dir.clone()]);
 
         let mut g = meta("game");
         g.sampleof = "ssample".into();
@@ -1147,18 +1143,22 @@ mod tests {
         let lib = lib_with(vec![g]);
         let v = view_of(&lib, "game", true);
         assert_eq!(v.samples.len(), 1, "有 sampleof 与 samples 才出行");
-        assert_eq!(v.samples[0].name, "ssample", "显示的是样本集名，不是本机名");
+        assert_eq!(
+            v.samples[0].name, "ssample",
+            "显示的是样本集名，不是本机名"
+        );
         assert_eq!(
             v.samples[0].state,
             RomState::Good,
-            "zip 在就该报拥有——不因为里面少了 zz 就报缺失"
+            "zip 在就该报拥有 —— 不因为里面少了 zz 就报缺失"
         );
 
-        // 包不在了 → 未拥有（红），不是灰色"未知"
+        // 重扫（包没了）→ 未拥有（红），不是灰色"未知"
         let _ = std::fs::remove_dir_all(&dir);
+        crate::core::samples::scan_sample_sets(&[dir.clone()]);
         let v2 = view_of(&lib, "game", true);
         assert_eq!(v2.samples[0].state, RomState::Missing);
-        crate::core::samples::set_sample_dirs(Vec::new());
+        crate::core::samples::scan_sample_sets(&[]);
     }
 
     /// 本地化描述优先。

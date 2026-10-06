@@ -140,7 +140,7 @@ pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_cmd(app, ctx);
     draw_about(app, ctx);
     draw_verify(app, ctx);
-    draw_rom_verify(app, ctx);
+    // `draw_rom_verify` 已随单游戏校验一起删除（2026-06）。
     draw_filter(app, ctx);
 }
 
@@ -1199,47 +1199,3 @@ fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {    let mut show = app.s
     app.show_verify = show;
 }
 
-/// 单游戏校验的结果弹窗（右键 / File ► Verify ROM）。
-///
-/// 版式与 Rom 信息面板**完全一致**（同一个 `rompanel::render`）——用户只需学习
-/// 一种样式。区别只在顶部那行说明：面板写"来自校验缓存"，弹窗写
-/// "刚刚重新校验"——后者是现场重审的结论，不是缓存里的。
-fn draw_rom_verify(app: &mut MameApp, ctx: &egui::Context) {
-    let Some((game, view)) = app.game_verify_result.clone() else {
-        return;
-    };
-    let title = format!("{} — {}", app.tr("Verify ROM"), game);
-    let close_label = app.tr("Close").to_string();
-    let bar_h = title_bar_height(ctx);
-    let mut show = true;
-    let mut close = false;
-    let _ = egui::Window::new(title)
-        .open(&mut show)
-        .resizable(true)
-        .default_width(760.0)
-        .default_height(520.0)
-        // same reason as the dirs dialog: one job, one full-height list
-        .collapsible(false)
-        .frame(opaque_frame(ctx))
-        // the title carries the game name, which changes with the selection —
-        // pin the id so the window does not jump when another game is verified
-        .id(egui::Id::new("mvui_rom_verify"))
-        .show(ctx, |ui| {
-            paint_title_logo(ui, ctx, bar_h);
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    crate::rompanel::render(ui, app, &view);
-                });
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button(close_label).clicked() {
-                    close = true;
-                }
-            });
-        });
-    if close || !show {
-        app.game_verify_result = None;
-    }
-}
