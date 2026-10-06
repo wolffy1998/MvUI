@@ -1251,11 +1251,14 @@ impl MameApp {
                         let title =
                             crate::i18n::tr(&self.lang, COLUMN_TITLES[src_col]);
                         let accent = ui.visuals().selection.stroke.color;
-                        // `panel_fill`, not `window_fill`: the latter goes
-                        // translucent when a wallpaper is set, and the ghost
-                        // floats over the list where a see-through header (and
-                        // doubled-up title text) would be unreadable
-                        let bg = ui.visuals().panel_fill;
+                        // The ghost takes the **same tint as a hovered header
+                        // cell** (selection blue at the hover strength), just
+                        // with the accent outline — an opaque `panel_fill`
+                        // block read as "one extra white column" rather than
+                        // "the column I'm holding" (user 2026-10-07). The text
+                        // stays fully opaque, which keeps it readable on the
+                        // tint over both the zebra rows and a wallpaper.
+                        let bg = ui.visuals().selection.bg_fill.gamma_multiply(0.45);
                         let text_color = ui.visuals().text_color();
                         let (gw, gh) = (src_rect.width(), src_rect.height());
                         egui::Area::new(egui::Id::new("header_drag_ghost"))
