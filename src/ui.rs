@@ -197,20 +197,20 @@ fn dock_style(ctx: &egui::Context, wallpaper: bool, dark: bool) -> egui_dock::St
     // slightly narrower tabs, so a full row of image tabs is less likely to
     // overflow in the first place
     style.tab.tab_body.inner_margin = egui::Margin::symmetric(4.0, 2.0);
-    // The dock leaves are the one place a translucent fill belongs: this is the
-    // layer 1.8.2 made see-through in `setTransparentBg` (QPalette::Base), and
-    // it is what lets the wallpaper show through the game list and the info
-    // docks. It is set *here* rather than on `visuals.window_fill` because egui
-    // derives both this and every menu/popup frame from `window_fill` — making
-    // that one translucent turned the whole interface, menus included, to grey
-    // mush. Setting `tab_body.bg_fill` here keeps the two independent.
+    // The dock sits inside the central panel, whose own fill is the veil
+    // (`apply_theme_with_bg` puts `panel_fill` = veil while a wallpaper is
+    // active). The dock must therefore stay *transparent* here: giving the
+    // tab body or the tab bar its own veil would stack two translucencies
+    // and darken the picture twice.
     if wallpaper {
-        // 1.8.2 `setTransparentBg`: one brush, `QPalette::Base` →
-        // `rgba(0,0,0,128)` dark / `rgba(255,255,255,128)` light
-        style.tab.tab_body.bg_fill = if dark {
-            egui::Color32::from_black_alpha(128)
+        style.tab.tab_body.bg_fill = egui::Color32::TRANSPARENT;
+        style.tab_bar.bg_fill = egui::Color32::TRANSPARENT;
+        // the active tab still needs to stand out against the see-through
+        // tab row, so it alone gets a more solid veil
+        style.tab.active.bg_fill = if dark {
+            egui::Color32::from_black_alpha(200)
         } else {
-            egui::Color32::from_white_alpha(128)
+            egui::Color32::from_white_alpha(216)
         };
     }
     style
@@ -297,14 +297,15 @@ impl eframe::App for MameApp {
         }
 
         crate::windows::draw_windows(self, ctx);
+        // the backdrop first, on the lowest layer, so every panel (menu bar,
+        // toolbar, status bar, central) paints its veil over it — see
+        // `draw_background`
+        self.draw_background(ctx);
         self.draw_menu(ctx);
         self.draw_toolbar(ctx);
         // the machine tree is a dock tab now (MainTab::Folders) — dragging the
         // splitter next to it resizes it, and its width lives in `dock_layout`
         egui::CentralPanel::default().show(ctx, |ui| {
-            // the backdrop goes down first, inside this panel, so the dock area
-            // and everything in it are painted over it (see `draw_background`)
-            self.draw_background(ui);
             if self.need_mame_pick || self.mame.is_none() {
                 self.draw_startup_panel(ui);
                 return;
@@ -443,35 +444,35 @@ impl MameApp {
     // menu tree (origin mainwindow.ui)
     // ------------------------------------------------------------------
 
-    /// The window backdrop, drawn as the **central panel's own frame fill**.
+    /// The window backdrop, painted over the **whole window** on the
+    /// `Order::Background` layer — below the menu bar, the toolbar, the
+    /// status bar and the central panel alike.
     ///
-    /// It used to be painted on `Order::Background` over `ctx.screen_rect()`,
-    /// which is wrong twice over. `screen_rect()` is the whole window including
-    /// the menu/toolbar/status bars, and the picture is opaque, so it buried the
-    /// entire interface — with `Order::Background` nominally the lowest layer,
-    /// the panels still lost (verified: alpha 255 hid the menu bar too, alpha
-    /// 128 let it bleed through and wash out the text). Docking the picture to
-    /// the central panel's frame makes egui own the ordering: the backdrop is
-    /// painted first inside that frame and every widget draws on top of it.
+    /// Every panel keeps its own brush on top (`panel_fill`), which
+    /// `apply_theme_with_bg` turns into a translucent veil while a wallpaper
+    /// is active, so the picture shows through the bars while their text
+    /// stays fully opaque and readable. That is the 1.8.2 shape exactly:
+    /// `setBgPixmap` put the pixmap on the *window's* background role, and
+    /// `setTransparentBg` swapped the panel brushes for translucent ones.
     ///
-    /// Origin: 1.8.2 `setBgPixmap` put the pixmap on the main window's
-    /// background role, then `setTransparentBg` swapped `QPalette::Base` for
-    /// `rgba(0,0,0,128)` under the tree/list docks — i.e. a translucent panel
-    /// over a window-wide picture. `window_fill` (which `egui_dock` turns into
-    /// `TabBodyStyle::bg_fill`, style.rs:704) is that same brush here.
-    fn draw_background(&mut self, ui: &mut egui::Ui) {
+    /// Why this works now when an earlier attempt failed: the failure was
+    /// never the `Order::Background` layer itself — it was that the veil of
+    /// that experiment sat on `window_fill`, the one brush the menu and
+    /// popup frames also read, so the whole interface washed out. With the
+    /// veil on `panel_fill` (and `window_fill` left opaque) the floating
+    /// menus stay solid while every panel goes see-through.
+    fn draw_background(&mut self, ctx: &egui::Context) {
         let Some(file) = self.background_file.clone() else {
             return;
         };
         let dir = self.bg_dir.clone();
-        let ctx = ui.ctx().clone();
         let mut tex = self.bg_tex.take();
-        let handle = crate::app::load_background(&dir, &file, &mut tex, &ctx);
+        let handle = crate::app::load_background(&dir, &file, &mut tex, ctx);
         self.bg_tex = tex;
         let Some(tex) = handle else { return };
 
-        let area = ui.max_rect();
-        let painter = ui.painter_at(area);
+        let area = ctx.screen_rect();
+        let painter = ctx.layer_painter(egui::LayerId::background());
         let id = tex.id();
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         if self.bg_stretch {

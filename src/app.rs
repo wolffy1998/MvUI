@@ -1675,19 +1675,48 @@ pub fn apply_theme_with_bg(ctx: &egui::Context, dark: bool, transparent: bool) {
         } else {
             egui::Color32::from_white_alpha(128)
         };
-        // `window_fill` stays **opaque** on purpose. egui derives three things
-        // from it: every dock leaf's `TabBodyStyle::bg_fill` (style.rs:704),
-        // every menu frame (`Frame::menu`, frame.rs:123) and every popup. Only
-        // the first one should be see-through — 1.8.2's `setTransparentBg`
-        // swapped exactly one brush (`QPalette::Base` → `rgba(0,0,0,128)`) and
-        // left the menu bar and toolbars solid. Making `window_fill` translucent
-        // to get the dock right therefore washed out the menus too; the veil now
-        // goes into `ui::dock_style`'s `tab_body.bg_fill` instead, which is the
-        // one slot only the dock leaves read.
+        // The wallpaper is painted window-wide on `Order::Background`
+        // (`ui::draw_background`), so every panel that wants to show it reads
+        // the same brush: `panel_fill` backs the menu bar, the toolbar, the
+        // status bar *and* the central panel, and one veil over all of them is
+        // what makes the picture read as one continuous backdrop instead of a
+        // patch showing through the middle of the window.
+        v.panel_fill = veil;
+        // Frosted widgets: the search box and the toolbar buttons sit directly
+        // on the veiled bar, so a solid fill would cover the picture with an
+        // opaque island. A slightly *more* transparent fill plus a hairline
+        // border keeps the outline readable — the classic glass look.
+        v.widgets.inactive.weak_bg_fill = if dark {
+            egui::Color32::from_black_alpha(96)
+        } else {
+            egui::Color32::from_white_alpha(112)
+        };
+        v.widgets.inactive.bg_stroke = egui::Stroke::new(
+            1.0_f32,
+            egui::Color32::from_rgba_unmultiplied(148, 163, 184, if dark { 110 } else { 150 }),
+        );
+        // Hover/press feedback keeps its hue but lets the picture through —
+        // an opaque slab on a veiled surface reads as a hole punched in the
+        // glass. Selection stays fully opaque: it is the strongest state and
+        // must not depend on what happens to be behind it.
+        v.widgets.hovered.bg_fill = if dark {
+            egui::Color32::from_rgba_unmultiplied(59, 130, 246, 90)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(59, 130, 246, 60)
+        };
+        v.widgets.active.bg_fill = if dark {
+            egui::Color32::from_rgba_unmultiplied(37, 99, 235, 110)
+        } else {
+            egui::Color32::from_rgba_unmultiplied(37, 99, 235, 80)
+        };
+        // `window_fill` stays **opaque** on purpose. egui derives every menu
+        // frame (`Frame::menu`, frame.rs:123) and every popup from it, and a
+        // floating surface above a busy picture needs to be solid to be
+        // readable. 1.8.2 left its menus solid over the wallpaper too.
         //
-        // Striped rows are drawn by the game list on top of the leaf, so they
-        // take the same veil — an opaque stripe over a translucent panel reads
-        // as a bright band floating above the picture.
+        // Striped rows are drawn by the game list on top of the veiled leaf,
+        // so they take the same veil — an opaque stripe over a translucent
+        // panel reads as a bright band floating above the picture.
         v.faint_bg_color = veil;
         // 1.8.2 kept the text fully opaque over the wallpaper
         // (`QDockWidget, QStatusBar QLabel { color: white }` in the stylesheet
@@ -1695,18 +1724,18 @@ pub fn apply_theme_with_bg(ctx: &egui::Context, dark: bool, transparent: bool) {
         // else has left a faded override behind.
         v.override_text_color = None;
         //
-        // Two earlier attempts, both wrong, for the record:
+        // Earlier attempts, for the record:
         //  * only `extreme_bg_color` translucent — on the mistaken belief it was
         //    the dock backdrop. It is egui's void/fallback colour, so nothing
         //    changed and the picture stayed invisible.
-        //  * this veil *plus* painting the picture on `Order::Background` over
-        //    `ctx.screen_rect()` — the picture then covered the whole window
-        //    including the menu bar and toolbar and buried the entire
-        //    interface. The picture is now drawn inside the central panel by
-        //    `ui::draw_background`.
-        //  * putting the veil on `window_fill` — right colour, wrong consumer:
-        //    the menu and popup frames read the same slot, so they went
-        //    translucent too.
+        //  * the veil on `window_fill` — right colour, wrong consumer: the
+        //    menu and popup frames read the same slot, so they went
+        //    translucent too and the text washed out.
+        //  * the wallpaper painted inside the central panel only — the menu
+        //    bar, toolbar and status bar sat beside the picture as opaque
+        //    slabs, which cut it into a middle patch; it now spans the whole
+        //    window on `Order::Background`, with the veil moved to
+        //    `panel_fill` so every bar shows it while staying readable.
     }
     ctx.set_visuals(v);
 }

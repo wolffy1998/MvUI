@@ -90,8 +90,8 @@ fn style(ctx: &egui::Context) {
         sc.floating_width = 5.0;
         sc.bar_inner_margin = 3.0;
         sc.handle_min_length = 24.0;
-        sc.dormant_handle_opacity = 0.35;
-        sc.active_handle_opacity = 0.55;
+        sc.dormant_handle_opacity = 0.28;
+        sc.active_handle_opacity = 0.5;
         sc.interact_handle_opacity = 0.95;
         sc.dormant_background_opacity = 0.0;
         sc.active_background_opacity = 0.08;
