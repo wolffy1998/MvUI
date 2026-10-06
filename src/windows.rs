@@ -199,6 +199,9 @@ fn draw_font_window(
         .collapsible(false)
         .resizable(false)
         .default_width(280.0)
+        // centered on the window: settings dialogs are modal in spirit, and a
+        // fixed anchor also keeps them from being dragged off-screen
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.vertical(|ui| {
@@ -258,6 +261,7 @@ fn draw_advanced_search(app: &mut MameApp, ctx: &egui::Context) {
         .resizable(false)
         .collapsible(false)
         .default_width(260.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.weak(app.tr("Search only in the ticked columns"));
@@ -299,6 +303,7 @@ fn draw_filter(app: &mut MameApp, ctx: &egui::Context) {
         .resizable(false)
         .collapsible(false)
         .default_width(240.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             for (flag, key) in [
@@ -338,6 +343,7 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
         .default_width(860.0)
         .default_height(560.0)
         .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             app.ensure_chain();
@@ -959,6 +965,7 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
         // no collapse triangle in the title bar: this dialog has one job and a
         // full-height list, and a minimisable frame only invites hiding it
         .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         // The title is translated, but the window's position must not move when
         // the language does — `Window::new` derives its `Area` id from the title
@@ -1147,6 +1154,7 @@ fn draw_play(app: &mut MameApp, ctx: &egui::Context) {
         .resizable(false)
         .collapsible(false)
         .default_width(480.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             let mut file = app
@@ -1276,6 +1284,7 @@ fn draw_cmd(app: &mut MameApp, ctx: &egui::Context) {
         .resizable(true)
         .collapsible(false)
         .default_width(720.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             // fill the dialog and give the command room to breathe; the fixed
@@ -1320,6 +1329,7 @@ fn draw_about(app: &mut MameApp, ctx: &egui::Context) {
         .open(&mut show)
         .resizable(false)
         .collapsible(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -1347,16 +1357,22 @@ fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {
         .resizable(true)
         .collapsible(false)
         .default_width(520.0)
-        .default_height(320.0)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.spacing_mut().scroll.bar_width = 10.0;
             ui.spacing_mut().scroll.bar_outer_margin = 4.0;
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                for l in app.verify_lines.clone() {
-                    ui.monospace(l);
-                }
-            });
+            // height wraps the log so far (up to a cap), instead of a fixed
+            // 320px box that starts mostly empty — width stays pinned so the
+            // monospace lines do not set the window size
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    for l in app.verify_lines.clone() {
+                        ui.monospace(l);
+                    }
+                });
         });
     app.show_verify = show;
 }
