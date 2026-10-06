@@ -978,28 +978,42 @@ impl MameApp {
         id: egui::Id,
         panel: egui::Rect,
         font: crate::app::UiFontPrefs,
+        selected: bool,
     ) -> (egui::Rect, bool) {
-        // the row box is the label's own height; adding the vertical item spacing
-        // makes neighbouring bands meet, so the tint reads as one continuous line.
-        // `size * 1.4` is the painted label height (row-height factor, taller for
-        // CJK) — a band sized to the nominal font size left a gap under every
-        // row and the hover tint looked one pixel short.
-        let h = font.size * 1.4 + 4.0 + ui.spacing().item_spacing.y;
+        // The band must be exactly as tall as the row it sits behind. The row
+        // is a `horizontal` whose height is the max of the label's line box
+        // and the 16px folder icon, so measure the line box for real — lay one
+        // CJK glyph out with the very `FontId` the label uses — instead of
+        // guessing a factor (a `size * 1.4 + 4` guess was ~7px taller than the
+        // row at the default font, and the tint bled into the neighbours;
+        // user report 2026-10-07). The vertical item spacing on top makes
+        // neighbouring bands meet, so the tint reads as one continuous line.
+        let text_h = ui.fonts(|f| {
+            f.layout_no_wrap("好".to_string(), font.font_id(), egui::Color32::WHITE)
+                .size()
+                .y
+        });
+        let h = text_h.max(FOLDER_ICON) + ui.spacing().item_spacing.y;
         let top = ui.max_rect().top();
         let band = egui::Rect::from_min_max(
             egui::pos2(panel.left(), top),
             egui::pos2(panel.right(), top + h),
         );
         let hit = ui.interact(band, id, egui::Sense::click());
-        // Highlight is hover-only: the line tints while the pointer is on it and
-        // goes back to normal when the pointer leaves — whether or not the entry is
-        // the current folder. Selection is carried by the label's text colour
-        // instead (see `tree_row_label`).
-        if ui
+        if selected {
+            // The selected line needs its background: `tree_row_label` paints
+            // the selection foreground (white in the light theme) on it, and
+            // white on the plain panel is invisible. The solid selection blue
+            // keeps the white text readable, wallpaper or not.
+            ui.painter()
+                .rect_filled(band, 0.0, ui.visuals().selection.bg_fill);
+        } else if ui
             .ctx()
             .input(|i| i.pointer.latest_pos())
             .is_some_and(|p| band.contains(p))
         {
+            // Hover is for the not-selected rows only: the selected one keeps
+            // the stronger selection tint even under the pointer.
             ui.painter()
                 .rect_filled(band, 0.0, ui.visuals().widgets.hovered.bg_fill);
         }
@@ -1055,7 +1069,8 @@ impl MameApp {
     ) -> (bool, bool, f32) {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            let (_band, row_hit) = Self::tree_row_band(ui, id.with("row"), panel, font);
+            let (_band, row_hit) =
+                Self::tree_row_band(ui, id.with("row"), panel, font, selected);
             let row_left = ui.max_rect().left();
             // egui gives its collapsing toggler the whole indent width and no gap
             // behind it; mirror that so both kinds of row land on one grid.
@@ -1114,7 +1129,7 @@ impl MameApp {
     ) -> bool {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            let (_band, clicked) = Self::tree_row_band(ui, id, panel, font);
+            let (_band, clicked) = Self::tree_row_band(ui, id, panel, font, selected);
             icons::draw_passive(ui, &ctx, icons::FOLDER, FOLDER_ICON);
             Self::tree_row_label(ui, selected, text, font);
             clicked
