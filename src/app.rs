@@ -150,39 +150,6 @@ impl UiFontPrefs {
     }
 }
 
-/// PlayWith dialog kinds (origin: playoptions dialogs)
-#[derive(PartialEq, Clone, Copy, Debug)]
-pub enum PlayKind {
-    Savestate,
-    Playback,
-    Record,
-    Mng,
-    Avi,
-    Wave,
-}
-
-impl PlayKind {
-    pub fn title(self) -> &'static str {
-        match self {
-            PlayKind::Savestate => "Load Savestate",
-            PlayKind::Playback => "Playback Input",
-            PlayKind::Record => "Record Input",
-            PlayKind::Mng => "Record MNG Output",
-            PlayKind::Avi => "Record AVI Output",
-            PlayKind::Wave => "Record Wave Output",
-        }
-    }
-    pub fn ext(self) -> &'static str {
-        match self {
-            PlayKind::Savestate => "sta",
-            PlayKind::Playback | PlayKind::Record => "inp",
-            PlayKind::Mng => "mng",
-            PlayKind::Avi => "avi",
-            PlayKind::Wave => "wav",
-        }
-    }
-}
-
 pub struct MameApp {
     /// the open game-list context menu: (anchor position, row it acts on).
     ///
@@ -367,9 +334,6 @@ pub struct MameApp {
     /// the game-list filter popup, opened from the toolbar button left of the
     /// search box (the flags themselves are `filter_flags`)
     pub show_filter_win: bool,
-    pub show_cmd: bool,
-    pub cmd_text: String,
-    pub play_dialog: Option<(PlayKind, String)>,
     pub show_verify: bool,
     pub verify_lines: Vec<String>,
     pub verify_handle: Option<Arc<crate::core::verify::VerifyHandle>>,
@@ -648,9 +612,6 @@ impl MameApp {
             dirs_buf: String::new(),
             show_about: false,
             show_filter_win: false,
-            show_cmd: false,
-            cmd_text: String::new(),
-            play_dialog: None,
             show_verify: false,
             verify_lines: Vec::new(),
             verify_handle: None,
@@ -1126,27 +1087,6 @@ impl MameApp {
         let libg = lib.lock().unwrap();
         core.chain_load(&meta, &libg, &gui);
         self.opt_chain_key = Some(key);
-    }
-
-    /// raw command execution for the CmdUI dialog (origin -noreadconfig path)
-    pub fn launch_raw(&mut self, args: Vec<String>) {
-        let Some(mame) = self.mame.clone() else { return };
-        self.log(format!("launch: {} {:?}", mame.path.display(), args));
-        match mame.spawn_run(&args) {
-            Ok(child) => {
-                let game = self.current_game.clone();
-                self.running.insert(game.clone());
-                let tx = self.events_tx.clone();
-                let ctx = self.ctx();
-                std::thread::spawn(move || {
-                    let mut child = child;
-                    let code = child.wait().ok().and_then(|s| s.code());
-                    let _ = tx.send(AppEvent::MameExited { game, code });
-                    ctx.request_repaint();
-                });
-            }
-            Err(e) => self.poplog(e.to_string()),
-        }
     }
 
     pub fn refresh_all(&mut self) {

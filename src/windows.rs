@@ -1,7 +1,7 @@
 //! Dialog windows (origin: optionsUI/csvCfgUI/dirsUI/playOptionsUI/cmdUI/aboutUI).
 
 use crate::app::{
-    MameApp, PlayKind, UiFontFamily, UiFontPrefs, F_CLONES, F_MECHANICAL, F_NONWORKING,
+    MameApp, UiFontFamily, UiFontPrefs, F_CLONES, F_MECHANICAL, F_NONWORKING,
     F_UNAVAILABLE, COL_LAST, COLUMN_TITLES,
 };
 use crate::core::options::{
@@ -139,8 +139,8 @@ pub fn paint_title_logo(ui: &egui::Ui, ctx: &egui::Context, bar_h: f32) {
 pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_options(app, ctx);
     draw_dirs(app, ctx);
-    draw_play(app, ctx);
-    draw_cmd(app, ctx);
+    // `draw_play` / `draw_cmd`（运行方式与命令行对话框）已按用户要求删除
+    // （2026-10-07）：文件/右键菜单只保留「运行」。
     draw_about(app, ctx);
     draw_verify(app, ctx);
     // `draw_rom_verify` 已随单游戏校验一起删除（2026-06）。
@@ -1143,188 +1143,6 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
         Default::default()
     };
     app.show_dirs_win = app.show_dirs_win && !apply && !cancelled;
-}
-
-// ---------------------------------------------------------------------
-// play dialogs (origin: playOptionsUI init/runMame slots)
-// ---------------------------------------------------------------------
-
-fn draw_play(app: &mut MameApp, ctx: &egui::Context) {
-    if app.play_dialog.is_none() {
-        return;
-    }
-    let (kind, _) = app.play_dialog.clone().unwrap();
-    let mut keep = true;
-    let close_flag = std::cell::Cell::new(false);
-    let run_flag = std::cell::Cell::new(false);
-    egui::Window::new(app.tr(kind.title()))
-        .open(&mut keep)
-        .resizable(false)
-        .collapsible(false)
-        .default_width(480.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(opaque_frame(ctx))
-        .show(ctx, |ui| {
-            let mut file = app
-                .play_dialog
-                .as_ref()
-                .map(|(_, f)| f.clone())
-                .unwrap_or_default();
-            ui.horizontal(|ui| {
-                if ui
-                    .add_sized([330.0, 20.0], egui::TextEdit::singleline(&mut file))
-                    .changed()
-                {
-                    if let Some((_, f)) = app.play_dialog.as_mut() {
-                        *f = file.clone();
-                    }
-                }
-                let ext = kind.ext();
-                if ui.small_button("...").clicked() {
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter(&format!("*.{ext}"), &[ext])
-                        .add_filter("All Files (*)", &["*"])
-                        .save_file()
-                    {
-                        if let Some((_, f)) = app.play_dialog.as_mut() {
-                            *f = p.to_string_lossy().to_string();
-                        }
-                    }
-                }
-            });
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button(app.tr("OK")).clicked() {
-                    run_flag.set(true);
-                    close_flag.set(true);
-                }
-                if ui.button(app.tr("Cancel")).clicked() {
-                    close_flag.set(true);
-                }
-            });
-        });
-    let run = run_flag.get();
-    if close_flag.get() {
-        let taken = app.play_dialog.take();
-        if run {
-            if let Some((kind, file)) = taken {
-                let args = play_args_for(app, kind, &file);
-                app.launch(crate::core::launcher::RunMode::Normal, args);
-            }
-        }
-    }
-}
-
-fn play_args_for(app: &MameApp, kind: PlayKind, file: &str) -> Vec<String> {
-    let opt = |key: &str| {
-        app.opts
-            .as_ref()
-            .and_then(|o| o.try_lock().ok())
-            .and_then(|o| o.opts.get(key).map(|p| p.currvalue.clone()))
-            .unwrap_or_default()
-    };
-    let first = |s: &str| s.split(';').next().unwrap_or("").to_string();
-    match kind {
-        PlayKind::Savestate => vec!["-state".into(), file.into()],
-        PlayKind::Playback => {
-            let d = first(&opt("input_directory"));
-            vec![
-                "-input_directory".into(),
-                d,
-                "-playback".into(),
-                std::path::Path::new(file)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                "-nvram_directory".into(),
-                std::env::temp_dir().to_string_lossy().to_string(),
-            ]
-        }
-        PlayKind::Record => {
-            let d = first(&opt("input_directory"));
-            vec![
-                "-input_directory".into(),
-                d,
-                "-record".into(),
-                std::path::Path::new(file)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-            ]
-        }
-        PlayKind::Mng => {
-            let d = first(&opt("snapshot_directory"));
-            vec![
-                "-snapshot_directory".into(),
-                d,
-                "-mngwrite".into(),
-                std::path::Path::new(file)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-            ]
-        }
-        PlayKind::Avi => {
-            let d = first(&opt("snapshot_directory"));
-            vec![
-                "-snapshot_directory".into(),
-                d,
-                "-aviwrite".into(),
-                std::path::Path::new(file)
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-            ]
-        }
-        PlayKind::Wave => vec!["-wavwrite".into(), file.into()],
-    }
-}
-
-// ---------------------------------------------------------------------
-// cmd dialog (origin: CmdUI)
-// ---------------------------------------------------------------------
-
-fn draw_cmd(app: &mut MameApp, ctx: &egui::Context) {
-    let mut show = app.show_cmd;
-    let result = std::cell::Cell::new(0u8);
-    egui::Window::new(app.tr("Command Line"))
-        .open(&mut show)
-        .resizable(true)
-        .collapsible(false)
-        .default_width(720.0)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .frame(opaque_frame(ctx))
-        .show(ctx, |ui| {
-            // fill the dialog and give the command room to breathe; the fixed
-            // 700×60 box left dead space at every other window width
-            ui.add_sized(
-                [ui.available_width(), 160.0],
-                egui::TextEdit::multiline(&mut app.cmd_text),
-            );
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button(app.tr("OK")).clicked() {
-                    result.set(1);
-                }
-                if ui.button(app.tr("Cancel")).clicked() {
-                    result.set(2);
-                }
-                ui.weak(app.tr("runs with -noreadconfig"));
-            });
-        });
-    app.show_cmd = show && result.get() != 2;
-    let run = result.get() == 1;
-    if run {
-        let text = app.cmd_text.clone();
-        let mame = app.mame.clone();
-        if let Some(m) = mame {
-            let path = m.path.to_string_lossy().to_string();
-            let rest = text.strip_prefix(&path).unwrap_or(&text).trim().to_string();
-            let mut args: Vec<String> = vec!["-noreadconfig".into()];
-            args.extend(rest.split_whitespace().map(str::to_string));
-            app.launch_raw(args);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------

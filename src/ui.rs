@@ -1,7 +1,7 @@
 //! All egui drawing: menu tree, dockable tab area (egui_dock), folder dock,
 //! status bar with parse/verify progress (origin: mainwindow.ui + QDockWidget tabify).
 
-use crate::app::{MameApp, PlayKind, ListMode, COL_LAST, COLUMN_TITLES};
+use crate::app::{MameApp, ListMode, COL_LAST, COLUMN_TITLES};
 use crate::icons;
 use egui_dock::{DockArea, DockState, NodeIndex};
 use crate::core::folders::{self, FolderChild, FolderKind};
@@ -507,22 +507,8 @@ impl MameApp {
                     ui.separator();
                     self.add_folder_section(ui);
                     let label = self.tr("Remove From This Folder");
-                    if ui
-                        .add_enabled(self.can_remove_from_folder(), button(label))
-                        .clicked()
-                    {
+                    if ui.add_enabled(self.can_remove_from_folder(), button(label)).clicked() {
                         self.remove_from_folder();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    let src_label = self.src_properties_label();
-                    if ui.add_enabled(self.has_game(), button(src_label)).clicked() {
-                        self.open_properties(crate::core::options::OPTLEVEL_SRC);
-                        ui.close_menu();
-                    }
-                    let props = self.tr("Properties");
-                    if ui.add_enabled(self.has_game(), button(props)).clicked() {
-                        self.open_properties(crate::core::options::OPTLEVEL_CURR);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -590,69 +576,14 @@ impl MameApp {
     }
 
     pub fn play_section(&mut self, ui: &mut egui::Ui) {
-        let play_label = if self.has_game() {
-            format!("{} {}", self.tr("Play"), self.current_game)
-        } else {
-            self.tr("Play")
-        };
-        if ui.add_enabled(self.has_game(), button(play_label)).clicked() {
+        // plain "运行" — no game name suffix (user request 2026-10-07). The
+        // PlayWith submenu (savestate/playback/record/command line) and the
+        // Delete Cfg submenu were removed on the same request; double-click
+        // still runs the selection.
+        if ui.add_enabled(self.has_game(), button(self.tr("Play"))).clicked() {
             self.launch(RunMode::Normal, vec![]);
             ui.close_menu();
         }
-        ui.menu_button(self.tr("Play With"), |ui| {
-            let cl = self.tr("Command Line...");
-            if ui.add_enabled(self.has_game(), button(cl)).clicked() {
-                self.open_cmd_dialog();
-                ui.close_menu();
-            }
-            ui.separator();
-            for kind in [
-                PlayKind::Savestate,
-                PlayKind::Playback,
-                PlayKind::Record,
-                PlayKind::Mng,
-                PlayKind::Avi,
-                PlayKind::Wave,
-            ] {
-                let label = match kind {
-                    PlayKind::Savestate => self.tr("Load Savestate..."),
-                    PlayKind::Playback => self.tr("Playback Input..."),
-                    PlayKind::Record => self.tr("Record Input..."),
-                    PlayKind::Mng => self.tr("Record MNG Output..."),
-                    PlayKind::Avi => self.tr("Record AVI Output..."),
-                    PlayKind::Wave => self.tr("Record Wave Output..."),
-                };
-                if ui.add_enabled(self.has_game(), button(label)).clicked() {
-                    self.open_play_dialog(kind);
-                    ui.close_menu();
-                }
-            }
-        });
-        self.delete_cfg_submenu(ui);
-    }
-
-    pub fn delete_cfg_submenu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(self.tr("Delete Cfg"), |ui| {
-            let files = self.delete_cfg_candidates();
-            for path in &files {
-                if ui.button(path.display().to_string()).clicked() {
-                    let _ = std::fs::remove_file(path);
-                    self.log(format!("deleted {}", path.display()));
-                    ui.close_menu();
-                }
-            }
-            if !files.is_empty() {
-                ui.separator();
-                let ra = self.tr("Remove All");
-                if ui.button(ra).clicked() {
-                    for p in files {
-                        let _ = std::fs::remove_file(&p);
-                        self.log(format!("deleted {}", p.display()));
-                    }
-                    ui.close_menu();
-                }
-            }
-        });
     }
 
     pub fn add_folder_section(&mut self, ui: &mut egui::Ui) {

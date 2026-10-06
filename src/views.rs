@@ -2,7 +2,7 @@
 //! (origin: Gamelist + GameListSortFilterProxyModel + GameListDelegate).
 
 use crate::app::{
-    MameApp, PlayKind, ListMode, COL_CLONEOF, COL_DEFAULT_WIDTH, COL_DESC, COL_LAST, COL_MFTR,
+    MameApp, ListMode, COL_CLONEOF, COL_DEFAULT_WIDTH, COL_DESC, COL_LAST, COL_MFTR,
     COL_MIN_WIDTH, COL_NAME, COL_ROM, COL_SRC, COL_YEAR, COLUMN_TITLES, F_CLONES, F_MECHANICAL,
     F_NONWORKING, F_UNAVAILABLE,
 };
@@ -27,12 +27,6 @@ pub struct StatusInfo {
 impl MameApp {
     pub fn has_game(&self) -> bool {
         !self.current_game.is_empty() && self.selected.is_some()
-    }
-
-    pub fn src_properties_label(&self) -> String {
-        self.current_meta()
-            .map(|m| self.tf("Properties for {}", m.sourcefile))
-            .unwrap_or_else(|| self.tr("Properties for ..."))
     }
 
     pub fn current_meta(&self) -> Option<crate::core::model::GameMeta> {
@@ -292,53 +286,6 @@ impl MameApp {
     }
 
     // ------------------------------------------------------------------
-    // delete cfg menu (origin: updateDeleteCfgMenu — ini/cfg/nv/dif)
-    // ------------------------------------------------------------------
-
-    /// Files the "delete machine configuration" action offers to remove.
-    ///
-    /// Every directory option goes through `resolve_dir_list`, which resolves a
-    /// relative value against the mame.exe directory. Splitting the raw option
-    /// value by ';' instead made every relative entry (`cfg`, `nvram`, `ini`, …)
-    /// resolve against the *process* working directory, so the candidates went
-    /// missing whenever it differed from the mame directory (README N8).
-    pub fn delete_cfg_candidates(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        let Some(m) = self.current_meta() else { return out };
-        let Some(opts) = self.opts.clone() else { return out };
-        let Ok(core) = opts.try_lock() else { return out };
-        let dirs_of = |key: &str| -> Vec<PathBuf> {
-            core.opts
-                .get(key)
-                .map(|o| core.resolve_dir_list(&o.currvalue))
-                .unwrap_or_default()
-        };
-        for d in dirs_of("inipath") {
-            for n in [&m.name, &m.cloneof] {
-                if n.is_empty() {
-                    continue;
-                }
-                let p = d.join(format!("{n}.ini"));
-                if p.is_file() {
-                    out.push(p);
-                }
-            }
-        }
-        for (dir_opt, ext) in [
-            ("cfg_directory", "cfg"),
-            ("nvram_directory", "nv"),
-        ] {
-            for d in dirs_of(dir_opt) {
-                let p = d.join(format!("{}.{}", m.name, ext));
-                if p.is_file() {
-                    out.push(p);
-                }
-            }
-        }
-        out
-    }
-
-    // ------------------------------------------------------------------
     // export dialogs (origin: exportFixDat/exportGameList)
     // ------------------------------------------------------------------
 
@@ -506,50 +453,6 @@ impl MameApp {
             }
             Err(e) => self.poplog(e.to_string()),
         }
-    }
-
-    // ---- PlayWith dialogs glue ----
-
-    pub fn open_play_dialog(&mut self, kind: PlayKind) {
-        let game = self.current_game.clone();
-        let dir = self
-            .opts
-            .as_ref()
-            .and_then(|o| o.try_lock().ok())
-            .and_then(|o| {
-                let key = match kind {
-                    PlayKind::Savestate => "state_directory",
-                    PlayKind::Playback | PlayKind::Record | PlayKind::Wave => "input_directory",
-                    PlayKind::Mng | PlayKind::Avi => "snapshot_directory",
-                };
-                o.opts.get(key).map(|p| p.currvalue.clone())
-            })
-            .unwrap_or_default();
-        let dir0 = dir.split(';').next().unwrap_or("").to_string();
-        let file = format!("{}_{:03}.{}", game, 0, kind.ext());
-        let _ = dir;
-        self.play_dialog = Some((kind, format!("{dir0}/{file}")));
-    }
-
-    pub fn open_cmd_dialog(&mut self) {
-        // build the full command line preview (origin step 6)
-        let Some(mame) = self.mame.clone() else { return };
-        let gui_keys: std::collections::HashSet<String> = self.gui.map.keys().cloned().collect();
-        let diff = self
-            .opts
-            .as_ref()
-            .and_then(|o| o.try_lock().ok())
-            .map(|o| crate::core::launcher::cmd_diff(&o, &gui_keys))
-            .unwrap_or_default();
-        let spec = crate::core::launcher::build_args(
-            RunMode::Cmd,
-            &self.current_meta().unwrap_or_default(),
-            &diff,
-            &[],
-            None,
-        );
-        self.cmd_text = format!("{} {}", mame.path.display(), spec.args.join(" "));
-        self.show_cmd = true;
     }
 
     /// 跑MAME 自己的 `-verifyroms` / `-verifysamples`，把 stdout 收进
@@ -1451,7 +1354,6 @@ impl MameApp {
                         .inner_margin(6.0)
                         .show(ui, |ui| {
                         self.play_section(ui);
-                        self.delete_cfg_submenu(ui);
                         ui.separator();
                         self.add_folder_section(ui);
                         let rm = self.tr("Remove From This Folder");
@@ -1463,27 +1365,10 @@ impl MameApp {
                             close = true;
                         }
                         ui.separator();
-                        // 原来这里还有一项「校验 Rom」调 `start_game_verify()`，
+                        // 原来这里还有「校验 Rom」调 `start_game_verify()`，
                         // 与文件菜单的「刷新档案」(F5) 同源（都走校验），
                         // 用户要求删掉。下面直接是「导出列表」。
                         self.verify_submenu(ui);
-                        ui.separator();
-                        let src = self.src_properties_label();
-                        if ui
-                            .add_enabled(self.has_game(), crate::ui::button(src))
-                            .clicked()
-                        {
-                            self.open_properties(crate::core::options::OPTLEVEL_SRC);
-                            close = true;
-                        }
-                        let props = self.tr("Properties");
-                        if ui
-                            .add_enabled(self.has_game(), crate::ui::button(props))
-                            .clicked()
-                        {
-                            self.open_properties(crate::core::options::OPTLEVEL_CURR);
-                            close = true;
-                        }
                     });
                     menu_rect.set(Some(resp.response.rect));
                 });
