@@ -539,6 +539,14 @@ impl MameApp {
                     self.background_submenu(ui);
                     ui.separator();
                     ui.menu_button(self.tr("Customize Fields"), |ui| {
+                        // first entry, ahead of the column list: whether the game
+                        // list loads the per-machine icons at all. Off by default
+                        // (user request 2026-10-07) — off also skips the icon file
+                        // lookups while scrolling, and the driver-status square is
+                        // drawn either way.
+                        let si = self.tr("Show Icons");
+                        ui.checkbox(&mut self.show_list_icons, si);
+                        ui.separator();
                         for i in 1..COL_LAST {
                             let mut v = self.col_visible[i];
                             if ui.checkbox(&mut v, self.tr(COLUMN_TITLES[i])).changed() {

@@ -287,6 +287,11 @@ pub struct MameApp {
     /// the striped band alone does not read as a grid once columns are moved
     /// around (user request 2026-10-03).
     pub show_grid: bool,
+    /// View ▸ Customize Fields ▸ Show Icons: whether the game list loads and
+    /// paints the per-machine icons from `icons_directory`. Off by default
+    /// (user request 2026-10-07) — the driver-status colour square is always
+    /// drawn when there is no (or no wanted) icon.
+    pub show_list_icons: bool,
     pub enforce_aspect: bool,
     pub stretch_sshot: bool,
     pub local_game_list: bool,
@@ -533,6 +538,9 @@ impl MameApp {
             .filter(|w| w.is_finite() && *w > 0.0);
         // default on: absent key means "never toggled"
         let show_grid = gui.get("show_grid").map(|v| v != "0").unwrap_or(true);
+        // default off: the icon pack is opt-in, and skipping it also skips the
+        // per-machine file lookups the list would otherwise issue while scrolling
+        let show_list_icons = gui.get("list_show_icons").map(|v| v != "0").unwrap_or(false);
         let enforce_aspect = gui.get_bool("enforce_aspect");
         let stretch_sshot = gui.get_bool("stretch_screenshot_larger");
         let local_game_list = gui.get_bool("local_game_list");
@@ -588,6 +596,7 @@ impl MameApp {
             header_resize: None,
             col_reset_salt: 0,
             show_grid,
+            show_list_icons,
             enforce_aspect,
             stretch_sshot,
             local_game_list,
@@ -836,6 +845,7 @@ impl MameApp {
         self.gui.set_bool("sort_reverse", self.sort_reverse);
         self.gui.set("sort_column", self.sort_column.to_string());
         self.gui.set_bool("show_grid", self.show_grid);
+        self.gui.set_bool("list_show_icons", self.show_list_icons);
         self.gui.set_bool("enforce_aspect", self.enforce_aspect);
         self.gui.set_bool("stretch_screenshot_larger", self.stretch_sshot);
         self.gui.set_bool("local_game_list", self.local_game_list);

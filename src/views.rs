@@ -1126,7 +1126,16 @@ impl MameApp {
                             // directly keeps the edge crisp at every DPI (the PNG
                             // path was 2× upscaled and visibly soft on a 4K screen)
                             let ictx = ui.ctx().clone();
-                            let resp = match self.game_icon(&g.name) {
+                            // View ▸ Customize Fields ▸ Show Icons, off by default:
+                            // with it off the pack is neither shown nor requested —
+                            // every row gets the status square and the list skips
+                            // the per-machine file lookups entirely
+                            let icon_tex = if self.show_list_icons {
+                                self.game_icon(&g.name)
+                            } else {
+                                None
+                            };
+                            let resp = match icon_tex {
                                 Some(tex) => ui.add(
                                     egui::Image::new(&tex)
                                         .max_size(egui::Vec2::splat(list_icon_size))
@@ -1139,7 +1148,9 @@ impl MameApp {
                                         }),
                                 ),
                                 None => {
-                                    if self.icon_needs_request(&g.name) {
+                                    if self.show_list_icons
+                                        && self.icon_needs_request(&g.name)
+                                    {
                                         icon_reqs
                                             .borrow_mut()
                                             .push((g.name.clone(), icon_fallbacks(g, &guard)));

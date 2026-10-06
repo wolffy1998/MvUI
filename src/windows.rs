@@ -852,17 +852,25 @@ fn dir_rows(app: &MameApp) -> Vec<(String, Vec<DirRow>)> {
         }],
     ));
 
-    // Artwork — one row per image dock, each defaulting to `.\<its own dir>`
-    let artwork: Vec<DirRow> = paths::IMAGE_DIRS
-        .iter()
-        .enumerate()
-        .map(|(i, (key, _))| DirRow {
-            key,
-            label: tr(dat::DOCK_NAMES.get(i).copied().unwrap_or("Image")),
-            default_value: rel(key),
-            is_dir: true,
-        })
-        .collect();
+    // Artwork — the icon pack first (user request 2026-10-07), then one row per
+    // image dock, each defaulting to `.\<its own dir>`
+    let mut artwork: Vec<DirRow> = vec![DirRow {
+        key: "icons_directory",
+        label: tr("Icons"),
+        default_value: rel("icons_directory"),
+        is_dir: true,
+    }];
+    artwork.extend(
+        paths::IMAGE_DIRS
+            .iter()
+            .enumerate()
+            .map(|(i, (key, _))| DirRow {
+                key,
+                label: tr(dat::DOCK_NAMES.get(i).copied().unwrap_or("Image")),
+                default_value: rel(key),
+                is_dir: true,
+            }),
+    );
     out.push((tr("Artwork"), artwork));
 
     // Documents — one row per .dat, each naming the concrete file it reads. The
