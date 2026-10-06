@@ -199,6 +199,11 @@ pub struct DeviceSlotRow {
     pub kind: String,
     /// 实例名（`<instance name="...">`，命令行 `-<instance>` 用的就是它）。
     pub instance: String,
+    /// 安装路径（`<device tag="...">`，如 `upd765:0:525hd`）。
+    ///
+    /// **去掉前导冒号**——MAME 在属性里写成`:upd765:0:525hd`，那个冒号是
+    /// "机种内引用"的意思，命令行里没有，用户也不该看到。
+    pub tag: String,
     /// 扩展名，逗号连接（`pg2,bin,mem`）。
     pub extensions: String,
 }
@@ -635,6 +640,7 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
         view.slots.push(DeviceSlotRow {
             kind: d.kind.clone(),
             instance: d.instance.clone(),
+            tag: d.tag.trim_start_matches(':').to_string(),
             extensions: d.extensions.join(","),
         });
     }
@@ -653,26 +659,15 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
     }
     view.device_roms = device_rom_rows(lib, &dev_names, audited);
 
-    // 6) 样本
-    if !g.sampleof.is_empty() {
-        if let Some(si) = lib.get_idx(&g.sampleof) {
-            let s = &lib.games[si];
-            let have = s.roms.iter().filter(|r| r.available).count();
-            let total = s.roms.len();
-            let state = if !audited {
-                RomState::Unknown
-            } else if total == 0 || have == total {
-                RomState::Good
-            } else {
-                RomState::Missing
-            };
-            view.samples.push(SampleRow {
-                name: s.name.clone(),
-                have,
-                total,
-                state,
-            });
-        }
+    // 6) 样本。**这里原来靠 `lib.get_idx(&g.sampleof)` 反查"样本集机种"** ——
+    // 而 MAME 根本不把样本集输出成 `<machine>`（全量 listxml 里 `genpin`
+    // 出现 0 次），所以 1574/1898 恒None，Samples 段对绝大多数游戏永远空。
+    // 现在改用 `core::samples`：拿本机`<sample>` 名去 `samplepath` 的
+    // `{sampleof}.zip` 里比对条目名。
+    if let Some(row) =
+        crate::core::samples::audit_game_sample(g, crate::core::samples::sample_dirs(), audited)
+    {
+        view.samples.push(row);
     }
 
     view
@@ -1044,22 +1039,45 @@ mod tests {
         assert_eq!(v.disks[0].state, RomState::Missing);
     }
 
-    /// 样本机的可用计数。
+    /// 样本行的 `拥有/总数` 来自「本机`<sample>` 名」vs「样本集包内条目名」。
+    ///
+    /// 这个测试原来假设"样本集是另一台机种，它的 `roms` 就是采样文件"——
+    /// **那个假设是错的**（MAME 从不把样本集输出成 `<machine>`，`genpin` 在
+    /// 全量 listxml 里出现 0 次）。真实数据源是 `GameMeta::samples`（本机
+    /// 要的 `<sample>` 名）比对 `{sampleof}.zip` 的包内条目，所以测试改成
+    /// 真造一个 zip 出来。`have` 的算法细节在 `core::samples` 里有更细的
+    /// 测试（含缺文件、全齐、散目录三种）。
     #[test]
     fn sample_rows_report_have_over_total() {
+        // 真造一个样本集包：本机要 a / b / zz，包里只有 a / b
+        let dir = std::env::temp_dir().join("mvui_rominfo_samples");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        {
+            use std::io::Write;
+            let f = std::fs::File::create(dir.join("ssample.zip")).expect("建 zip");
+            let mut zw = zip::ZipWriter::new(f);
+            let opts: zip::write::FileOptions<'_, ()> =
+                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for n in ["a.wav", "b.wav"] {
+                zw.start_file(n, opts).expect("写条目");
+                zw.write_all(b"x").expect("写内容");
+            }
+            zw.finish().expect("收尾");
+        }
+        crate::core::samples::set_sample_dirs(vec![dir.clone()]);
+
         let mut g = meta("game");
         g.sampleof = "ssample".into();
-        let mut s = meta("ssample");
-        s.roms = vec![
-            rom("a.wav", 1, "maincpu"),
-            rom("b.wav", 2, "maincpu"),
-        ];
-        s.roms[0].available = true;
-        let lib = lib_with(vec![g, s]);
+        g.samples = vec!["a".into(), "b".into(), "zz".into()];
+        let lib = lib_with(vec![g]);
         let v = view_of(&lib, "game", true);
-        assert_eq!(v.samples[0].have, 1);
-        assert_eq!(v.samples[0].total, 2);
+        assert_eq!(v.samples.len(), 1, "有 sampleof 与 samples 才出行");
+        assert_eq!(v.samples[0].name, "ssample", "显示的是样本集名，不是本机名");
+        assert_eq!(v.samples[0].have, 2, "a / b 在包里，zz 不在");
+        assert_eq!(v.samples[0].total, 3);
         assert_eq!(v.samples[0].state, RomState::Missing);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 本地化描述优先。

@@ -159,6 +159,9 @@ mod cols {
     /// 继承来源标记 `(pgm)` 的宽度上限。
     pub const FROM: f32 = 84.0;
     /// 状态图标列：16×16 的图 + 一点余量。
+    ///
+    /// 22 = 16（图）+ 6（小间距）。**那 6px 是用户明确要的**："图标和后面的
+    /// crc 要有个小空格"——16px 图标紧贴 `crc(d42e505d)` 会让两列看成一团。
     pub const ICON: f32 = 22.0;
 
     /// 名称列右侧的内边距。
@@ -172,6 +175,16 @@ mod cols {
 
     /// 段与段之间的空行高度（约一行文字）。
     pub const SECTION_GAP: f32 = 18.0;
+
+    /// 合并后的设备段第 1 列：设备类型 / 槽名。
+    ///
+    /// `floppydisk`（9 字符）是这一列最长的常见值，留够 13 个字符的量。
+    pub const DEVICE_TYPE: f32 = 104.0;
+    /// 设备段第 2 列：安装路径。
+    ///
+    /// `upd765:0:525hd`（15 字符）实测是最长的一类；`centronics:printer:printer`
+    /// 更长，但那种行第二列是空的，宽度不够也不会挤到第三列（超宽会换行）。
+    pub const DEVICE_TAG: f32 = 190.0;
 
     /// 名称列之外**全部固定列的宽度之和**。
     ///
@@ -205,7 +218,9 @@ fn icon_cell(ui: &mut egui::Ui, state: RomState) -> egui::Response {
     let ctx = ui.ctx().clone();
     let font = egui::FontId::proportional(12.0);
     let color = state_color(state);
-    // 先占满整列宽，再用它自己的 layout 把 16px 图标放到列首
+    // 先占满整列宽，再用它自己的 layout 把 16px 图标放到列首。
+    // `ICON` 是 22 而图标是 16，所以图标**靠左**、右侧天然空 6px ——
+    // 这就是"图标与后面的 crc 之间的小空格"，不需要额外画。
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(cols::ICON, 16.0), egui::Sense::hover());
     let icon_rect = egui::Rect::from_min_size(rect.min, egui::vec2(16.0, 16.0));
     let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
@@ -416,14 +431,12 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 cell(
                     ui,
                     (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
-                    
-                        egui::RichText::new(&d.file_name).monospace(),
+                egui::RichText::new(&d.file_name).monospace(),
                 );
                 cell(
                     ui,
                     cols::STATE,
-                    
-                        egui::RichText::new(app.tr(state_word(d.state))).color(color),
+                egui::RichText::new(app.tr(state_word(d.state))).color(color),
                 );
                 let _ = icon_cell(ui, d.state);
                 let short = if d.sha1.len() > 8 {
@@ -434,8 +447,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 cell(
                     ui,
                     cols::CRC,
-                    
-                        egui::RichText::new(format!("sha1({short})"))
+                egui::RichText::new(format!("sha1({short})"))
                             .monospace()
                             .color(color),
                 );
@@ -470,8 +482,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 cell(
                     ui,
                     cols::CRC + cols::REGION,
-                    
-                        egui::RichText::new(&b.description)
+                egui::RichText::new(&b.description)
                             .small()
                             .color(ui_weak_color()),
                 );
@@ -492,42 +503,26 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         for d in &view.devices {
             let color = state_color(d.state);
             tight_horizontal(ui, |ui, _row_width| {
+                // 第一列：设备机种名（`m68000` / `igs036` / `z80`）。
                 cell(
                     ui,
                     (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
                     egui::RichText::new(&d.name).monospace(),
                 );
+                // 第二列：**只有状态词**，图标/描述/tag 全部去掉。
+                // 用户要的是"两列：名 + 拥有/缺失"——tag（`:maincpu`）是内部
+                // 引用名，描述在这台机器的语境下是废话，三样都只会让第二列
+                // 长得参差不齐（`z80` 只有 3 个字，`floppy_525_hd` 有 13 个）。
                 cell(
                     ui,
                     cols::STATE,
-                    
-                        egui::RichText::new(app.tr(state_word(d.state))).color(color),
+                    egui::RichText::new(app.tr(state_word(d.state))).color(color),
                 );
-                let _ = icon_cell(ui, d.state);
-                // 描述 + 引用它的 tag（`:maincpu` / `igs023:sprcol`）。tag
-                // 是**这台机器里的引用名**，去掉前导冒号才是用户认的写法。
-                let mut tail = String::new();
-                if !d.description.is_empty() {
-                    tail.push_str(&d.description);
-                }
-                let tag = d.tag.trim_start_matches(':');
-                if !tag.is_empty() {
-                    if !tail.is_empty() {
-                        tail.push_str("  ");
-                    }
-                    tail.push_str(&format!("({tag})"));
-                }
-                // 前导空格：这一列紧跟在16px 图标后面，不留的话描述会贴着
-                // 图标看成一团
-                let tail = format!(" {tail}");
-                cell(
-                    ui,
-                    cols::CRC + cols::REGION,
-                    
-                        egui::RichText::new(tail)
-                            .small()
-                            .color(ui_weak_color()),
-                );
+                // 后面这些列一律留空，但**必须用 gap 占住**——少一列，
+                // 下一行的设备 rom 就会整体前移（见 `gap` 的注释）。
+                gap(ui, cols::ICON);
+                gap(ui, cols::CRC);
+                gap(ui, cols::REGION);
                 gap(ui, cols::FROM);
             });
             // 设备自己的 rom：按设备机种名匹配回去（`device_roms` 的
@@ -546,88 +541,98 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         }
     }
 
-    // 设备段：`<device type="memcard" tag="memcard_p1">` 这种**可挂载**的
-    // 设备，跟上面的引用设备不是一回事——它没有 rom 要校验，用户关心的是
-    // "这游戏支持插什么卡、插什么文件"。所以这一段没有状态列，只有
-    // 类型 / 实例 / 扩展名；**前面补一段空占位**，让类型列的起点与上面
-    // 那些段落的名称列落在同一条竖线上（行不再缩进，所以这里补的正是
-    // 状态列那60px）。
-    if !view.slots.is_empty() {
+    // 设备 + 槽位**合并成一段**（用户要求）：两者回答的是同一个问题
+    // ——"这台机器能插什么、插什么文件"，拆成"设备段"和"槽位段"两段
+    // 反而让人以为它们是两回事。实测 `elwro800` 两种都有：4 个 `<device>`
+    // （floppydisk / printout / cassette…）+ 3 个 `<slot>`（其中 centronics
+    // 有 19 个 option）。
+    //
+    // 三列：**类型 / 安装路径 / 详情**
+    //   - `<device>`：type（`floppydisk`）/ tag（`upd765:0:525hd`）/ 扩展名
+    //   - `<slot>`  ：槽名（`centronics`） / 空/ option 数 / option 清单
+    //
+    // 第2 列的 tag 是用户截图里那一列；`DeviceSlotRow::tag` 在
+    // `rominfo.rs` 填充时已去掉前导冒号（MAME 写的是 `:upd765:0:525hd`）。
+    if !view.slots.is_empty() || !view.slot_decls.is_empty() {
         ui.add_space(cols::SECTION_GAP);
+        // 段头复用 `"Device slots:"` 这个键——它的译文本来就是"设备:"
+        // （繁"裝置:"），而 `"Devices:"` 是个没登记过的新键，`tr` 会退化成
+        // 显示英文原文。
         section(ui, app, "Device slots:");
-        for s in &view.slots {
+        // 统一列宽：类型 / tag / 详情。第三列吃掉全部剩余空间。
+        for d in &view.slots {
             tight_horizontal(ui, |ui, _row_width| {
-                // 让"类型"列的起点 = 名称列起点：先吃掉状态列的宽度
+                // 与上面各段对齐：先吃掉状态列的宽度，让第1 列起点一致
                 gap(ui, cols::STATE);
-                let avail = _row_width;
-                // 类型：槽位的身份（`memcard`）
+                // 第1 列：设备类型（`floppydisk` / `printout` / `cassette`）
                 cell(
                     ui,
-                    avail * 0.3,
-                    
-                        egui::RichText::new(&s.kind).monospace().color(ui_weak_color()),
+                    cols::DEVICE_TYPE,
+                    egui::RichText::new(&d.kind).monospace().color(icons::GREEN),
                 );
-                // 实例：命令行 `-memcard1` 用的就是它
+                // 第2 列：安装路径（`upd765:0:525hd` / `cassette`）
                 cell(
                     ui,
-                    avail * 0.3,
-                    
-                        egui::RichText::new(&s.instance).monospace().color(ui_weak_color()),
+                    cols::DEVICE_TAG,
+                    egui::RichText::new(&d.tag).monospace().color(ui_weak_color()),
                 );
-                // 扩展名：逗号连接
+                // 第3 列：可用的文件扩展名。**要留 6px 小间距**——
+                // 与图标和 crc 之间的空隙一致。
+                let exts = format!("  {}", d.extensions);
                 cell(
                     ui,
-                    avail * 0.4,
-                    
-                        egui::RichText::new(&s.extensions).monospace().color(ui_weak_color()),
+                    (_row_width - cols::STATE - cols::DEVICE_TYPE - cols::DEVICE_TAG).max(40.0),
+                    egui::RichText::new(exts).monospace().color(ui_weak_color()),
                 );
             });
         }
-    }
-
-    //槽位段：`<slot name="ctrl1">` + `<slotoption>`，MAME 的槽位声明。
-    //与上面那段并存 —— 实测 `nes` 同时有 9 个 `<device>` 和 12 个 `<slot>`，
-    //前者说"这台机器带什么设备"，后者说"这里能插什么"。同样没有状态列。
-    if !view.slot_decls.is_empty() {
-        ui.add_space(cols::SECTION_GAP);
-        section(ui, app, "Slots:");
-        for s in &view.slot_decls {
+        for sl in &view.slot_decls {
             tight_horizontal(ui, |ui, _row_width| {
-                // 与设备段一致：补状态列的宽度，让槽位名落在名称列起点上
                 gap(ui, cols::STATE);
-                let avail = _row_width;
-                // 槽位名：命令行 `nes:ctrl1=<dev>` 用的就是它
+                // 槽位行第1 列填**槽名**（与设备行的 type 同列，同为"这行的身份"）
                 cell(
                     ui,
-                    cols::FROM,
-                    
-                        egui::RichText::new(&s.name).monospace().color(ui_weak_color()),
+                    cols::DEVICE_TYPE,
+                    egui::RichText::new(&sl.name).monospace().color(icons::GREEN),
                 );
-                // 可选设备数；空槽位（`nes_slot`）显示 0，不留空
-                let count = egui::RichText::new(format!("{}", s.option_count))
-                    .monospace()
-                    .color(ui_weak_color());
-                cell(ui, 40.0, count);
-                // 选项名清单，空槽位给个明确的"—"而不是空白
-                let text = if s.options.is_empty() {
+                // 第2 列：可选设备数，空槽位（`nes_slot`）显示 0而不是空白
+                // 走 i18n：简繁两套里key 相同、译文不同，硬编码"个"会让
+                // 繁体用户看到简体字。
+                cell(
+                    ui,
+                    cols::DEVICE_TAG,
+                    egui::RichText::new(app.tr("{} options").replace("{}", &sl.option_count.to_string()))
+                        .monospace()
+                        .color(ui_weak_color()),
+                );
+                // 第3 列：option 清单。19 个会折行，`cell` 已按列宽换行并
+                // 把多行高度报给行布局（见 `cell` 的注释）。
+                let text = if sl.options.is_empty() {
                     "-".to_string()
                 } else {
-                    s.options.clone()
+                    sl.options.clone()
                 };
+                let text = format!("  {text}");
                 cell(
                     ui,
-                    (avail - cols::FROM - 40.0).max(40.0),
-                    
-                        egui::RichText::new(text)
-                            .monospace()
-                            .color(ui_weak_color()),
+                    (_row_width - cols::STATE - cols::DEVICE_TYPE - cols::DEVICE_TAG).max(40.0),
+                    egui::RichText::new(text).monospace().color(ui_weak_color()),
                 );
             });
         }
     }
 
-    // Samples 段：样本机种名 + 拥有数 / 总数 + 状态 + 图标。
-    // 列宽与 Rom 段共用，让整面板的状态词、图标落在同一条竖线上。
+    // Samples 段：**样本集名 + 状态 + 图标 + 拥有数/总数**。
+    //
+    // 只到"包"这一级，**不逐个列出 zip 里的wav**（用户要求）。理由：
+    // 样本集是共享包——`genpin` 被1438 台 pinball 游戏共用，但每台需要的
+    // 文件子集不同（rctycn 要 18 个，别的可能只要 5 个）。列出 18 行wav
+    // 会把面板撑得很长，而用户真正关心的是"这台游戏要的齐了没有"。
+    //
+    // 数据链路：`GameMeta::samples`（本机要的 `<sample>` 名，解析时就有了）
+    // vs `samplepath` 下 `{sampleof}.zip` 的包内条目名（拼 `.wav` 后比对），
+    // 得出 `have/total`。**CRC 校验做不了** —— `<sample>` 元素只有 name，
+    // DTD 写死`<!ELEMENT sample EMPTY>`，官方没给校验值。
     if !view.samples.is_empty() {
         ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Samples:");
@@ -642,15 +647,15 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 cell(
                     ui,
                     cols::STATE,
-                    
-                        egui::RichText::new(app.tr(state_word(s.state))).color(color),
+                    egui::RichText::new(app.tr(state_word(s.state))).color(color),
                 );
                 let _ = icon_cell(ui, s.state);
+                // `9/9` —— 有了（数）/ 需要（总数）。左对齐，与Rom 段的
+                // `crc(...)` 同一列同一栅格。
                 cell(
                     ui,
                     cols::CRC,
-                    
-                        egui::RichText::new(format!("{}/{}", s.have, s.total)).monospace(),
+                    egui::RichText::new(format!("{}/{}", s.have, s.total)).monospace(),
                 );
                 // 补齐栅格后两列
                 gap(ui, cols::REGION);
@@ -659,7 +664,6 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

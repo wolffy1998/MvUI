@@ -311,6 +311,24 @@ fn finish_boot(
             .collect::<Vec<_>>()
             .join("; ")
     );
+    // 样本目录（`mame.ini` 的 `samplepath`）。**与 rompath 分开取**：样本集
+    // 是独立包（`samples/{name}.zip`），不跟 rom 放一起，而且它不进审计
+    // 单元——只用来算面板上那一行 `拥有 9/9`。
+    // 没有这一段时样本行全是"未审计"（灰），而不是错的"缺失"。
+    let sample_dirs: Vec<PathBuf> = {
+        let guard = opts.lock().unwrap();
+        match guard.opts.get("samplepath") {
+            Some(o) if !o.currvalue.trim().is_empty() => guard.resolve_dir_list(&o.currvalue),
+            // mame.ini 没这一项时用 MAME 官方默认（相对 MAME 目录）
+            _ => guard.resolve_dir_list(crate::core::samples::DEFAULT_SAMPLEPATH),
+        }
+    };
+    crate::core::samples::set_sample_dirs(sample_dirs.clone());
+    dlog!(
+        "引导: 样本目录 {} 个: {}",
+        sample_dirs.len(),
+        sample_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
+    );
     let _ = tx.send(AppEvent::Log(format!("audit: {} rom dirs", rom_paths.len())));
 
     // Persist the parsed library *before* auditing. The audit is the slow part
