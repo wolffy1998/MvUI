@@ -219,30 +219,14 @@ fn notation_file(n: &crate::core::dat::Notation) -> Option<&'static str> {
         CircleYellow => "16x16/cir-y.png",
         CircleRed => "16x16/cir-r.png",
         Arrow => "16x16/arrow-r.png",
-        // origin: `_([A-DGKNPS+])` → btn-<CHAR>.png
-        Button(c) => match c.as_str() {
-            "A" => "16x16/btn-A.png",
-            "B" => "16x16/btn-B.png",
-            "C" => "16x16/btn-C.png",
-            "D" => "16x16/btn-D.png",
-            "G" => "16x16/btn-G.png",
-            "K" => "16x16/btn-K.png",
-            "N" => "16x16/btn-N.png",
-            "P" => "16x16/btn-P.png",
-            "S" => "16x16/btn-S.png",
-            "+" => "16x16/btn-+.png",
-            _ => return None,
-        },
-        // origin: `_([a-f])` → btn-na..nf.png
-        ButtonN(c) => match c.as_str() {
-            "a" | "A" => "16x16/btn-na.png",
-            "b" | "B" => "16x16/btn-nb.png",
-            "c" | "C" => "16x16/btn-nc.png",
-            "d" | "D" => "16x16/btn-nd.png",
-            "e" | "E" => "16x16/btn-ne.png",
-            "f" | "F" => "16x16/btn-nf.png",
-            _ => return None,
-        },
+        // Buttons render as colored glyph letters, not PNGs: the shipped
+        // btn-*.png bitmaps are mislabelled art — btn-B.png paints a "P",
+        // btn-na.png a "1", btn-nb.png an "A", btn-nd.png a "4" — so a combo
+        // like `_B` showed a P and `_a` showed a 1 (user report 2026-10-07,
+        // 三国战纪 command.dat). The glyph fallback always shows the letter
+        // the notation actually stands for, which is the only thing that
+        // matters in a move list.
+        Button(_) | ButtonN(_) => return None,
     })
 }
 

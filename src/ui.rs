@@ -1537,12 +1537,16 @@ impl MameApp {
                                         // origin: convertCommand emits
                                         // `<img src=":/res/16x16/dir-N.png">` — prefer the
                                         // embedded PNG and fall back to a glyph only when
-                                        // the file really is missing
+                                        // the file really is missing. Buttons always take
+                                        // the glyph (see `notation_file`): the letter is
+                                        // the payload, and matching the icon height keeps
+                                        // mixed rows on one visual line.
                                         if !icons::notation_icon(ui, n, 16.0) {
                                             let (glyph, color) = icons::notation_glyph(n);
                                             ui.label(egui::RichText::new(glyph)
                                                 .monospace()
                                                 .strong()
+                                                .size(16.0)
                                                 .color(color));
                                         }
                                     }

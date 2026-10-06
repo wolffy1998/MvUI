@@ -312,8 +312,16 @@ pub struct DatLine {
 
 /// command.dat token regex — compiled once, this is on the render path
 /// (README P2-24)
-static CMD_TOKEN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"_([0-9A-DGKNPS+])|_([a-f])|(★|☆|▲|○|◎|●|→)").unwrap());
+///
+/// The underscore arm matches **both** the ASCII `_` and the full-width `＿`
+/// (U+FF3F): Chinese command.dat files are routinely edited with an IME, and
+/// the combo lines of 三国战纪-class files spell every move with the full-width
+/// form — with only the ASCII one in the pattern those lines fell through to
+/// plain text, painting raw `＿A＿A＿A` instead of buttons (user report
+/// 2026-10-07).
+static CMD_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[_＿]([0-9A-DGKNPS+])|[_＿]([a-f])|(★|☆|▲|○|◎|●|→)").unwrap()
+});
 
 /// origin: `<br>[\x2500-]{8,}<br>` → `<hr>` — a horizontal-rule divider.
 ///
@@ -351,6 +359,12 @@ pub fn convert_command_lines(text: &str) -> Vec<DatLine> {
         // with two spaces (`  _A：攻击`), so without this every button sat two
         // columns right of the heading it belongs to.
         let mut line = raw.trim_start().to_string();
+        // full-width underscore → ASCII before anything else looks at the
+        // text: the combo table below and (defensively) CMD_TOKEN both spell
+        // their patterns with `_`, and IME-edited files write `＿`
+        if line.contains('＿') {
+            line = line.replace('＿', "_");
+        }
         // origin: `<br>[\x2500-]{8,}<br>` → `<hr>`. The shipped file has 6 925
         // of these box-drawing runs, 24 chars wide, separating the 基本操作 /
         // 道具介绍 / 必杀技 blocks. Rendered as text they were a wall of ─.
@@ -792,5 +806,56 @@ mod tests {
             })
             .collect();
         assert!(text.contains('+'), "text around the icon was dropped: {text:?}");
+    }
+
+    /// 中文 command.dat 的连招行常用全角下划线 `＿`（输入法产物）。只认
+    /// 半角 `_` 时这些行整行落成纯文本，画成裸 `＿A＿A＿A` 而不是按钮
+    /// （用户报告 2026-10-07，三国战纪连招表）。
+    #[test]
+    fn fullwidth_underscore_moves_still_parse() {
+        let lines = convert_command_lines("＿A＿A＿A（龙 A）*4");
+        let icons: Vec<&Notation> = lines[0]
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Icon(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(icons.len(), 3, "full-width underscores must parse: {icons:?}");
+        assert!(matches!(icons[0], Notation::Button(c) if c == "A"));
+        // the trailing prose (the ×4 repeat count and the note) stays text
+        let text: String = lines[0]
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(text.contains("*4"), "trailing text lost: {text:?}");
+        assert!(!text.contains('＿'), "underscore leaked into text: {text:?}");
+    }
+
+    /// 方向记号同样要吃全角下划线：`＿2＿3＿6` 是 `＿` 版的 qdf。
+    #[test]
+    fn fullwidth_underscore_dirs_still_parse() {
+        let lines = convert_command_lines("＿2＿3＿6 + ＿P");
+        let icons: Vec<&Notation> = lines[0]
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Icon(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            icons.iter().any(|n| matches!(n, Notation::Qdf)),
+            "full-width dir combo must parse: {icons:?}"
+        );
+        assert!(
+            icons.iter().any(|n| matches!(n, Notation::Button(c) if c == "P")),
+            "full-width button must parse: {icons:?}"
+        );
     }
 }
