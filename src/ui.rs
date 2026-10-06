@@ -1044,8 +1044,11 @@ impl MameApp {
         font: crate::app::UiFontPrefs,
     ) -> (egui::Rect, bool) {
         // the row box is the label's own height; adding the vertical item spacing
-        // makes neighbouring bands meet, so the tint reads as one continuous line
-        let h = font.size.max(14.0) + 4.0 + ui.spacing().item_spacing.y;
+        // makes neighbouring bands meet, so the tint reads as one continuous line.
+        // `size * 1.4` is the painted label height (row-height factor, taller for
+        // CJK) — a band sized to the nominal font size left a gap under every
+        // row and the hover tint looked one pixel short.
+        let h = font.size * 1.4 + 4.0 + ui.spacing().item_spacing.y;
         let top = ui.max_rect().top();
         let band = egui::Rect::from_min_max(
             egui::pos2(panel.left(), top),

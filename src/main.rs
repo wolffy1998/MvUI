@@ -89,7 +89,20 @@ fn style(ctx: &egui::Context) {
         sc.bar_width = 12.0;
         sc.floating_width = 5.0;
         sc.bar_inner_margin = 3.0;
-        sc.handle_min_length = 24.0;
+        // **Must stay 0.** egui 0.29 paints the handle at `handle_min_length`
+        // when the proportional one is shorter, but the drag mapping
+        // (scroll_area.rs `offset = remap(handle_top, bar_min..=bar_max,
+        // 0..=content)`) still uses the *unclamped* handle position — so a
+        // visually-enlarged handle reaches the bar's bottom edge while its
+        // logical top only gets to `bar_max - min_length`, and the content
+        // stops `min_length/bar × content` pixels short of the end. With a
+        // 40 000-row list that is thousands of pixels: the bar sits at the
+        // bottom while the data does not (user report 2026-10-07). The same
+        // mismatch makes a click on the top of the bar jump to ~2% instead
+        // of the top. At 0 the painted and logical handles coincide, the
+        // mapping is exact at both ends, and the bar as a whole is still the
+        // drag/click target, so a thin handle costs nothing but looks.
+        sc.handle_min_length = 0.0;
         sc.dormant_handle_opacity = 0.28;
         sc.active_handle_opacity = 0.5;
         sc.interact_handle_opacity = 0.95;

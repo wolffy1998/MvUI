@@ -738,7 +738,12 @@ impl MameApp {
         let local = self.local_game_list;
         let list_font = self.list_font;
         let list_icon_size = self.list_icon_size;
-        let row_h = (list_font.size.max(list_icon_size) + 8.0).max(22.0);
+        // The row must fit the *painted* height of the label, which is the
+        // font size times the row-height factor (~1.4, taller for CJK), not
+        // the nominal size — a 28pt list font in a `size + 8` row got its
+        // glyphs clipped by the row above, and the last row could end up
+        // half-cut at the bottom of the view.
+        let row_h = ((list_font.size * 1.4).max(list_icon_size) + 8.0).max(24.0);
         let clicked: Cell<Option<usize>> = Cell::new(None);
         let launched: Cell<Option<usize>> = Cell::new(None);
         // Icons are asked for while the row is drawn (that is the only place the
@@ -864,7 +869,7 @@ impl MameApp {
             .into_iter()
             .map(|(_, x)| x)
             .collect();
-        let table = tb.header((list_font.size + 6.0).max(20.0), move |mut header| {
+        let table = tb.header((list_font.size * 1.4 + 6.0).max(24.0), move |mut header| {
             let header_font = list_font;
             for &i in dnd_order.iter() {
                 let title = crate::i18n::tr(&header_lang, COLUMN_TITLES[i]);
