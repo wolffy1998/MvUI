@@ -903,15 +903,13 @@ impl MameApp {
                 }
 
                 // ---- 左：过滤（四个 hide 标志）----
-                let any_filter = self.filter_flags != 0;
+                // plain label — no count suffix and no selected tint: both
+                // read as a mode the button was stuck in rather than "filters
+                // are in effect" (user 2026-10-07). What is active stays
+                // visible in the Filter popup's own checkboxes.
                 let fb = self.tr("Filter");
-                let fb = if any_filter {
-                    format!("{fb} ({})", self.filter_flags.count_ones())
-                } else {
-                    fb.to_string()
-                };
                 if ui
-                    .add(egui::Button::new(fb).selected(any_filter))
+                    .add(egui::Button::new(fb))
                     .on_hover_text(self.tr("Filter the game list"))
                     .clicked()
                 {
