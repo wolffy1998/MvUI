@@ -1159,19 +1159,20 @@ impl MameApp {
             });
         });
 
-        // Vertical grid lines: one full-height stroke per column boundary, drawn
-        // after the body so a single line spans header and rows without a break
-        // at every row gap (per-cell segments left exactly that). The x positions
-        // reuse `column_separators` — the very boundaries the header's resize
-        // handle tests against — so a line can never drift away from its grab
-        // strip. Purely decorative: resizing lives in the header only, these
-        // lines never take the pointer.
+        // Vertical grid lines — **header band only**. The line marks the very
+        // boundaries the header's resize handle tests against, so it can never
+        // drift away from its grab strip. It used to run the full table
+        // height, which read as a draggable separator over the game rows too
+        // (the user took it for one, 2026-10-07: only the header may show the
+        // "resizable" affordance); drawing it from the header top to the
+        // header bottom keeps the boundary visible without promising a drag
+        // the rows cannot do. Row separation in the body stays with the zebra
+        // stripes.
         if show_grid0 {
             let rects = hdr_rects.borrow();
-            let top = rects.first().map(|(_, r)| r.top());
-            let bottom = table_out.inner_rect.bottom();
-            if let Some(top) = top {
-                if bottom > top + 20.0 {
+            if let Some((_, first)) = rects.first() {
+                let (top, bottom) = (first.top(), first.bottom());
+                if bottom > top {
                     let st = ui.visuals().widgets.noninteractive.bg_stroke;
                     for (_, x) in column_separators(&rects) {
                         ui.painter()
