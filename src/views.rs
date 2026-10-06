@@ -736,7 +736,9 @@ impl MameApp {
         let sel = self.selected;
         let grouped = self.list_mode == ListMode::Grouped;
         let local = self.local_game_list;
-        let row_h = 22.0;
+        let list_font = self.list_font;
+        let list_icon_size = self.list_icon_size;
+        let row_h = (list_font.size.max(list_icon_size) + 8.0).max(22.0);
         let clicked: Cell<Option<usize>> = Cell::new(None);
         let launched: Cell<Option<usize>> = Cell::new(None);
         // Icons are asked for while the row is drawn (that is the only place the
@@ -862,7 +864,8 @@ impl MameApp {
             .into_iter()
             .map(|(_, x)| x)
             .collect();
-        let table = tb.header(20.0, move |mut header| {
+        let table = tb.header((list_font.size + 6.0).max(20.0), move |mut header| {
+            let header_font = list_font;
             for &i in dnd_order.iter() {
                 let title = crate::i18n::tr(&header_lang, COLUMN_TITLES[i]);
                 header.col(|ui| {
@@ -917,9 +920,11 @@ impl MameApp {
                     if on_sep || resizing_col == Some(i) {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
                     }
-                    // left-aligned, like the Qt header of 1.8.2
+                    // left-aligned, like the Qt header of 1.8.2 — in the
+                    // user-chosen list font, so a bigger list font grows the
+                    // header to match instead of drowning it
                     ui.add(
-                        egui::Label::new(egui::RichText::new(format!("{title}{arrow}")).strong())
+                        egui::Label::new(header_font.rich_text(format!("{title}{arrow}")).strong())
                             .selectable(false),
                     );
                 });
@@ -1119,7 +1124,7 @@ impl MameApp {
                             let resp = match self.game_icon(&g.name) {
                                 Some(tex) => ui.add(
                                     egui::Image::new(&tex)
-                                        .max_size(egui::Vec2::splat(16.0))
+                                        .max_size(egui::Vec2::splat(list_icon_size))
                                         // passive: the row-wide hit rect behind it
                                         // must keep the hover and the press
                                         .sense(egui::Sense {
@@ -1134,7 +1139,7 @@ impl MameApp {
                                             .borrow_mut()
                                             .push((g.name.clone(), icon_fallbacks(g, &guard)));
                                     }
-                                    icons::draw_square(ui, icons::status_color(grade), 16.0)
+                                    icons::draw_square(ui, icons::status_color(grade), list_icon_size)
                                 }
                             };
                             if g.available != GAME_COMPLETE {
@@ -1163,11 +1168,11 @@ impl MameApp {
                             // the latter centres its galley inside the rect handed
                             // to `add_sized`, which shoved the description to the
                             // far right of the column and away from its icon
-                            cell_text(ui, &label, color);
+                            cell_text(ui, &label, color, list_font);
                         }
                         COL_NAME => {
                             let n = if g.is_ext_rom { &g.romof } else { &g.name };
-                            cell_text(ui, n, fg);
+                            cell_text(ui, n, fg, list_font);
                         }
                         COL_ROM => {
                             // origin: GameListModel::data() → tr("Yes") / tr("No")
@@ -1176,18 +1181,18 @@ impl MameApp {
                                 0 => crate::i18n::tr(&cell_lang, "No"),
                                 _ => String::new(),
                             };
-                            cell_text(ui, &v, fg_w);
+                            cell_text(ui, &v, fg_w, list_font);
                         }
                         COL_MFTR => {
                             // MAME's own manufacturer, never localized — see the
                             // sort key above for why.
-                            cell_text(ui, &g.manufacturer, fg);
+                            cell_text(ui, &g.manufacturer, fg, list_font);
                         }
-                        COL_SRC => cell_text(ui, &g.sourcefile, fg),
+                        COL_SRC => cell_text(ui, &g.sourcefile, fg, list_font),
                         COL_YEAR => {
-                            cell_text(ui, if g.year.is_empty() { "?" } else { &g.year }, fg)
+                            cell_text(ui, if g.year.is_empty() { "?" } else { &g.year }, fg, list_font)
                         }
-                        _ => cell_text(ui, &g.cloneof, fg),
+                        _ => cell_text(ui, &g.cloneof, fg, list_font),
                         }
                         // hit-test the full cell as the LAST widget inside it:
                         // egui_extras drives `hovered_row_index` from each
@@ -1657,13 +1662,13 @@ fn column_separators(rects: &[(usize, egui::Rect)]) -> Vec<(usize, f32)> {
 /// away from the status icon and read as if it belonged to the next column.
 /// A [`egui::Label`] with `TextWrapMode::Truncate` keeps the text flush against
 /// the left edge of the cell and clips long strings with an ellipsis.
-fn cell_text(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+fn cell_text(ui: &mut egui::Ui, text: &str, color: egui::Color32, font: crate::app::UiFontPrefs) {
     // `selectable(false)` matters: egui's `interaction.selectable_labels` defaults
     // to true, which would make every cell sense click *and drag* for text
     // selection — dragging across the list would highlight label text instead of
     // behaving like a plain list.
     ui.add(
-        egui::Label::new(egui::RichText::new(text).color(color))
+        egui::Label::new(font.rich_text(text).color(color))
             .truncate()
             .selectable(false)
             // a `Label` defaults to `Sense::hover()`, and it sits on top of the

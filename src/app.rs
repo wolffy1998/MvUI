@@ -80,6 +80,76 @@ impl ListMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UiFontFamily {
+    Proportional,
+    Monospace,
+}
+
+impl UiFontFamily {
+    pub fn key(self) -> &'static str {
+        match self {
+            UiFontFamily::Proportional => "proportional",
+            UiFontFamily::Monospace => "monospace",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Self {
+        match s {
+            "monospace" => UiFontFamily::Monospace,
+            _ => UiFontFamily::Proportional,
+        }
+    }
+
+    pub fn egui(self) -> egui::FontFamily {
+        match self {
+            UiFontFamily::Proportional => egui::FontFamily::Proportional,
+            UiFontFamily::Monospace => egui::FontFamily::Monospace,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct UiFontPrefs {
+    pub family: UiFontFamily,
+    pub size: f32,
+    pub bold: bool,
+}
+
+impl UiFontPrefs {
+    pub fn from_gui(gui: &GuiSettings, prefix: &str, default_size: f32) -> Self {
+        let family_key = format!("{prefix}_font_family");
+        let size_key = format!("{prefix}_font_size");
+        let bold_key = format!("{prefix}_font_bold");
+        let family = gui
+            .get(&family_key)
+            .map(UiFontFamily::from_key)
+            .unwrap_or(UiFontFamily::Proportional);
+        let size = gui
+            .get(&size_key)
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 9.0 && *v <= 28.0)
+            .unwrap_or(default_size);
+        let bold = gui.get_bool(&bold_key);
+        Self { family, size, bold }
+    }
+
+    pub fn save(self, gui: &mut GuiSettings, prefix: &str) {
+        gui.set(&format!("{prefix}_font_family"), self.family.key());
+        gui.set(&format!("{prefix}_font_size"), &format!("{:.1}", self.size));
+        gui.set_bool(&format!("{prefix}_font_bold"), self.bold);
+    }
+
+    pub fn font_id(self) -> egui::FontId {
+        egui::FontId::new(self.size, self.family.egui())
+    }
+
+    pub fn rich_text(self, text: impl Into<String>) -> egui::RichText {
+        let rt = egui::RichText::new(text).font(self.font_id());
+        if self.bold { rt.strong() } else { rt }
+    }
+}
+
 /// PlayWith dialog kinds (origin: playoptions dialogs)
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum PlayKind {
@@ -226,6 +296,13 @@ pub struct MameApp {
     /// spacing and hit targets together, which is what a font-size menu has to
     /// mean if the rest of the interface is to stay legible. 1.0 = unscaled.
     pub font_zoom: f32,
+    pub list_icon_size: f32,
+    pub list_font: UiFontPrefs,
+    pub info_font: UiFontPrefs,
+    pub folder_font: UiFontPrefs,
+    pub show_list_font_win: bool,
+    pub show_info_font_win: bool,
+    pub show_folder_font_win: bool,
     pub image_dock_visible: [bool; 7],
     pub image_dock_tab: usize,
     pub text_dock_visible: [bool; crate::core::dat::TEXT_DOCK_COUNT],
@@ -274,6 +351,11 @@ pub struct MameApp {
     pub opt_level: usize,
     pub opt_category: String,
     pub opt_edits: HashMap<String, String>,
+    /// which game the option chain was last loaded for — `(name, sourcefile)`.
+    /// `ensure_chain` used to re-read up to five ini files from disk on every
+    /// frame the options dialog was open; with the key it reloads only when the
+    /// selection actually changes.
+    pub opt_chain_key: Option<(String, String)>,
     pub show_dirs_win: bool,
     pub dirs_buf: String,
     pub show_about: bool,
@@ -361,8 +443,7 @@ impl MameApp {
             .get("folder_flag")
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        // the saved choice, defaulting to dark as before
-        let dark_bg = !gui.get("dark_bg").map(|v| v == "0").unwrap_or(false);
+        let dark_bg = gui.get("dark_bg").map(|v| v != "0").unwrap_or(false);
         // View ▸ Font. Clamped to a sane band: egui's zoom multiplies every
         // spacing and row height, so a stored 0.0 or 6.0 would leave an
         // unusable window, and the value is user-editable in the settings file.
@@ -371,6 +452,14 @@ impl MameApp {
             .and_then(|v| v.trim().parse::<f32>().ok())
             .filter(|v| v.is_finite() && *v >= 0.75 && *v <= 2.0)
             .unwrap_or(1.0);
+        let list_icon_size = gui
+            .get("list_icon_size")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| [8.0, 16.0, 32.0, 64.0].contains(v))
+            .unwrap_or(16.0);
+        let list_font = UiFontPrefs::from_gui(&gui, "list", 14.0);
+        let info_font = UiFontPrefs::from_gui(&gui, "info", 14.0);
+        let folder_font = UiFontPrefs::from_gui(&gui, "folder", 14.0);
         // `bg_tile` is gone: tile and stretch are one exclusive choice now, and
         // the old key defaulted to *stretch* (1.8.2 wrote
         // `background_stretch = actionBgTile->isChecked() ? 0 : 1`)
@@ -504,6 +593,13 @@ impl MameApp {
             local_game_list,
             dark_bg,
             font_zoom,
+            list_icon_size,
+            list_font,
+            info_font,
+            folder_font,
+            show_list_font_win: false,
+            show_info_font_win: false,
+            show_folder_font_win: false,
             bg_stretch,
             background_file,
             bg_dir,
@@ -538,6 +634,7 @@ impl MameApp {
             opt_level: 1,
             opt_category: "Core Video".into(),
             opt_edits: HashMap::new(),
+            opt_chain_key: None,
             show_dirs_win: false,
             dirs_buf: String::new(),
             show_about: false,
@@ -777,6 +874,10 @@ impl MameApp {
         // so every session started dark again
         self.gui.set_bool("dark_bg", self.dark_bg);
         self.gui.set("font_zoom", format!("{:.2}", self.font_zoom));
+        self.gui.set("list_icon_size", format!("{:.0}", self.list_icon_size));
+        self.list_font.save(&mut self.gui, "list");
+        self.info_font.save(&mut self.gui, "info");
+        self.folder_font.save(&mut self.gui, "folder");
         self.gui.set_bool("bg_stretch", self.bg_stretch);
         self.gui.set(
             "background_file",
@@ -1002,15 +1103,19 @@ impl MameApp {
     pub fn ensure_chain(&mut self) {
         let Some(opts) = self.opts.clone() else { return };
         let Some(lib) = self.lib.clone() else { return };
-        let meta = match self.current_meta() {
-            Some(m) => m,
-            None => return,
-        };
+        // no selection: load against the empty meta so the dialog still has
+        // level values to show and save (the chain files themselves are global)
+        let meta = self.current_meta().unwrap_or_default();
+        let key = (meta.name.clone(), meta.sourcefile.clone());
+        if self.opt_chain_key.as_ref() == Some(&key) {
+            return;
+        }
         let gui: std::collections::HashMap<String, String> =
             self.gui.map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let mut core = opts.lock().unwrap();
         let libg = lib.lock().unwrap();
-        core.chain_load(&meta, &libg, &gui, self.opt_level);
+        core.chain_load(&meta, &libg, &gui);
+        self.opt_chain_key = Some(key);
     }
 
     /// raw command execution for the CmdUI dialog (origin -noreadconfig path)
@@ -1442,35 +1547,9 @@ pub fn scan_backgrounds(dir: &Path) -> Vec<String> {
     v
 }
 
-/// Average luma of a background image, `true` (dark UI) when it cannot be read.
-///
-/// Origin: 1.8.2 scaled the wallpaper to 1x1 and compared `qGray` against 128
-/// to decide whether the UI should be dark or light. Same rule, but the sample
-/// is taken from a *thumbnail* rather than the full bitmap: a 5888x3312
-/// wallpaper is 19.5 Mpx, and walking every pixel costs hundreds of
-/// milliseconds on the UI thread — which the old Qt code never paid because
-/// `QImage::scaled(1,1)` downsampled as part of the scale.
-pub fn background_is_dark(dir: &Path, file: &str) -> bool {
-    let Some(bytes) = std::fs::read(dir.join(file)).ok() else {
-        return true;
-    };
-    let Some(img) = image::load_from_memory(&bytes).ok() else {
-        return true;
-    };
-    // `thumbnail` box-filters — same "average the whole picture" semantics as
-    // `QImage::scaled(1,1)`, without materialising 19.5 Mpx of RGBA first.
-    let img = fit_within(&img, 64, 64).to_rgba8();
-    let (w, h) = (img.width() as usize, img.height() as usize);
-    if w == 0 || h == 0 {
-        return true;
-    }
-    let mut sum = 0u64;
-    for p in img.pixels() {
-        let p = p.0;
-        sum += (299 * p[0] as u64 + 587 * p[1] as u64 + 114 * p[2] as u64) / 1000;
-    }
-    sum / ((w * h) as u64) < 128
-}
+/// Average luma of a background image is deliberately **not** used to pick the
+/// theme any more: the user asked for the wallpaper to never flip light/dark,
+/// so the manual light/dark toggle is the only source of truth.
 
 /// Scale `img` to fit inside `max_w` x `max_h`, keeping the aspect ratio.
 /// Never enlarges: origin: 1.8.2 only ever scaled *down* to the window.
@@ -1547,9 +1626,49 @@ pub fn apply_theme_with_bg(ctx: &egui::Context, dark: bool, transparent: bool) {
     } else {
         egui::Visuals::light()
     };
-    // keep the tuned scroll-bar/selection tweaks from `main.rs::style`
-    v.selection.bg_fill = egui::Color32::from_rgb(0, 120, 215);
-    v.widgets.hovered.bg_fill = v.widgets.noninteractive.weak_bg_fill;
+    let blue = egui::Color32::from_rgb(37, 99, 235);
+    let cyan = egui::Color32::from_rgb(6, 182, 212);
+    v.selection.bg_fill = blue;
+    v.hyperlink_color = egui::Color32::from_rgb(2, 132, 199);
+    v.widgets.noninteractive.bg_stroke.color = egui::Color32::from_rgb(226, 232, 240);
+    v.widgets.inactive.rounding = egui::Rounding::same(8.0);
+    v.widgets.hovered.rounding = egui::Rounding::same(8.0);
+    v.widgets.active.rounding = egui::Rounding::same(8.0);
+    v.menu_rounding = egui::Rounding::same(8.0);
+    v.window_rounding = egui::Rounding::same(10.0);
+    if dark {
+        v.panel_fill = egui::Color32::from_rgb(15, 23, 42);
+        v.window_fill = egui::Color32::from_rgb(17, 24, 39);
+        v.extreme_bg_color = egui::Color32::from_rgb(11, 18, 32);
+        v.faint_bg_color = egui::Color32::from_rgb(30, 41, 59);
+        v.widgets.hovered.bg_fill = egui::Color32::from_rgb(30, 64, 175);
+        v.widgets.active.bg_fill = egui::Color32::from_rgb(29, 78, 216);
+        v.selection.stroke.color = egui::Color32::WHITE;
+        v.hyperlink_color = egui::Color32::from_rgb(56, 189, 248);
+        v.window_shadow = egui::Shadow {
+            offset: egui::Vec2::splat(0.0),
+            blur: 10.0,
+            spread: 1.0,
+            color: egui::Color32::from_black_alpha(102),
+        };
+    } else {
+        v.panel_fill = egui::Color32::from_rgb(248, 250, 252);
+        v.window_fill = egui::Color32::from_rgb(255, 255, 255);
+        v.extreme_bg_color = egui::Color32::from_rgb(241, 245, 249);
+        v.faint_bg_color = egui::Color32::from_rgb(239, 246, 255);
+        v.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(248, 250, 252);
+        v.widgets.hovered.bg_fill = egui::Color32::from_rgb(219, 234, 254);
+        v.widgets.active.bg_fill = egui::Color32::from_rgb(191, 219, 254);
+        v.widgets.active.bg_stroke.color = blue;
+        v.selection.stroke.color = egui::Color32::WHITE;
+        v.window_shadow = egui::Shadow {
+            offset: egui::Vec2::new(0.0, 2.0),
+            blur: 12.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(26),
+        };
+    }
+    v.widgets.open.bg_fill = cyan.gamma_multiply(0.18);
     if transparent {
         let veil = if dark {
             egui::Color32::from_black_alpha(128)

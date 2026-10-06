@@ -88,12 +88,9 @@ fn ui_weak_color() -> egui::Color32 {
 /// **段与段之间空一行**：`SECTION_GAP` 是"一行"的高度，跟在段头**上面**，
 /// 于是每个新段都先空一行再写标题 —— 视觉上段与段就分开了。
 fn section(ui: &mut egui::Ui, app: &MameApp, label: &str) {
-    // 顶部那行说明已经去掉了（见 `render`），所以这里只画标题和横线
-    ui.label(
-        egui::RichText::new(app.tr(label))
-            .strong()
-            .size(14.0),
-    );
+    // 顶部那行说明已经去掉了（见 `render`），所以这里只画标题和横线。
+    // 不写死字号：信息栏字体（override_font_id）决定大小，这里只管加粗。
+    ui.label(egui::RichText::new(app.tr(label)).strong());
     ui.separator();
 }
 

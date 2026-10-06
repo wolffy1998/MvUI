@@ -1,12 +1,12 @@
 //! Dialog windows (origin: optionsUI/csvCfgUI/dirsUI/playOptionsUI/cmdUI/aboutUI).
 
 use crate::app::{
-    MameApp, PlayKind, F_CLONES, F_MECHANICAL, F_NONWORKING, F_UNAVAILABLE,
-    COL_LAST, COLUMN_TITLES,
+    MameApp, PlayKind, UiFontFamily, UiFontPrefs, F_CLONES, F_MECHANICAL, F_NONWORKING,
+    F_UNAVAILABLE, COL_LAST, COLUMN_TITLES,
 };
 use crate::core::options::{
-    OptKind, OptionCore, OPTLEVEL_BIOS, OPTLEVEL_CURR, OPTLEVEL_GLOBAL, OPTLEVEL_LAST,
-    OPTLEVEL_ORIENT, OPTLEVEL_SRC, LEVEL_NAMES,
+    OptKind, OptionCore, OPTLEVEL_BIOS, OPTLEVEL_CLONEOF, OPTLEVEL_CURR, OPTLEVEL_GLOBAL,
+    OPTLEVEL_HORIZONT, OPTLEVEL_LAST, OPTLEVEL_SRC, OPTLEVEL_VERTICAL, LEVEL_NAMES,
 };
 
 /// A window frame that does not let the wallpaper through.
@@ -20,10 +20,12 @@ pub fn opaque_frame(ctx: &egui::Context) -> egui::Frame {
     let mut f = egui::Frame::window(&ctx.style());
     f.fill = f.fill.gamma_multiply(0.0);
     f.fill = if ctx.style().visuals.dark_mode {
-        egui::Color32::from_rgb(32, 32, 32)
+        egui::Color32::from_rgb(17, 24, 39)
     } else {
-        egui::Color32::from_rgb(252, 252, 252)
+        egui::Color32::from_rgb(255, 255, 255)
     };
+    f.stroke.color = egui::Color32::from_rgb(203, 213, 225);
+    f.rounding = egui::Rounding::same(12.0);
     f
 }
 
@@ -144,6 +146,93 @@ pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     // `draw_rom_verify` 已随单游戏校验一起删除（2026-06）。
     draw_filter(app, ctx);
     draw_advanced_search(app, ctx);
+    draw_font_windows(app, ctx);
+}
+
+fn draw_font_windows(app: &mut MameApp, ctx: &egui::Context) {
+    let lang = app.lang.clone();
+    let mut changed = false;
+    changed |= draw_font_window(
+        ctx,
+        &lang,
+        "Game List Font",
+        &mut app.show_list_font_win,
+        &mut app.list_font,
+        UiFontPrefs { family: UiFontFamily::Proportional, size: 14.0, bold: false },
+    );
+    changed |= draw_font_window(
+        ctx,
+        &lang,
+        "Info Panel Font",
+        &mut app.show_info_font_win,
+        &mut app.info_font,
+        UiFontPrefs { family: UiFontFamily::Monospace, size: 14.0, bold: false },
+    );
+    changed |= draw_font_window(
+        ctx,
+        &lang,
+        "Category Font",
+        &mut app.show_folder_font_win,
+        &mut app.folder_font,
+        UiFontPrefs { family: UiFontFamily::Proportional, size: 14.0, bold: false },
+    );
+    if changed {
+        app.save_settings();
+        ctx.request_repaint();
+    }
+}
+
+fn draw_font_window(
+    ctx: &egui::Context,
+    lang: &str,
+    title_key: &str,
+    show: &mut bool,
+    prefs: &mut UiFontPrefs,
+    default: UiFontPrefs,
+) -> bool {
+    if !*show {
+        return false;
+    }
+    let mut changed = false;
+    egui::Window::new(crate::i18n::tr(lang, title_key))
+        .open(show)
+        .collapsible(false)
+        .resizable(false)
+        .default_width(280.0)
+        .frame(opaque_frame(ctx))
+        .show(ctx, |ui| {
+            ui.vertical(|ui| {
+                ui.label(crate::i18n::tr(lang, "Font Family"));
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .radio_value(
+                            &mut prefs.family,
+                            UiFontFamily::Proportional,
+                            crate::i18n::tr(lang, "Proportional"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .radio_value(
+                            &mut prefs.family,
+                            UiFontFamily::Monospace,
+                            crate::i18n::tr(lang, "Monospace"),
+                        )
+                        .changed();
+                });
+                ui.separator();
+                changed |= ui
+                    .add(egui::Slider::new(&mut prefs.size, 9.0..=28.0).text(crate::i18n::tr(lang, "Size")))
+                    .changed();
+                changed |= ui.checkbox(&mut prefs.bold, crate::i18n::tr(lang, "Bold")).changed();
+                ui.separator();
+                ui.label(prefs.rich_text(crate::i18n::tr(lang, "Preview Text")));
+                if ui.button(crate::i18n::tr(lang, "Reset")).clicked() {
+                    *prefs = default;
+                    changed = true;
+                }
+            });
+        });
+    changed
 }
 
 /// Filter popup, opened from the toolbar button left of the search box. These
@@ -167,6 +256,7 @@ fn draw_advanced_search(app: &mut MameApp, ctx: &egui::Context) {
     egui::Window::new(app.tr("Advanced search"))
         .open(&mut show)
         .resizable(false)
+        .collapsible(false)
         .default_width(260.0)
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
@@ -207,6 +297,7 @@ fn draw_filter(app: &mut MameApp, ctx: &egui::Context) {
     egui::Window::new(app.tr("Filter"))
         .open(&mut show)
         .resizable(false)
+        .collapsible(false)
         .default_width(240.0)
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
@@ -232,48 +323,41 @@ fn draw_filter(app: &mut MameApp, ctx: &egui::Context) {
 
 // ---------------------------------------------------------------------
 // options (origin: OptionsUI tabs + category lists + OptionDelegate).
-// Four levels: Global/Source/Bios/Game. The old GUI page moved to
-// Settings ▸ Directories; the Cloneof page is gone, but clone inis still
-// take part in chain inheritance — they are just no longer editable here.
+// Levels: Global/Horizont/Vertical/Source/Bios/Game. The old GUI page
+// moved to Settings ▸ Directories; the Cloneof page is gone, but clone
+// inis still take part in chain inheritance — they are just no longer
+// editable here.
 // ---------------------------------------------------------------------
-
-/// Tab/title text for a level. The Orient slot covers two MAME files
-/// (`horizont.ini`/`vertical.ini`, chosen by the current game's native
-/// orientation), so its label follows the selection instead of LEVEL_NAMES.
-fn level_label(app: &MameApp, level: usize) -> String {
-    if level == OPTLEVEL_ORIENT {
-        let horz = app.current_meta().map(|m| m.is_horz).unwrap_or(true);
-        return app.tr(if horz {
-            "horizontal configuration"
-        } else {
-            "vertical configuration"
-        });
-    }
-    app.tr(LEVEL_NAMES[level.min(OPTLEVEL_LAST - 1)])
-}
 
 fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
     let mut show = app.show_options_win.is_some();
     let level = app.show_options_win.unwrap_or(OPTLEVEL_GLOBAL);
-    egui::Window::new(app.tf("Options - {}", level_label(app, level)))
+    egui::Window::new(app.tr("Options"))
         .open(&mut show)
         .resizable(true)
         .default_width(860.0)
         .default_height(560.0)
+        .collapsible(false)
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             app.ensure_chain();
-            // level tabs — Global / Orient / Source / Bios / Game
+            // level tabs — Global / Horizont / Vertical / Source / Bios / Game.
+            // Both orientation pages are always present: they are two distinct
+            // files in the ini chain (see OPTLEVEL_HORIZONT/VERTICAL), and the
+            // one that is off the current game's chain still shows its own
+            // stored values (snapshot reads the level field, not currvalue).
             ui.horizontal(|ui| {
                 for lvl in [
                     OPTLEVEL_GLOBAL,
-                    OPTLEVEL_ORIENT,
+                    OPTLEVEL_HORIZONT,
+                    OPTLEVEL_VERTICAL,
                     OPTLEVEL_SRC,
                     OPTLEVEL_BIOS,
                     OPTLEVEL_CURR,
                 ] {
+                    let name = LEVEL_NAMES[lvl.min(OPTLEVEL_LAST - 1)];
                     if ui
-                        .selectable_label(app.opt_level == lvl, level_label(app, lvl))
+                        .selectable_label(app.opt_level == lvl, app.tr(name))
                         .clicked()
                     {
                         app.opt_level = lvl;
@@ -286,32 +370,42 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
                 ui.weak(format!("({})", app.tr("option template not loaded")));
                 return;
             };
-            // build a snapshot to render without holding the lock while editing
+            // one snapshot per frame carries display/parent/changed, so the
+            // render loop never touches the options mutex per row
             let snap = build_snapshot(&opts, app);
-            // left category list + right rows
-            ui.columns(2, |cols| {
-                let list = &mut cols[0];
-                egui::ScrollArea::vertical().show(list, |ui| {
-                    for c in CORE_CATEGORIES_VEC {
-                        // `opt_category` keeps the English key; only the display
-                        // is translated, so the snapshot filter still matches
-                        if ui.selectable_label(app.opt_category == c, app.tr(c)).clicked() {
-                            app.opt_category = c.to_string();
+            // wider, less fiddly scroll bars (the thin default ones were hard
+            // to grab on a 4K display)
+            ui.spacing_mut().scroll.bar_width = 10.0;
+            ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+            // fixed-width category sidebar + rows taking the rest — the old
+            // equal `ui.columns(2)` split starved the rows area and left the
+            // category list half the dialog wide
+            egui::SidePanel::left("opt_categories")
+                .resizable(false)
+                .default_width(160.0)
+                .frame(egui::Frame::none())
+                .show_inside(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for c in CORE_CATEGORIES_VEC {
+                            // `opt_category` keeps the English key; only the display
+                            // is translated, so the snapshot filter still matches
+                            if ui.selectable_label(app.opt_category == c, app.tr(c)).clicked() {
+                                app.opt_category = c.to_string();
+                            }
                         }
-                    }
+                    });
                 });
-                let rows = &mut cols[1];
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(rows, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
                     egui::Grid::new("opt_rows")
                         .num_columns(3)
                         .striped(true)
                         .min_col_width(110.0)
                         .show(ui, |ui| {
-                            let mut current_title = String::new();
                             for item in &snap {
                                 match item {
                                     SnapRow::Title(t) => {
-                                        current_title = t.clone();
                                         ui.end_row();
                                         ui.colored_label(
                                             egui::Color32::from_rgb(0, 60, 160),
@@ -322,10 +416,6 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
                                         ui.end_row();
                                     }
                                     SnapRow::Opt(d) => {
-                                        if !current_category_matches(&current_title, &app.opt_category, app.opt_level) {
-                                            continue;
-                                        }
-                                        let changed = is_changed(&opts, app.opt_level, d);
                                         // origin: OptionUtils::addModelItem — en_US shows
                                         // the template guiname capitalised, every other
                                         // language translates `lower(getLongName(name))`
@@ -338,17 +428,21 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
                                             )
                                         };
                                         let mut label = egui::RichText::new(shown);
-                                        if changed {
+                                        if d.changed {
                                             label = label.strong();
                                         }
                                         ui.label(label);
                                         edit_control(app, ui, d, &opts);
-                                        // current value + reset
+                                        // current value + reset; the minimum width
+                                        // keeps the column from drifting row by row
                                         ui.horizontal(|ui| {
-                                            ui.weak(egui::RichText::new(app.tr(&d.display)).small());
-                                            if changed && ui.small_button("↺").clicked() {
-                                                let parent_val = parent_value(&opts, app.opt_level, d);
-                                                app.opt_edits.insert(d.name.clone(), parent_val);
+                                            ui.set_min_width(120.0);
+                                            ui.weak(
+                                                egui::RichText::new(app.tr(&d.display)).small(),
+                                            );
+                                            if d.changed && ui.small_button("↺").clicked() {
+                                                app.opt_edits
+                                                    .insert(d.name.clone(), d.parent_display.clone());
                                                 apply_edit(app, &opts, &d.name);
                                             }
                                         });
@@ -358,12 +452,11 @@ fn draw_options(app: &mut MameApp, ctx: &egui::Context) {
                             }
                         });
                 });
-            });
             ui.separator();
             ui.horizontal(|ui| {
                 ui.weak(app.tf(
                     "editing level: {} — edits are written to the matching ini on change",
-                    level_label(app, app.opt_level),
+                    app.tr(LEVEL_NAMES[app.opt_level.min(OPTLEVEL_LAST - 1)]),
                 ));
             });
         });
@@ -376,12 +469,14 @@ struct SnapOpt {
     name: String,
     gui_name: String,
     kind: u8, // 0 bool 1 int 2 float 3 str-combo 4 str-edit 5 file 6 dir 7 dirs 8 csv 9 plain
-    value: String,
+    /// display form of the **level field** (globalvalue/horzvalue/…), not
+    /// currvalue — the off-chain orientation page must show its own stored
+    /// value, which currvalue (the on-chain effective value) would hide
     display: String,
-    defvalue: String,
-    globalvalue: String,
-    srcvalue: String,
-    cloneofvalue: String,
+    /// display form of the level this one overrides; the ↺ button writes this
+    /// back, and `changed` is just `display != parent_display`
+    parent_display: String,
+    changed: bool,
     choices: Vec<(String, String)>,
     min: f64,
     max: f64,
@@ -396,12 +491,6 @@ enum SnapRow {
 const CORE_CATEGORIES_VEC: [&str; 7] = [
     "Core Video", "OSD Video", "Screen", "Audio", "Control", "Vector", "Misc",
 ];
-
-fn current_category_matches(title: &str, category: &str, level: usize) -> bool {
-    // category list membership was applied when building the snapshot
-    let _ = (title, category, level);
-    true
-}
 
 fn kind_u8(k: OptKind) -> u8 {
     match k {
@@ -434,12 +523,12 @@ fn build_snapshot(opts: &std::sync::Mutex<OptionCore>, app: &MameApp) -> Vec<Sna
         rows.push(SnapRow::Title(cat_key.split('_').last().unwrap_or("").to_string()));
         for name in names {
             let Some(o) = guard.opts.get(name) else { continue };
-            // visibility per level (origin updateModel filter); the Orient
-            // page mirrors the source page — options hidden at driver level
-            // are hidden here too (user rule)
+            // visibility per level (origin updateModel filter); the orientation
+            // pages mirror the source page — options hidden at driver level are
+            // hidden there too (user rule)
             let visible = match level {
                 OPTLEVEL_GLOBAL => o.globalvisible,
-                OPTLEVEL_ORIENT => o.srcvisible,
+                OPTLEVEL_HORIZONT | OPTLEVEL_VERTICAL => o.srcvisible,
                 OPTLEVEL_SRC => o.srcvisible,
                 OPTLEVEL_BIOS => o.biosvisible,
                 _ => o.gamevisible,
@@ -447,6 +536,19 @@ fn build_snapshot(opts: &std::sync::Mutex<OptionCore>, app: &MameApp) -> Vec<Sna
             if !visible {
                 continue;
             }
+            // level field + the level it overrides, in one place — former
+            // `is_changed`/`parent_value` re-locked the mutex per row per frame
+            let (lvl_val, par_val) = match level {
+                OPTLEVEL_GLOBAL => (&o.globalvalue, &o.defvalue),
+                OPTLEVEL_HORIZONT => (&o.horzvalue, &o.globalvalue),
+                OPTLEVEL_VERTICAL => (&o.vertvalue, &o.globalvalue),
+                OPTLEVEL_SRC => (&o.srcvalue, &o.globalvalue),
+                OPTLEVEL_BIOS => (&o.biosvalue, &o.srcvalue),
+                OPTLEVEL_CLONEOF => (&o.cloneofvalue, &o.biosvalue),
+                _ => (&o.currvalue, &o.cloneofvalue),
+            };
+            let display = guard.get_long_value(name, lvl_val);
+            let parent_display = guard.get_long_value(name, par_val);
             let choices: Vec<(String, String)> = o
                 .values
                 .iter()
@@ -466,12 +568,9 @@ fn build_snapshot(opts: &std::sync::Mutex<OptionCore>, app: &MameApp) -> Vec<Sna
                     o.guiname.clone()
                 },
                 kind: kind_u8(o.kind.unwrap_or(OptKind::Unknown)),
-                value: o.currvalue.clone(),
-                display: guard.get_long_value(name, &o.currvalue),
-                defvalue: o.defvalue.clone(),
-                globalvalue: o.globalvalue.clone(),
-                srcvalue: o.srcvalue.clone(),
-                cloneofvalue: o.cloneofvalue.clone(),
+                changed: display != parent_display,
+                display,
+                parent_display,
                 choices,
                 min: o.min.parse().unwrap_or(0.0),
                 max: o.max.parse().unwrap_or(100.0),
@@ -481,37 +580,10 @@ fn build_snapshot(opts: &std::sync::Mutex<OptionCore>, app: &MameApp) -> Vec<Sna
     rows
 }
 
-fn is_changed(core: &std::sync::Mutex<OptionCore>, level: usize, d: &SnapOpt) -> bool {
-    let guard = match core.try_lock() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-    let comp = match level {
-        OPTLEVEL_GLOBAL => &d.defvalue,
-        OPTLEVEL_ORIENT => &d.globalvalue,
-        OPTLEVEL_SRC => &d.globalvalue,
-        OPTLEVEL_BIOS => &d.srcvalue,
-        _ => &d.cloneofvalue,
-    };
-    guard.get_long_value(&d.name, comp) != d.display
-}
-
-fn parent_value(core: &std::sync::Mutex<OptionCore>, level: usize, d: &SnapOpt) -> String {
-    let guard = match core.try_lock() {
-        Ok(g) => g,
-        Err(_) => return d.value.clone(),
-    };
-    let comp = match level {
-        OPTLEVEL_GLOBAL => &d.defvalue,
-        OPTLEVEL_ORIENT => &d.globalvalue,
-        OPTLEVEL_SRC => &d.globalvalue,
-        OPTLEVEL_BIOS => &d.srcvalue,
-        _ => &d.cloneofvalue,
-    };
-    guard.get_short_value(&d.name, &guard.get_long_value(&d.name, comp))
-}
-
 fn edit_control(app: &mut MameApp, ui: &mut egui::Ui, d: &SnapOpt, opts: &std::sync::Mutex<OptionCore>) {
+    // fixed-width control column so the value column starts at one x for
+    // every row (the grid otherwise sizes each cell to its own content)
+    ui.set_min_width(200.0);
     let mut val = app.opt_edits.get(&d.name).cloned().unwrap_or_else(|| d.display.clone());
     match d.kind {
         0 => {
@@ -532,6 +604,10 @@ fn edit_control(app: &mut MameApp, ui: &mut egui::Ui, d: &SnapOpt, opts: &std::s
             if resp.changed() {
                 let s = if is_float { format!("{v:.2}") } else { format!("{}", v as i64) };
                 app.opt_edits.insert(d.name.clone(), s);
+            }
+            // save once per drag, not once per frame: apply_edit rewrites the
+            // whole ini file, and a drag fires `changed` on every repaint
+            if (resp.drag_stopped() || resp.lost_focus()) && app.opt_edits.contains_key(&d.name) {
                 apply_edit(app, opts, &d.name);
             }
         }
@@ -671,12 +747,24 @@ fn apply_edit(app: &mut MameApp, opts: &std::sync::Mutex<OptionCore>, name: &str
     // write level field
     match level {
         OPTLEVEL_GLOBAL => o.globalvalue = short.clone(),
-        OPTLEVEL_ORIENT => o.orientvalue = short.clone(),
+        OPTLEVEL_HORIZONT => o.horzvalue = short.clone(),
+        OPTLEVEL_VERTICAL => o.vertvalue = short.clone(),
         OPTLEVEL_SRC => o.srcvalue = short.clone(),
         OPTLEVEL_BIOS => o.biosvalue = short.clone(),
         _ => {}
     }
-    o.currvalue = short;
+    // currvalue is the *effective* value the game reads; only the level the
+    // game's native orientation actually puts in its ini chain may touch it
+    // (origin: parse_standard_inis loads horizont OR vertical, never both).
+    // Editing the off-chain page must stay a pure file edit.
+    let on_chain = match level {
+        OPTLEVEL_HORIZONT => meta.is_horz,
+        OPTLEVEL_VERTICAL => !meta.is_horz,
+        _ => true,
+    };
+    if on_chain {
+        o.currvalue = short;
+    }
     // save ini for the level.
     //
     // The path comes from `OptionCore::ini_file_for`, i.e. the very function
@@ -884,6 +972,8 @@ fn draw_dirs(app: &mut MameApp, ctx: &egui::Context) {
                 egui::RichText::new(exe_note.clone()).small().weak(),
             );
             ui.add_space(4.0);
+            ui.spacing_mut().scroll.bar_width = 10.0;
+            ui.spacing_mut().scroll.bar_outer_margin = 4.0;
             egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
                 for (group, rows) in &table {
                     egui::CollapsingHeader::new(group.clone())
@@ -1055,6 +1145,7 @@ fn draw_play(app: &mut MameApp, ctx: &egui::Context) {
     egui::Window::new(app.tr(kind.title()))
         .open(&mut keep)
         .resizable(false)
+        .collapsible(false)
         .default_width(480.0)
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
@@ -1183,10 +1274,16 @@ fn draw_cmd(app: &mut MameApp, ctx: &egui::Context) {
     egui::Window::new(app.tr("Command Line"))
         .open(&mut show)
         .resizable(true)
+        .collapsible(false)
         .default_width(720.0)
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
-            ui.add_sized([700.0, 60.0], egui::TextEdit::multiline(&mut app.cmd_text));
+            // fill the dialog and give the command room to breathe; the fixed
+            // 700×60 box left dead space at every other window width
+            ui.add_sized(
+                [ui.available_width(), 160.0],
+                egui::TextEdit::multiline(&mut app.cmd_text),
+            );
             ui.separator();
             ui.horizontal(|ui| {
                 if ui.button(app.tr("OK")).clicked() {
@@ -1222,6 +1319,7 @@ fn draw_about(app: &mut MameApp, ctx: &egui::Context) {
     egui::Window::new(app.tr("About"))
         .open(&mut show)
         .resizable(false)
+        .collapsible(false)
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -1242,14 +1340,18 @@ fn draw_about(app: &mut MameApp, ctx: &egui::Context) {
     app.show_about = show;
 }
 
-fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {    let mut show = app.show_verify;
+fn draw_verify(app: &mut MameApp, ctx: &egui::Context) {
+    let mut show = app.show_verify;
     egui::Window::new(app.tr("Checking..."))
         .open(&mut show)
         .resizable(true)
+        .collapsible(false)
         .default_width(520.0)
         .default_height(320.0)
         .frame(opaque_frame(ctx))
         .show(ctx, |ui| {
+            ui.spacing_mut().scroll.bar_width = 10.0;
+            ui.spacing_mut().scroll.bar_outer_margin = 4.0;
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 for l in app.verify_lines.clone() {
                     ui.monospace(l);

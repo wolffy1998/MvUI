@@ -232,7 +232,9 @@ impl egui_dock::TabViewer for DockTabs<'_> {
                 self.app.tr(crate::core::dat::DOCK_NAMES[dock])
             }
         };
-        egui::WidgetText::from(name)
+        // 信息栏字体也管 dock 标签标题（用户 2026-10-07：信息栏字体 = 文档
+        // 显示的字体、各种窗口的标题、以及里面显示的字体）
+        egui::WidgetText::from(self.app.info_font.rich_text(name))
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut MainTab) {
@@ -258,12 +260,6 @@ impl eframe::App for MameApp {
         if !self.theme_applied {
             self.theme_applied = true;
             let has_bg = self.background_file.is_some();
-            if has_bg {
-                if let Some(f) = self.background_file.clone() {
-                    let dir = self.bg_dir.clone();
-                    self.dark_bg = crate::app::background_is_dark(&dir, &f);
-                }
-            }
             crate::app::apply_theme_with_bg(ctx, self.dark_bg, has_bg);
             // the zoom lives in egui's options, not in `Style`, so it is not
             // restored by applying the theme — it has to be set once per session
@@ -761,39 +757,29 @@ impl MameApp {
         });
     }
 
-    /// View ▸ Icon Font — the interface scale, as one exclusive radio group.
-    ///
-    /// egui has no per-widget font size, only `TextStyle`s and a global
-    /// `Context::set_zoom_factor`. The zoom is the honest choice for a "font"
-    /// menu: it scales text, spacing and hit targets together, so enlarged
-    /// labels do not end up clipped by unscaled rows.
     fn font_submenu(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
         ui.menu_button(self.tr("Font"), |ui| {
-            // A menu is sized to its widest entry, and four short CJK labels
-            // make a very narrow popup. Pin a floor so it lines up with the
-            // other submenus instead of hugging the radio circles.
             ui.set_min_width(MENU_MIN_WIDTH);
-            // (label key, scale). The steps are the ones that stay legible at
-            // both ends on a 1080p screen: 0.8 is still readable CJK, 1.4 is
-            // about where rows start needing more room than the labels do.
-            for (key, scale) in [
-                ("Smaller", 0.8f32),
-                ("Default Size", 1.0),
-                ("Larger", 1.15),
-                ("Largest", 1.4),
-            ] {
-                let label = self.tr(key);
-                let picked = (self.font_zoom - scale).abs() < 0.01;
-                if ui.radio(picked, label).clicked() {
-                    self.font_zoom = scale;
-                    // takes effect at the start of the next pass; the request
-                    // makes that happen without waiting for another input event
-                    ctx.set_zoom_factor(scale);
-                    ctx.request_repaint();
+            for size in [8.0f32, 16.0, 32.0, 64.0] {
+                let label = format!("{}x{}", size as i32, size as i32);
+                if ui.radio((self.list_icon_size - size).abs() < 0.1, label).clicked() {
+                    self.list_icon_size = size;
                     self.save_settings();
                     ui.close_menu();
                 }
+            }
+            ui.separator();
+            if ui.button(self.tr("Game List Font")).clicked() {
+                self.show_list_font_win = true;
+                ui.close_menu();
+            }
+            if ui.button(self.tr("Info Panel Font")).clicked() {
+                self.show_info_font_win = true;
+                ui.close_menu();
+            }
+            if ui.button(self.tr("Category Font")).clicked() {
+                self.show_folder_font_win = true;
+                ui.close_menu();
             }
         });
     }
@@ -851,14 +837,11 @@ impl MameApp {
                 self.background_file = picked;
                 match self.background_file.clone() {
                     Some(f) => {
-                        // decoding may flip light/dark from the picture's luma
                         let dir = self.bg_dir.clone();
                         let mut tex = self.bg_tex.take();
                         crate::app::load_background(&dir, &f, &mut tex, &ctx);
                         self.bg_tex = tex;
-                        let dark = crate::app::background_is_dark(&dir, &f);
-                        self.dark_bg = dark;
-                        crate::app::apply_theme_with_bg(&ctx, dark, true);
+                        crate::app::apply_theme_with_bg(&ctx, self.dark_bg, true);
                     }
                     None => {
                         // no picture: the panels go opaque again
@@ -1053,10 +1036,15 @@ impl MameApp {
     /// wins the hover over its own cell, and the tint has to cover that cell too.
     ///
     /// Returns the band and whether the line was clicked.
-    fn tree_row_band(ui: &mut egui::Ui, id: egui::Id, panel: egui::Rect) -> (egui::Rect, bool) {
+    fn tree_row_band(
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        panel: egui::Rect,
+        font: crate::app::UiFontPrefs,
+    ) -> (egui::Rect, bool) {
         // the row box is the label's own height; adding the vertical item spacing
         // makes neighbouring bands meet, so the tint reads as one continuous line
-        let h = ui.text_style_height(&egui::TextStyle::Button) + ui.spacing().item_spacing.y;
+        let h = font.size.max(14.0) + 4.0 + ui.spacing().item_spacing.y;
         let top = ui.max_rect().top();
         let band = egui::Rect::from_min_max(
             egui::pos2(panel.left(), top),
@@ -1083,7 +1071,12 @@ impl MameApp {
     ///
     /// `Sense::empty()` matters: a `Label` defaults to `Sense::hover()` and would
     /// take the hover and the press away from the row band behind it.
-    fn tree_row_label(ui: &mut egui::Ui, selected: bool, text: &str) -> egui::Response {
+    fn tree_row_label(
+        ui: &mut egui::Ui,
+        selected: bool,
+        text: &str,
+        font: crate::app::UiFontPrefs,
+    ) -> egui::Response {
         let v = ui.visuals();
         let color = if selected {
             v.selection.stroke.color
@@ -1091,7 +1084,7 @@ impl MameApp {
             v.text_color()
         };
         ui.add(
-            egui::Label::new(egui::RichText::new(text).color(color))
+            egui::Label::new(font.rich_text(text).color(color))
                 .truncate()
                 .selectable(false)
                 .sense(egui::Sense { click: false, drag: false, focusable: false }),
@@ -1118,10 +1111,11 @@ impl MameApp {
         openness: f32,
         selected: bool,
         text: &str,
+        font: crate::app::UiFontPrefs,
     ) -> (bool, bool, f32) {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            let (_band, row_hit) = Self::tree_row_band(ui, id.with("row"), panel);
+            let (_band, row_hit) = Self::tree_row_band(ui, id.with("row"), panel, font);
             let row_left = ui.max_rect().left();
             // egui gives its collapsing toggler the whole indent width and no gap
             // behind it; mirror that so both kinds of row land on one grid.
@@ -1136,7 +1130,7 @@ impl MameApp {
                 arrow = resp.clicked();
             }
             icons::draw_passive(ui, &ctx, icons::FOLDER, FOLDER_ICON);
-            let label = Self::tree_row_label(ui, selected, text);
+            let label = Self::tree_row_label(ui, selected, text, font);
             let dx = label.rect.min.x - row_left;
             // the branch indicator toggles and nothing else, as in the Qt tree:
             // a click on it must not also move the selection
@@ -1176,12 +1170,13 @@ impl MameApp {
         panel: egui::Rect,
         selected: bool,
         text: &str,
+        font: crate::app::UiFontPrefs,
     ) -> bool {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
-            let (_band, clicked) = Self::tree_row_band(ui, id, panel);
+            let (_band, clicked) = Self::tree_row_band(ui, id, panel, font);
             icons::draw_passive(ui, &ctx, icons::FOLDER, FOLDER_ICON);
-            Self::tree_row_label(ui, selected, text);
+            Self::tree_row_label(ui, selected, text, font);
             clicked
         })
         .inner
@@ -1247,6 +1242,7 @@ impl MameApp {
                     state.openness(&ctx),
                     is_root_selected,
                     &text,
+                    self.folder_font,
                 );
                 if arrow {
                     state.toggle(ui);
@@ -1279,8 +1275,16 @@ impl MameApp {
                         &ctx, id, false,
                     );
                 let text = format!("{name} ({total})");
-                let (arrow, row_hit, child_indent) =
-                    Self::folder_row(ui, id, panel, true, state.openness(&ctx), is_sel, &text);
+                let (arrow, row_hit, child_indent) = Self::folder_row(
+                    ui,
+                    id,
+                    panel,
+                    true,
+                    state.openness(&ctx),
+                    is_sel,
+                    &text,
+                    self.folder_font,
+                );
                 if arrow {
                     state.toggle(ui);
                     state.store(&ctx);
@@ -1301,6 +1305,7 @@ impl MameApp {
                                 self.current_folder == format!("/{name}")
                                     && self.folder_key.is_none(),
                                 &format!("{rl} ({})", root_games.len()),
+                                self.folder_font,
                             ) {
                                 self.select_ext_root(&name);
                             }
@@ -1316,6 +1321,7 @@ impl MameApp {
                                 panel,
                                 self.current_folder == format!("/{name}/{label}"),
                                 &format!("{label} ({})", games.len()),
+                                self.folder_font,
                             ) {
                                 self.select_ext_sub(&name, label);
                             }
@@ -1365,7 +1371,7 @@ impl MameApp {
             }
         };
         let id = ui.make_persistent_id(("folder_child", kind, &child.key));
-        if Self::folder_child_row(ui, id, panel, selected, &child_label) {
+        if Self::folder_child_row(ui, id, panel, selected, &child_label, self.folder_font) {
             self.folder_kind = kind.clone();
             self.folder_key = Some(child.key.clone());
             self.current_folder = format!("{root_label}/{}", child.label);
@@ -1498,7 +1504,15 @@ impl MameApp {
         let Some(view) = self.rom_views.get(game).cloned() else { return };
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| crate::rompanel::render(ui, self, &view));
+            .show(ui, |ui| {
+                // 信息栏字体作用于整个 Rom 面板。rompanel 的列宽测量
+                // （`text_w`/`measure_grid`）和渲染（`cell`/`state_with_icon`）
+                // 都用 `FontSelection::default()` → `Style::font_id`，所以
+                // 在入口设一次 `override_font_id`，两边同时跟着变，列宽不会
+                // 因为字号变化而错位。
+                ui.style_mut().override_font_id = Some(self.info_font.font_id());
+                crate::rompanel::render(ui, self, &view)
+            });
     }
 
     pub fn documents_content(&mut self, ui: &mut egui::Ui, tab: usize) {
@@ -1507,6 +1521,9 @@ impl MameApp {
         // the lookup key, the cache key and the renderer in one index space.
         let dock = crate::core::dat::text_dock(tab);
         let game = self.current_game.clone();
+        // 信息栏字体（View ▸ Font ▸ Info Panel Font）：文档正文用它排版；
+        // 下面 Rom 信息面板走 `override_font_id`（见 `rom_info_content`）。
+        let info_font = self.info_font;
         // Rom 信息面板**不走外部 dat**：它要的是校验结果，而校验结果躺在
         // 游戏库里（`RomInfo::available`，随 `gamelist.cache` 落盘）。所以在
         // `request_dat` 之前就分出去——否则 `dock_file_option(DOCK_ROMINFO)`
@@ -1571,7 +1588,7 @@ impl MameApp {
                             for seg in &line.segments {
                                 match seg {
                                     crate::core::dat::Segment::Text(s) => {
-                                        ui.monospace(s);
+                                        ui.label(info_font.rich_text(s));
                                     }
                                     crate::core::dat::Segment::Icon(n) => {
                                         // origin: convertCommand emits
@@ -1625,15 +1642,15 @@ impl MameApp {
                         };
                         if heading_after_rule(i) {
                             ui.add_space(2.0);
-                            ui.label(egui::RichText::new(s).strong());
+                            ui.label(info_font.rich_text(s).strong());
                             ui.add_space(2.0);
                         } else {
-                            ui.monospace(s);
+                            ui.label(info_font.rich_text(s));
                         }
                     }
                 }
                 Some(text) => {
-                    ui.monospace(&text);
+                    ui.label(info_font.rich_text(&text));
                 }
                 None => {
                     ui.weak("-");

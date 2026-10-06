@@ -1,10 +1,14 @@
 //! MAME option system, 1:1 port of mameopt.cpp.
 //!
-//! Levels: GUI(0) Global(1) Orient(2) Source(3) Bios(4) Cloneof(5) Curr(6).
+//! Levels: GUI(0) Global(1) Horizont(2) Vertical(3) Source(4) Bios(5)
+//! Cloneof(6) Curr(7).
 //!
-//! The Orient level is MAME's `horizont.ini`/`vertical.ini` slot in the ini
-//! chain (picked per game by the driver's native screen orientation); MvUI
-//! keeps one level slot and resolves the file dynamically via `is_horz`.
+//! Horizont/Vertical are MAME's `horizont.ini`/`vertical.ini` pair in the ini
+//! chain. MAME itself loads only the one matching the driver's native
+//! orientation (origin: parse_standard_inis); MvUI loads **both** — each fills
+//! its own field, and `active` (the game's `is_horz`) decides which one also
+//! feeds `currvalue`. That way both editor pages can be shown at once, and the
+//! off-chain page still displays real values instead of nothing.
 
 pub use crate::core::library::GameLibrary;
 use crate::core::model::GameMeta;
@@ -14,14 +18,15 @@ use std::path::{Path, PathBuf};
 
 pub const OPTLEVEL_GUI: usize = 0;
 pub const OPTLEVEL_GLOBAL: usize = 1;
-pub const OPTLEVEL_ORIENT: usize = 2;
-pub const OPTLEVEL_SRC: usize = 3;
-pub const OPTLEVEL_BIOS: usize = 4;
-pub const OPTLEVEL_CLONEOF: usize = 5;
-pub const OPTLEVEL_CURR: usize = 6;
-pub const OPTLEVEL_LAST: usize = 7;
+pub const OPTLEVEL_HORIZONT: usize = 2;
+pub const OPTLEVEL_VERTICAL: usize = 3;
+pub const OPTLEVEL_SRC: usize = 4;
+pub const OPTLEVEL_BIOS: usize = 5;
+pub const OPTLEVEL_CLONEOF: usize = 6;
+pub const OPTLEVEL_CURR: usize = 7;
+pub const OPTLEVEL_LAST: usize = 8;
 pub const LEVEL_NAMES: [&str; OPTLEVEL_LAST] =
-    ["GUI", "Global", "Orient", "Source", "Bios", "Cloneof", "Game"];
+    ["GUI", "Global", "Horizont", "Vertical", "Source", "Bios", "Cloneof", "Game"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OptKind {
@@ -49,7 +54,8 @@ pub struct MameOption {
     pub max: String,
     pub min: String,
     pub globalvalue: String,
-    pub orientvalue: String,
+    pub horzvalue: String,
+    pub vertvalue: String,
     pub srcvalue: String,
     pub biosvalue: String,
     pub cloneofvalue: String,
@@ -549,7 +555,20 @@ impl OptionCore {
     }
 
     /// origin: loadIni(optLevel, fileName)
-    pub fn load_ini(&mut self, level: usize, path: &Path, gui: &HashMap<String, String>) {
+    ///
+    /// `active` says the level is on the current game's real ini chain. It only
+    /// matters for Horizont/Vertical — exactly one of them is ever in a game's
+    /// chain (MAME picks by native orientation), but both files are read so both
+    /// editor pages have values. The inactive one fills its level field and
+    /// leaves `currvalue` alone; touching it would corrupt the effective value
+    /// the running game would see.
+    pub fn load_ini(
+        &mut self,
+        level: usize,
+        path: &Path,
+        gui: &HashMap<String, String>,
+        active: bool,
+    ) {
         if level == OPTLEVEL_GUI {
             return;
         }
@@ -600,13 +619,29 @@ impl OptionCore {
                     o.currvalue = o.defvalue.clone();
                     o.globalvalue = o.defvalue.clone();
                 }
-                (OPTLEVEL_ORIENT, Some(v)) => {
-                    o.currvalue = v.clone();
-                    o.orientvalue = v;
+                (OPTLEVEL_HORIZONT, Some(v)) => {
+                    o.horzvalue = v;
+                    if active {
+                        o.currvalue = o.horzvalue.clone();
+                    }
                 }
-                (OPTLEVEL_ORIENT, None) => {
-                    o.currvalue = o.globalvalue.clone();
-                    o.orientvalue = o.globalvalue.clone();
+                (OPTLEVEL_HORIZONT, None) => {
+                    o.horzvalue = o.globalvalue.clone();
+                    if active {
+                        o.currvalue = o.horzvalue.clone();
+                    }
+                }
+                (OPTLEVEL_VERTICAL, Some(v)) => {
+                    o.vertvalue = v;
+                    if active {
+                        o.currvalue = o.vertvalue.clone();
+                    }
+                }
+                (OPTLEVEL_VERTICAL, None) => {
+                    o.vertvalue = o.globalvalue.clone();
+                    if active {
+                        o.currvalue = o.vertvalue.clone();
+                    }
                 }
                 (OPTLEVEL_SRC, Some(v)) => {
                     o.currvalue = v.clone();
@@ -648,7 +683,7 @@ impl OptionCore {
         let f = self
             .mame_ini_path
             .join(if self.mess_like { "mess.ini" } else { "mame.ini" });
-        self.load_ini(OPTLEVEL_GLOBAL, &f, gui);
+        self.load_ini(OPTLEVEL_GLOBAL, &f, gui, true);
     }
 
 /// resolve a ';'-separated dir option against base_dir
@@ -674,10 +709,8 @@ impl OptionCore {
             OPTLEVEL_GLOBAL => self
                 .mame_ini_path
                 .join(if self.is_mess_like() { "mess.ini" } else { "mame.ini" }),
-            OPTLEVEL_ORIENT => {
-                let name = if meta.is_horz { "horizont.ini" } else { "vertical.ini" };
-                self.mame_ini_path.join("ini").join(name)
-            }
+            OPTLEVEL_HORIZONT => self.mame_ini_path.join("ini").join("horizont.ini"),
+            OPTLEVEL_VERTICAL => self.mame_ini_path.join("ini").join("vertical.ini"),
             OPTLEVEL_SRC => {
                 // origin: mameopt.cpp:815-817 — `iniFileName = sourcefile;
                 // iniFileName.replace(".c", INI_EXT); mameIniPath + "ini/source/" + ...`.
@@ -726,41 +759,37 @@ impl OptionCore {
         self.mess_like
     }
 
-    /// cumulative chain load up to `upto` (origin: chainLoadOptions early-return flow)
-    pub fn chain_load(
-        &mut self,
-        meta: &GameMeta,
-        lib: &GameLibrary,
-        gui: &HashMap<String, String>,
-        upto: usize,
-    ) {
-        self.load_ini(OPTLEVEL_GLOBAL, &self.ini_file_for(OPTLEVEL_GLOBAL, meta, lib), gui);
-        if upto == OPTLEVEL_GUI || upto == OPTLEVEL_GLOBAL {
-            return;
-        }
-        self.load_ini(OPTLEVEL_ORIENT, &self.ini_file_for(OPTLEVEL_ORIENT, meta, lib), gui);
-        if upto == OPTLEVEL_ORIENT {
-            return;
-        }
-        self.load_ini(OPTLEVEL_SRC, &self.ini_file_for(OPTLEVEL_SRC, meta, lib), gui);
-        if upto == OPTLEVEL_SRC {
-            return;
-        }
+    /// full chain load (origin: chainLoadOptions).
+    ///
+    /// Always runs to the end: `currvalue` must be the value the game would
+    /// actually see, not the value at whichever tab the dialog happens to show.
+    /// Both orientation files are read (see `load_ini`'s `active`), one of them
+    /// feeding `currvalue` per the game's native orientation.
+    pub fn chain_load(&mut self, meta: &GameMeta, lib: &GameLibrary, gui: &HashMap<String, String>) {
+        self.load_ini(OPTLEVEL_GLOBAL, &self.ini_file_for(OPTLEVEL_GLOBAL, meta, lib), gui, true);
+        let horz = meta.is_horz;
+        self.load_ini(
+            OPTLEVEL_HORIZONT,
+            &self.ini_file_for(OPTLEVEL_HORIZONT, meta, lib),
+            gui,
+            horz,
+        );
+        self.load_ini(
+            OPTLEVEL_VERTICAL,
+            &self.ini_file_for(OPTLEVEL_VERTICAL, meta, lib),
+            gui,
+            !horz,
+        );
+        self.load_ini(OPTLEVEL_SRC, &self.ini_file_for(OPTLEVEL_SRC, meta, lib), gui, true);
         let bios_file = self.ini_file_for(OPTLEVEL_BIOS, meta, lib);
         if !bios_file.as_os_str().is_empty() {
-            self.load_ini(OPTLEVEL_BIOS, &bios_file, gui);
-        }
-        if upto == OPTLEVEL_BIOS {
-            return;
+            self.load_ini(OPTLEVEL_BIOS, &bios_file, gui, true);
         }
         let clone_file = self.ini_file_for(OPTLEVEL_CLONEOF, meta, lib);
         if !clone_file.as_os_str().is_empty() {
-            self.load_ini(OPTLEVEL_CLONEOF, &clone_file, gui);
+            self.load_ini(OPTLEVEL_CLONEOF, &clone_file, gui, true);
         }
-        if upto == OPTLEVEL_CLONEOF {
-            return;
-        }
-        self.load_ini(OPTLEVEL_CURR, &self.ini_file_for(OPTLEVEL_CURR, meta, lib), gui);
+        self.load_ini(OPTLEVEL_CURR, &self.ini_file_for(OPTLEVEL_CURR, meta, lib), gui, true);
     }
 
     // ---- value conversion (origin: getLongValue/getShortValue) ----
@@ -853,8 +882,15 @@ impl OptionCore {
                     }
                     (c, o.globalvalue.clone())
                 }
-                OPTLEVEL_ORIENT => {
-                    let mut c = o.orientvalue.clone();
+                OPTLEVEL_HORIZONT => {
+                    let mut c = o.horzvalue.clone();
+                    if opt_name == "bios" {
+                        c = o.defvalue.clone();
+                    }
+                    (c, o.globalvalue.clone())
+                }
+                OPTLEVEL_VERTICAL => {
+                    let mut c = o.vertvalue.clone();
                     if opt_name == "bios" {
                         c = o.defvalue.clone();
                     }
@@ -1195,7 +1231,7 @@ mod tests {
         .collect();
 
         // no ini on disk: every level falls back to its own default/parent
-        core.load_ini(OPTLEVEL_GLOBAL, &Path::new("/does/not/exist.ini"), &gui);
+        core.load_ini(OPTLEVEL_GLOBAL, &Path::new("/does/not/exist.ini"), &gui, true);
 
         // GUI-owned → the GUI setting wins
         assert_eq!(core.opts["icons_directory"].globalvalue, "D:/icons");
@@ -1251,36 +1287,95 @@ mod tests {
         assert_eq!(template_default("rompath"), "");
     }
 
-    /// ORIENT 层对应 MAME 加载链里的 horizont.ini/vertical.ini：一个层级槽，
-    /// 文件按驱动原生横竖屏（is_horz）选（origin: parse_standard_inis）。
+    /// HORIZONT/VERTICAL 层对应 MAME 加载链里的 ini/horizont.ini 与
+    /// ini/vertical.ini：两个固定层级，文件名不随游戏方向变
+    /// （origin: parse_standard_inis —— 读哪个由 MAME 按驱动原生方向定，
+    /// 这里两层都读、都写）。
     #[test]
-    fn orient_ini_file_follows_native_orientation() {
+    fn orientation_levels_map_to_fixed_files() {
         let lib = GameLibrary::new("0.261".into());
         let core = core_at("/mame");
-        let mut meta = GameMeta {
+        let meta = GameMeta {
             name: "pacman".into(),
             is_horz: true,
             ..Default::default()
         };
         assert_eq!(
-            core.ini_file_for(OPTLEVEL_ORIENT, &meta, &lib),
+            core.ini_file_for(OPTLEVEL_HORIZONT, &meta, &lib),
             PathBuf::from("/mame/ini/horizont.ini")
         );
-        meta.is_horz = false;
         assert_eq!(
-            core.ini_file_for(OPTLEVEL_ORIENT, &meta, &lib),
+            core.ini_file_for(OPTLEVEL_VERTICAL, &meta, &lib),
             PathBuf::from("/mame/ini/vertical.ini")
         );
     }
 
-    /// chain_load 到 ORIENT 只读方向 ini：值进 orientvalue/currvalue，
-    /// 更深的 source 层保持未读状态。
+    /// 两个方向层都被读取（各进各的字段），但只有当前游戏方向上的那层
+    /// 喂 currvalue —— 竖屏游戏选中时，横屏层只是一次纯文件读入。
     #[test]
-    fn orient_chain_load_reads_the_orientation_ini() {
+    fn orientation_load_feeds_currvalue_only_when_active() {
         let dir = std::env::temp_dir().join(format!("mvui_orient_chain_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("ini")).unwrap();
-        let ini = dir.join("ini").join("horizont.ini");
-        std::fs::write(&ini, "autofire 1\n").unwrap();
+        let horz_ini = dir.join("ini").join("horizont.ini");
+        let vert_ini = dir.join("ini").join("vertical.ini");
+        std::fs::write(&horz_ini, "autofire 1\n").unwrap();
+        std::fs::write(&vert_ini, "autofire 2\n").unwrap();
+
+        let mut core = core_at(&dir.to_string_lossy());
+        core.opts.insert("autofire".into(), MameOption::new("0"));
+        core.opts.insert("cheat".into(), MameOption::new("0"));
+        core.load_ini(
+            OPTLEVEL_GLOBAL,
+            &Path::new("/does/not/exist.ini"),
+            &HashMap::new(),
+            true,
+        );
+
+        // 竖屏游戏：vertical 活跃，horizontal 只是填字段
+        core.load_ini(
+            OPTLEVEL_HORIZONT,
+            &horz_ini,
+            &HashMap::new(),
+            false,
+        );
+        core.load_ini(OPTLEVEL_VERTICAL, &vert_ini, &HashMap::new(), true);
+        {
+            let af = &core.opts["autofire"];
+            assert_eq!(af.horzvalue, "1");
+            assert_eq!(af.vertvalue, "2");
+            assert_eq!(af.currvalue, "2");
+            assert_eq!(af.globalvalue, "0");
+        }
+        // 横屏游戏：反过来
+        core.opts.insert("autofire".into(), MameOption::new("0"));
+        core.load_ini(
+            OPTLEVEL_GLOBAL,
+            &Path::new("/does/not/exist.ini"),
+            &HashMap::new(),
+            true,
+        );
+        core.load_ini(OPTLEVEL_HORIZONT, &horz_ini, &HashMap::new(), true);
+        core.load_ini(OPTLEVEL_VERTICAL, &vert_ini, &HashMap::new(), false);
+        let af = &core.opts["autofire"];
+        assert_eq!(af.horzvalue, "1");
+        assert_eq!(af.vertvalue, "2");
+        assert_eq!(af.currvalue, "1");
+
+        let _ = std::fs::remove_file(&horz_ini);
+        let _ = std::fs::remove_file(&vert_ini);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// chain_load 一路读到底，两个方向层各归各位；之后两层的字段都能
+    /// 拿到文件里的值（编辑页靠层级字段显示，不靠 currvalue）。
+    #[test]
+    fn chain_load_fills_both_orientation_fields() {
+        let dir = std::env::temp_dir().join(format!("mvui_orient_chain2_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("ini")).unwrap();
+        let horz_ini = dir.join("ini").join("horizont.ini");
+        let vert_ini = dir.join("ini").join("vertical.ini");
+        std::fs::write(&horz_ini, "autofire 1\n").unwrap();
+        std::fs::write(&vert_ini, "autofire 2\n").unwrap();
 
         let lib = GameLibrary::new("0.261".into());
         let mut core = core_at(&dir.to_string_lossy());
@@ -1292,48 +1387,64 @@ mod tests {
             is_horz: true,
             ..Default::default()
         };
-        core.chain_load(&meta, &lib, &HashMap::new(), OPTLEVEL_ORIENT);
+        core.chain_load(&meta, &lib, &HashMap::new());
 
         let af = &core.opts["autofire"];
-        assert_eq!(af.orientvalue, "1");
-        assert_eq!(af.currvalue, "1");
+        assert_eq!(af.horzvalue, "1");
+        assert_eq!(af.vertvalue, "2");
         assert_eq!(af.globalvalue, "0");
-        assert_eq!(af.srcvalue, "");
 
-        let _ = std::fs::remove_file(&ini);
+        let _ = std::fs::remove_file(&horz_ini);
+        let _ = std::fs::remove_file(&vert_ini);
         let _ = std::fs::remove_dir(&dir);
     }
 
-    /// ORIENT 层保存与 source 层同规则：只写和 globalvalue 不同的项；
+    /// 方向层保存与 source 层同规则：只写和 globalvalue 不同的项；
     /// 全部回到全局值时 diff 清空，文件直接删掉不留空壳。
     #[test]
-    fn orient_save_writes_only_diffs_from_global() {
+    fn orientation_save_writes_only_diffs_from_global() {
         let dir = std::env::temp_dir().join(format!("mvui_orient_save_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let ini = dir.join("horizont.ini");
+        let ini = dir.join("vertical.ini");
 
         let mut core = core_at("/mame");
         core.opts.insert("autofire".into(), MameOption::new("0"));
         core.opts.insert("cheat".into(), MameOption::new("0"));
-        core.load_ini(OPTLEVEL_GLOBAL, &Path::new("/does/not/exist.ini"), &HashMap::new());
-        // 运行期保存前 ensure_chain 一定把 ORIENT 层读过（文件不存在时
-        // orientvalue 回填 globalvalue），这里照做，不然未设置项会以空值入档
-        core.load_ini(OPTLEVEL_ORIENT, &Path::new("/does/not/exist.ini"), &HashMap::new());
+        core.load_ini(
+            OPTLEVEL_GLOBAL,
+            &Path::new("/does/not/exist.ini"),
+            &HashMap::new(),
+            true,
+        );
+        // 运行期保存前 ensure_chain 一定把两个方向层都读过（文件不存在时
+        // 字段回填 globalvalue），这里照做，不然未设置项会以空值入档
+        core.load_ini(
+            OPTLEVEL_HORIZONT,
+            &Path::new("/does/not/exist.ini"),
+            &HashMap::new(),
+            false,
+        );
+        core.load_ini(
+            OPTLEVEL_VERTICAL,
+            &Path::new("/does/not/exist.ini"),
+            &HashMap::new(),
+            true,
+        );
         {
             let af = core.opts.get_mut("autofire").unwrap();
-            af.orientvalue = "1".into();
+            af.vertvalue = "1".into();
             af.currvalue = "1".into();
         }
         let default_ini = "#\n# CORE CONFIGURATION\n#\nautofire 0\ncheat 0\n";
-        core.save_ini_file(OPTLEVEL_ORIENT, &ini, default_ini).unwrap();
+        core.save_ini_file(OPTLEVEL_VERTICAL, &ini, default_ini).unwrap();
         let text = std::fs::read_to_string(&ini).unwrap();
         assert!(text.lines().any(|l| l.split_whitespace().eq(["autofire", "1"])));
         assert!(!text.lines().any(|l| l.starts_with("cheat")));
 
         let af = core.opts.get_mut("autofire").unwrap();
-        af.orientvalue = "0".into();
+        af.vertvalue = "0".into();
         af.currvalue = "0".into();
-        core.save_ini_file(OPTLEVEL_ORIENT, &ini, default_ini).unwrap();
+        core.save_ini_file(OPTLEVEL_VERTICAL, &ini, default_ini).unwrap();
         assert!(!ini.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
