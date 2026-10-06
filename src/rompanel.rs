@@ -24,9 +24,9 @@ use crate::icons;
 /// | 拥有 | 绿 | 校验通过 |
 /// | 坏 dump | 黄 | 文件在但是坏的——比"好"差，比"没有"好 |
 /// | 未 dump | **黄** | MAME 说这个文件本来就不会存在，**不是缺失** |
-/// | 未拥有 | **红** | 确认缺失。**只有这一种是红色** |
+/// | 缺失 | **红** | 确认缺失。**只有这一种是红色** |
 ///
-/// **只有"未拥有"用红色。** 之前 `nodump` 走灰色，理由是"它不是坏消息"；
+/// **只有"缺失"用红色。** 之前 `nodump` 走灰色，理由是"它不是坏消息"；
 /// 但灰色和"未校验"撞在一起，用户看到灰就以为是没查。改黄之后语义分开了：
 /// 黄 = 有问题但不是缺文件（坏 dump / 无 dump），红 = 确实缺，灰 = 还没查。
 ///
@@ -98,12 +98,11 @@ fn section(ui: &mut egui::Ui, app: &MameApp, label: &str) {
 ///
 /// 返回 key 而不是文案：文案要走 `app.tr` 现查，语言切换后立刻跟着变。
 ///
-/// 四个词与用户指定的四态一一对应：`拥有` / `坏 dump` / `未拥有` /
-/// `未 dump`（外加未校验时的 `未校验`）。旧版的"很好 / 缺失"是从 MAME 的
-/// verify 报告里抄的词，但用户明确要求用"拥有 / 坏 dump / 未拥有"这套——
-/// 前者描述校验结果，后者描述**用户手上有没有**，后者才是用户真正关心的
-/// 问题。`nodump` 的词也从"无 dump"改成"**未 dump**"（与"未拥有"对齐，
-/// 都是"用户手上没有"的意思）。
+/// 四个词与四态一一对应：`拥有` / `坏 dump` / `缺失` / `未 dump`（外加
+/// 未校验时的 `未校验`）。词的沿革：旧版抄 MAME verify 报告的"很好 /
+/// 缺失"，2026-06 改成"拥有 / 坏 dump / 未拥有"（描述**用户手上有没有**
+/// 而不是校验结果），2026-10-07 用户把"未拥有"定稿为"缺失"——两个字、
+/// 与"拥有"对仗，且与 MAME 自己的用词一致。
 fn state_word(state: RomState) -> &'static str {
     match state {
         RomState::Good => "owned",
@@ -143,7 +142,7 @@ fn crc_text(crc: u32) -> String {
 /// 各列的宽度常量 —— 栅格是**全局的，所有段共用同一套列顺序**。
 ///
 /// `ui.horizontal` + 自然宽度会让每一列的起点随上一行的内容长度飘——
-/// 文件名有长有短，于是「未拥有」这个词有的在这行第 20 个字符，有的在第
+/// 文件名有长有短，于是「缺失」这个词有的在这行第 20 个字符，有的在第
 /// 12 个，整列读起来参差不齐。定宽是唯一能对齐的办法。
 ///
 /// **关键：栅格必须是全局的，不能每段各算各的。**
@@ -211,7 +210,7 @@ mod cols {
 ///
 /// 关键点：**状态列的宽度只由"这一屏真正出现过的状态"决定**，不是五种
 /// 状态里最宽的那个。第一屏全是「拥有」时它是 `24 + 4 + 16 = 44px`；
-/// 若按「未拥有」算就会留出 52px 的空档 —— 那正是用户嫌"图标离 crc 太远"
+/// 若按「缺失」算就会留出 52px 的空档 —— 那正是用户嫌"图标离 crc 太远"
 /// 的来源。
 #[derive(Clone, Copy, Debug)]
 struct Grid {
@@ -395,7 +394,7 @@ fn measure_grid(ui: &egui::Ui, app: &MameApp, view: &RomInfoView, avail: f32) ->
 /// **整格死占 `w`**，所以跨段的状态起点仍落在同一条竖线上——这条比图标在
 /// 前还是在后重要得多。
 ///
-/// 图标 16px（[`cols::ICON_W`]）画在 `词宽 + 4` 处，不占独立列。/// 图标**不染色**（1.8.2 那套 png 自带颜色），但**未拥有用的是新画的
+/// 图标 16px（[`cols::ICON_W`]）画在 `词宽 + 4` 处，不占独立列。/// 图标**不染色**（1.8.2 那套 png 自带颜色），但**缺失用的是新画的
 /// `status_missing.png`（红底白叉）** —— 原来的 `status_cross` 是**蓝底**
 /// 白叉，深色主题下容易被读成灰色 = 「未审计」，而灰色是未审计的专属。
 ///
@@ -424,7 +423,7 @@ fn state_with_icon(ui: &mut egui::Ui, w: f32, text: impl AsRef<str>, state: RomS
     let (_id, rect) = ui.allocate_space(egui::vec2(w, row_h));
     ui.painter()
         .galley(rect.min, galley, ui.visuals().text_color());
-    // 3) 图标贴在词尾 + 4px，**纵向对齐到文字的中线**
+    // 3) 图标贴在词尾 + 4px，**纵向对齐到文字的视觉中线**
     //
     // 这里对齐的是**文字行的中线**（`rect.min.y + text_h / 2`），不是整格
     // 的中线、也不是图标自身 16px 的中心。差1px 就看得出来（用户
@@ -435,10 +434,16 @@ fn state_with_icon(ui: &mut egui::Ui, w: f32, text: impl AsRef<str>, state: RomS
     // → 图标比文字低 1px（探针 `examples/col_probe.rs` 实测）。
     //
     // 也不能顶对齐（原先那样）：图标中心 8px、文字 7px，图标比文字高 1px。
-    // 两个方向的偏差都是 1px，肉眼却读成"没对齐"—— 因为图标是有色实心
-    // 块，1px 的错位比留白更容易被看见。
+    //
+    // **光学补偿 1px**（用户 2026-10-07：「图标有点点下沉」）：上面的公式
+    // 对齐的是行框的**几何**中线，而汉字字面几乎不占用行框的 descent 区
+    // —— 汉字的视觉重心在几何中线之上。把一个 16px 的有色实心块对到
+    // 几何中线，肉眼读出来就是图标下沉。`ICON_OPTIC_NUDGE` 把图标再上移
+    // 1px，让图标的中心落在汉字**字面**的视觉中线上。
+    const ICON_OPTIC_NUDGE: f32 = 1.0;
     let ctx = ui.ctx().clone();
-    let icon_y = rect.min.y + text_h / 2.0 - cols::ICON_W / 2.0;
+    let icon_y =
+        rect.min.y + text_h / 2.0 - cols::ICON_W / 2.0 - ICON_OPTIC_NUDGE;
     let icon_rect = egui::Rect::from_min_size(
         egui::pos2(rect.min.x + word_w + cols::ICON_GAP, icon_y),
         egui::vec2(cols::ICON_W, cols::ICON_W),
@@ -793,7 +798,7 @@ mod tests {
 
     /// 用户指定的四态配色（2026-06 修订）：绿 / 黄 / 黄 / 红。
     ///
-    /// **只有"未拥有"是红色。** `nodump` 从灰色改成黄色（与坏 dump 同色，
+    /// **只有"缺失"是红色。** `nodump` 从灰色改成黄色（与坏 dump 同色，
     /// 图标也是同一个感叹号）——原先它和"未校验"共用灰色，用户看到灰就
     /// 以为是没查。灰色现在只属于"未校验"，独占。
     #[test]
@@ -801,7 +806,7 @@ mod tests {
         assert_eq!(state_color(RomState::Good), icons::GREEN, "拥有=绿");
         assert_eq!(state_color(RomState::BadDump), icons::YELLOW, "坏 dump=黄");
         assert_eq!(state_color(RomState::NoDump), icons::YELLOW, "未 dump=黄");
-        assert_eq!(state_color(RomState::Missing), icons::RED, "未拥有=红");
+        assert_eq!(state_color(RomState::Missing), icons::RED, "缺失=红");
         // 红色是"确实缺"的专属，不能被任何别的状态借用
         assert_ne!(
             state_color(RomState::Unknown),
@@ -823,7 +828,7 @@ mod tests {
     /// 自带蓝色，跟旁边的黄字并排显得是两件事。
     ///
     /// 真正要防的是**绿勾 / 红叉 / 黄叹 / 蓝问这四个语义图标**被两个状态
-    /// 共用：拥有/坏 dump/未拥有/未校验必须各自不同。
+    /// 共用：拥有/坏 dump/缺失/未校验必须各自不同。
     #[test]
     fn the_meaningful_icons_are_not_shared() {
         let unique = [
@@ -849,9 +854,9 @@ mod tests {
         );
     }
 
-    /// **未拥有必须是红叉**，而且不能是 1.8.2 那张 `status_cross`。
+    /// **缺失必须是红叉**，而且不能是 1.8.2 那张 `status_cross`。
     ///
-    /// 用户 2026-06 指出：未拥有显示的是**蓝色**叉（`status_cross.png` 是蓝底
+    /// 用户 2026-06 指出：缺失显示的是**蓝色**叉（`status_cross.png` 是蓝底
     /// 白叉），而配色约定里蓝色在深色主题下容易被读成灰色 = 「未审计」——
     /// 那正是这个约定要避免的（灰色是「没查」的专属）。
     ///
@@ -859,10 +864,10 @@ mod tests {
     /// 这条钉住"别哪天又换回蓝的那张"。
     #[test]
     fn not_owned_uses_the_red_cross() {
-        let missing = state_icon(RomState::Missing).expect("未拥有要有图标");
+        let missing = state_icon(RomState::Missing).expect("缺失要有图标");
         assert!(
             missing.contains("missing"),
-            "未拥有该用新画的 status_missing（红底白叉），现在却是 {missing}"
+            "缺失该用新画的 status_missing（红底白叉），现在却是 {missing}"
         );
         assert_ne!(
             missing,
@@ -1014,19 +1019,20 @@ mod tests {
     /// 状态量宽，所以**图标永远贴着格尾**，格尾到 crc 只隔 COL_GAP。
     ///
     /// 关键在"这一屏出现过"，不是"所有状态里最宽的"—— 后者会让全是
-    /// 「拥有」的机种也按「未拥有」留出 52px 空档。
+    /// 「拥有」的机种也按「未校验」三字的宽度留出空档（「缺失」改词后
+    /// 与「拥有」同为两字，最宽的中文状态词是三字的「未校验」）。
     #[test]
     fn the_state_column_width_follows_the_states_actually_present() {
         // 「拥有」两字 + 间隙 + 图标：格子刚好装下，不留白
         let only_good = 24.0 + cols::ICON_GAP + cols::ICON_W;
-        // 「未拥有」三字：更宽
-        let with_missing = 36.0 + cols::ICON_GAP + cols::ICON_W;
+        // 「未校验」三字：更宽
+        let with_wider_word = 36.0 + cols::ICON_GAP + cols::ICON_W;
         assert!(
-            with_missing - only_good >= 12.0,
-            "「未拥有」必须比「拥有」宽一整个汉字的量"
+            with_wider_word - only_good >= 12.0,
+            "三字状态词必须比两字词宽一整个汉字的量"
         );
         // 两者都在合法区间内
-        for w in [only_good, with_missing] {
+        for w in [only_good, with_wider_word] {
             assert!(
                 (cols::STATE_MIN..=cols::STATE_MAX).contains(&w),
                 "状态列宽 {w} 超出[{}, {}]",
@@ -1048,34 +1054,44 @@ mod tests {
     }
 
     /// **图标必须与状态词上下对齐**（用户 2026-10-06：「这个 logo 要和
-    /// 文字上下对齐」）。
+    /// 文字上下对齐」；2026-10-07：「有点点下沉」→ 加 1px 光学补偿）。
     ///
     /// 差 1px 就看得出来，因为图标是**有色实心块**：文字之间的错位靠留白
     /// 吸收，而一个 16×16 的绿圆点偏上 1px 立刻读成"浮在字上面"。
     ///
-    /// 对齐的基准是**文字行框的中线**，不是整格的中线、也不是图标自身 16px
-    /// 的中心：
+    /// 对齐的基准是**文字行框的中线减 1px 光学补偿**，不是整格的中线、
+    /// 也不是图标自身 16px 的中心：
     ///
-    /// | 基准 | 图标中心 y | 文字中线 y | 差 |
+    /// | 基准 | 图标中心 y | 文字行框中线 y | 差 |
     /// |---|---|---|---|
     /// |顶对齐（原先）| 8.0 | 7.0 | 图标高 1px |
     /// | 居中于整格（试过）| 8.0 | 7.0 | 图标低 1px |
-    /// | **对齐文字中线** | **7.0** | **7.0** | **0** |
+    /// | **行框中线 - 光学补偿** | **6.0** | 7.0（字面视觉中线 ≈ 6.0） | **视觉 0** |
+    ///
+    /// 光学补偿的来由：汉字字面几乎不占行框的 descent 区，视觉重心在几何
+    /// 中线之上 ~1px；实心图标对到几何中线会被读成"下沉"（用户
+    /// 2026-10-07）。`ICON_OPTIC_NUDGE = 1.0` 把图标中心抬到汉字字面的
+    /// 视觉中线上。
     ///
     /// **这条测试为什么查源码而不复刻公式**：第一版把公式抄进测试里自己算，
     /// 结果"改回顶对齐"与"改成居中于整格"两个变异**都全绿** —— 测试算的是
     /// 自己那份副本，真实代码改了它不知道（同义反复）。所以改成**断言源码
     /// 里那一行的字面形状**。真实字体下的数值验证交给探针
-    /// `examples/font_metrics.rs`（行框 14px）与 `examples/col_probe.rs`
-    /// （中心差 0.00px）。
+    /// `examples/font_metrics.rs`（行框 14px）与 `examples/col_probe.rs`。
     #[test]
     fn the_icon_is_vertically_centred_on_the_state_word() {
         let body = fn_body("fn state_with_icon(");
-        // 必须是「文字中线 - 图标半高」，且必须用 text_h（文字行框高）
-        let ok = "rect.min.y + text_h / 2.0 - cols::ICON_W / 2.0";
+        // 必须是「文字中线 - 图标半高 - 光学补偿」，且必须用 text_h（文字行框高）
+        let ok = "rect.min.y + text_h / 2.0 - cols::ICON_W / 2.0 - ICON_OPTIC_NUDGE";
         assert!(
             body.contains(ok),
-            "图标必须对齐**文字中线**（{ok}）—— 顶对齐偏高 1px、居中于整格偏低 1px：\n{body}"
+            "图标必须对齐**文字视觉中线**（{ok}）—— 顶对齐偏高 1px、居中于整格偏低 1px、\
+             对齐行框几何中线偏下沉 1px：\n{body}"
+        );
+        // 补偿量钉在 1px：0 就是回到了"下沉"，超过 1px 会读成偏高
+        assert!(
+            body.contains("const ICON_OPTIC_NUDGE: f32 = 1.0;"),
+            "光学补偿必须是常量 1.0：\n{body}"
         );
         // 不许用整格高 row_h 来算居中（那正是 1px 错位的来源）
         assert!(

@@ -1904,7 +1904,7 @@ mod toolbar_icon_tests {
             "16x16/system-search.png", // 搜索
             "16x16/clear.png",         // 清除
             "16x16/advanced.png",      // 高级搜索
-            "16x16/status_missing.png",// 未拥有（Rom 面板用，同表）
+            "16x16/status_missing.png",// 缺失（Rom 面板用，同表）
         ] {
             assert!(
                 crate::icons::ICONS.iter().any(|(k, _)| *k == name),

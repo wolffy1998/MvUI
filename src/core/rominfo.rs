@@ -1160,7 +1160,7 @@ mod tests {
             "zip 在就该报拥有 —— 不因为里面少了 zz 就报缺失"
         );
 
-        // 重扫（包没了）→ 未拥有（红），不是灰色"未知"
+        // 重扫（包没了）→ 缺失（红），不是灰色"未知"
         let _ = std::fs::remove_dir_all(&dir);
         crate::core::samples::scan_sample_sets(&[dir.clone()]);
         let v2 = view_of(&lib, "game", true);
