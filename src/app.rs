@@ -155,6 +155,17 @@ pub struct MameApp {
     pub filter_flags: u16,
     pub search: String,
     pub search_take_focus: bool,
+    /// 高级搜索：**搜索要作用于哪些列**（位掩码，下标是 `COL_*`）。
+    ///
+    /// 默认**所有列都勾选**（`[true; COL_LAST]`）—— 与旧行为一致：搜索框
+    /// 一直是"name + description"的全文搜。收窄只发生在用户自己在「高级搜索」
+    /// 弹窗里取消勾选之后。
+    ///
+    /// 存掩码而不是 `Vec<bool>`：`COL_LAST` 是编译期常量 7，位掩码可以直接
+    /// `u8` 存进 ini，且"全选 = !0"这个初值不必逐位填。
+    pub search_cols: u8,
+    /// 「高级搜索」弹窗是否打开（工具栏左侧那个放大镜+清单图标）。
+    pub show_advsearch_win: bool,
     /// filtered view. `Rc` so the 46k-entry index can be handed to the table
     /// without a per-frame deep clone (README P2-23)
     pub visible: std::rc::Rc<Vec<usize>>,
@@ -467,6 +478,11 @@ impl MameApp {
             filter_flags,
             search: String::new(),
             search_take_focus: false,
+            // 高级搜索默认全选（=旧行为：全文搜 name + description）。
+            // 用 `all_search_cols()` 而不是 `u8::MAX`：后者有 8 位，比 7 列
+            // 多一位，工具栏按钮上的 `(n/7)` 会显示成 8/7。
+            search_cols: crate::views::all_search_cols(),
+            show_advsearch_win: false,
             visible: std::rc::Rc::new(Vec::new()),
             needs_refilter: true,
             selected: None,

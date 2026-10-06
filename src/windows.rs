@@ -2,6 +2,7 @@
 
 use crate::app::{
     MameApp, PlayKind, F_CLONES, F_MECHANICAL, F_NONWORKING, F_UNAVAILABLE,
+    COL_LAST, COLUMN_TITLES,
 };
 use crate::core::options::{
     OptKind, OptionCore, GUI_CATEGORIES, OPTLEVEL_BIOS, OPTLEVEL_CLONEOF,
@@ -142,11 +143,65 @@ pub fn draw_windows(app: &mut MameApp, ctx: &egui::Context) {
     draw_verify(app, ctx);
     // `draw_rom_verify` 已随单游戏校验一起删除（2026-06）。
     draw_filter(app, ctx);
+    draw_advanced_search(app, ctx);
 }
 
 /// Filter popup, opened from the toolbar button left of the search box. These
 /// four flags used to sit in View ▸ Custom Filters; the menu entry is gone, the
 /// filtering itself is unchanged.
+/// 高级搜索弹窗：勾选**搜索要作用在哪几列**。
+///
+/// 用户 2026-06 要求：「高级搜索就是可以筛选按游戏列表某列搜索，默认是所有
+/// 列都勾选可以搜索。」所以：
+///
+/// - 默认 `search_cols = u8::MAX`（7 列全勾），也就是旧行为 —— 搜索框一直是
+///   `name + description` 的全文搜。
+/// - 一列都不勾时**不过滤**（等于"搜索框里什么都没有"，比"什么都搜不到"
+///   合理，否则用户会以为搜索坏了）。这一点由
+///   [`MameApp::row_matches_query`] 里的"没有任何列命中就 false"配合 ——
+///   全不勾时它对每一行都返回 false，所以要在这里显式拦一下。
+/// - 勾选变化立刻 `needs_refilter`：否则用户改完勾选要等到下一次敲键盘
+///   才看到结果。
+fn draw_advanced_search(app: &mut MameApp, ctx: &egui::Context) {
+    let mut show = app.show_advsearch_win;
+    egui::Window::new(app.tr("Advanced search"))
+        .open(&mut show)
+        .resizable(false)
+        .default_width(260.0)
+        .frame(opaque_frame(ctx))
+        .show(ctx, |ui| {
+            ui.weak(app.tr("Search only in the ticked columns"));
+            ui.separator();
+            for i in 0..COL_LAST {
+                let bit = 1u8 << i;
+                let mut on = app.search_cols & bit != 0;
+                if ui
+                    .checkbox(&mut on, app.tr(COLUMN_TITLES[i]))
+                    .changed()
+                {
+                    if on {
+                        app.search_cols |= bit;
+                    } else {
+                        app.search_cols &= !bit;
+                    }
+                    app.needs_refilter = true;
+                }
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(app.tr("Select all")).clicked() {
+                    app.search_cols = crate::views::all_search_cols();
+                    app.needs_refilter = true;
+                }
+                if ui.button(app.tr("Clear")).clicked() {
+                    app.search_cols = 0;
+                    app.needs_refilter = true;
+                }
+            });
+        });
+    app.show_advsearch_win = show;
+}
+
 fn draw_filter(app: &mut MameApp, ctx: &egui::Context) {
     let mut show = app.show_filter_win;
     egui::Window::new(app.tr("Filter"))

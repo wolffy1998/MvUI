@@ -81,6 +81,18 @@ static SAMPLE_SETS: std::sync::LazyLock<std::sync::RwLock<SampleSet>> =
 ///
 /// 一律转小写：Windows/macOS 文件系统不敏感，磁盘上可能是 `GENPIN.ZIP`，
 /// 而 `GameMeta::sampleof` 是小写。
+/// **测试专用**：串行化所有会改 `SAMPLE_DIRS` / `SAMPLE_SETS` 的测试。
+///
+/// Rust 的测试默认多线程并行，而这些是**进程级全局**—— 不加锁就会
+/// 互相踩：症状是**单跑一个测试全绿、`cargo test` 跑全量间歇性 FAILED，
+/// 而且失败的那个常常是无辜的**（2026-06 两次都栽在这：`samples.rs` 内部的
+/// 测试互相踩了一次，`rominfo.rs` 的样本测试与`samples.rs` 跨模块踩了一次）。
+///
+/// 必须是 `pub(crate)` 而不是模块私有：`rominfo.rs` 的测试也要改同一份
+/// 集合，**跨模块也要抢同一把锁**。
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn scan_sample_sets(dirs: &[PathBuf]) -> usize {
     let mut set = SampleSet::new();
     for dir in dirs {
@@ -248,14 +260,6 @@ pub fn sample_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// **本模块的测试全部串行**：它们都改同一份全局 `SAMPLE_DIRS` /
-    /// `SAMPLE_SETS`，而 Rust 的测试默认多线程并行。
-    ///
-    /// 症状很隐蔽：单跑一个测试全绿，`cargo test` 跑全量就 FAILED，而且
-    /// 失败的那个是**无辜的**（`unverified_games_report_unknown` 报的却是
-    /// 另一个测试建好的包被它读到了）。所以每个碰全局的测试开头拿这把锁。
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn meta_with(name: &str, sampleof: &str, samples: &[&str]) -> GameMeta {
         let mut g = GameMeta {

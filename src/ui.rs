@@ -346,6 +346,78 @@ pub fn button(label: impl Into<egui::WidgetText>) -> egui::Button<'static> {
     egui::Button::new(label)
 }
 
+/// 一个**只有图标、没有文字**的工具栏按钮。
+///
+/// 为什么要自己画而不是 `egui::Button::image()`：那条路走
+/// `egui::load::Icon::Name`，依赖 egui 的图片加载器已经装好。**本项目只在
+/// 部分路径装了 `install_image_loaders`**，没装的那条路上
+/// `egui::load` 会**静默什么都不画** —— 按钮变成一个空白小块，看不出是
+/// 搜索还是清除。走 [`icons::put`] 用的是自己的纹理表，任何情况下都一致。
+///
+/// 做法：`allocate_ui_with_layout` 拿到按钮大小的方块居中画图标，再用
+/// `interact` 拿到点击。**按钮本身的边框/悬停底色照旧画**，否则它就不是
+/// 按钮了（用户要的是"带图标的按钮"，不是裸图标）。
+fn icon_button(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    icon: &str,
+    tooltip: impl Into<String>,
+    enabled: bool,
+) -> egui::Response {
+    let size = egui::vec2(24.0, 22.0);
+    let sense = if enabled {
+        egui::Sense::click()
+    } else {
+        // 仍然给 hover：用户要能看到 tip 才知道这个按钮是干什么的，
+        // 只是点了没反应。
+        egui::Sense::hover()
+    };
+    let (rect, mut resp) = ui.allocate_exact_size(size, sense);
+    // **必须显式改 `Response.enabled` 字段**（egui 0.29 里它是字段不是方法）——
+    // 只把 `Sense` 换成 `hover` 只是"不接收点击"，`enabled` 仍为 true，
+    // 于是 `add_enabled(...)` 那类上层包装照样当它可点。画成灰色却还能点 =
+    // 最坏的一种按钮（用户点了没反应，只会觉得程序卡了）。
+    resp.enabled = enabled;
+    if ui.is_rect_visible(rect) {
+        // 与普通按钮同一套视觉（悬停/按下变色），只是内容换成图标。
+        // egui 0.29 的入口是 `visuals().widgets.{inactive,hovered,active}`，
+        // 圆角字段叫 `rounding`（不叫 `corner_radius`）。
+        //
+        // **先把三个分支的视觉都取出来再画** —— 直接持有 `&ui.visuals()` 的
+        // 引用会让 `ui` 被不可变借用，而下面 `icons::put(ui, …)` 要可变借用，
+        // 编译器会报E0502。所以先克隆（`WidgetVisuals: Clone`，四个字段都是
+        // 廉价值），借用随之结束。
+        let (v, stroke) = {
+            let w = &ui.visuals().widgets;
+            let v = if !enabled {
+                &w.inactive
+            } else if resp.is_pointer_button_down_on() {
+                &w.active
+            } else if resp.hovered() {
+                &w.hovered
+            } else {
+                &w.inactive
+            };
+            (v.clone(), v.fg_stroke)
+        };
+        // 按钮底色用 `weak_bg_fill`（可透明），描边用 `bg_stroke`。
+        // egui 0.29 的 `Painter::rect` 还是 4 参（**没有** 0.31 才有的
+        // `StrokeKind`），描边宽度在 `Stroke` 里。
+        if v.weak_bg_fill != egui::Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, v.rounding, v.weak_bg_fill);
+        }
+        ui.painter()
+            .rect(rect, v.rounding, v.weak_bg_fill, v.bg_stroke);
+        let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(16.0, 16.0));
+        if !crate::icons::put(ui, ctx, icon, icon_rect) {
+            // 纹理未解码（第一帧）或图标名写错：画一个描边方块。
+            // **不能什么都不画** —— 空白按钮用户根本猜不出是搜索还是清除。
+            ui.painter().rect_stroke(icon_rect, 2.0, stroke);
+        }
+    }
+    resp.on_hover_text(tooltip.into())
+}
+
 impl MameApp {
     pub fn tr(&self, key: &str) -> String {
         crate::i18n::tr(&self.lang, key)
@@ -872,17 +944,45 @@ impl MameApp {
     // toolbar
     // ------------------------------------------------------------------
 
+    /// 顶部工具栏：**高级搜索 · 过滤 · [搜索框] · 搜索 · 清除**
+    ///
+    /// 布局按用户 2026-06 的要求：搜索框**左侧**是高级搜索与过滤两个弹窗
+    /// 入口，**右侧**是「搜索」与「清除」两个带图标的按钮，**没有运行按钮**
+    /// （运行走 `has_game()` 的双击或 F5；工具栏那个 `▶ Play` 已按要求删除）。
+    ///
+    /// 「清除」原来是 `ui.small_button("✕")` 那个纯文字叉，现在换成图标
+    /// 按钮，与搜索按钮成对。图标走 [`icons::draw_passive`]，它不抢 hover
+    /// （`Sense` 全false），所以不会把右键菜单吃掉。
     fn draw_toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // filter popup, left of the search box: the four hide flags
-                // used to live in View ▸ Custom Filters
+                // ---- 左：高级搜索（按列筛选）----
+                let cols_on = self.search_cols.count_ones();
+                let adv_label = if cols_on as usize == COL_LAST {
+                    self.tr("Advanced search").to_string()
+                } else {
+                    format!(
+                        "{} ({}/{})",
+                        self.tr("Advanced search"),
+                        cols_on,
+                        COL_LAST
+                    )
+                };
+                if ui
+                    .add(egui::Button::new(adv_label).selected(cols_on as usize != COL_LAST))
+                    .on_hover_text(self.tr("Choose which columns the search looks at"))
+                    .clicked()
+                {
+                    self.show_advsearch_win = !self.show_advsearch_win;
+                }
+
+                // ---- 左：过滤（四个 hide 标志）----
                 let any_filter = self.filter_flags != 0;
                 let fb = self.tr("Filter");
                 let fb = if any_filter {
                     format!("{fb} ({})", self.filter_flags.count_ones())
                 } else {
-                    fb
+                    fb.to_string()
                 };
                 if ui
                     .add(egui::Button::new(fb).selected(any_filter))
@@ -891,6 +991,10 @@ impl MameApp {
                 {
                     self.show_filter_win = !self.show_filter_win;
                 }
+
+                ui.separator();
+
+                // ---- 中：搜索框 ----
                 let take_focus = self.search_take_focus;
                 let hint = self.tr("Search (Ctrl+F)");
                 let resp = ui.add_sized(
@@ -903,24 +1007,31 @@ impl MameApp {
                     resp.request_focus();
                     self.search_take_focus = false;
                 }
-                if resp.changed() {
+                // 回车即搜：文本框的 `changed()` 已经逐字符过滤了，回车只是把
+                // 焦点状态收一收（键盘用户按完回车不会留着焦点高亮）。
+                if resp.changed() || resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.search_changed();
                 }
-                if ui.small_button("✕").clicked() {
+
+                // ---- 右：搜索 / 清除（带图标）----
+                ui.add_space(4.0);
+                if icon_button(ui, ctx, "16x16/system-search.png", self.tr("Search"), true).clicked() {
+                    self.search_changed();
+                }
+                // 「清除」在没有搜索词时**画灰但仍可点**（点了等于再搜一次
+                // 全部，语义上就是"回到无搜索"，不該禁掉——禁掉会让用户
+                // 以为这个按钮坏了）。灰态靠 `enabled` 传下去。
+                let has_text = !self.search.is_empty();
+                if icon_button(ui, ctx, "16x16/clear.png", self.tr("Clear the search"), has_text)
+                    .clicked()
+                {
                     self.search.clear();
                     self.search_changed();
                 }
-                ui.separator();
-                let play = format!("▶ {}", self.tr("Play"));
-                if ui.add_enabled(self.has_game(), egui::Button::new(play)).clicked() {
-                    self.launch(RunMode::Normal, vec![]);
-                }
-                // 原来这里还有一项「校验」调`refresh_all()`，与文件菜单的
-                // 「刷新档案」完全同源（同一个动作、同一份 F5 快捷键），
-                // 用户要求删掉。
             });
         });
     }
+
 
     // ------------------------------------------------------------------
     // folder tree dock
@@ -1807,4 +1918,54 @@ mod tests {
         }
         assert!(map.len() <= 8, "map grew to {}", map.len());
     }
+
+#[cfg(test)]
+mod toolbar_icon_tests {
+    use super::*;
+
+    /// **工具栏那几个图标名必须真的在资产表里。**
+    ///
+    /// 图标名写错是**运行期静默失败**：`icons::put` 查不到纹理就返回 false，
+    /// 我画的那个描边方块顶上，编译期一个错都不报。而工具栏只有 22px 高，
+    /// 截图标跟没截几乎看不出区别 —— 只能靠这条测试。
+    ///
+    /// 这条也解释了为什么 `lib.rs` 要 `pub mod icons`：探针和测试都要查这张表。
+    #[test]
+    fn the_toolbar_icons_exist_in_the_asset_table() {
+        for name in [
+            "16x16/system-search.png", // 搜索
+            "16x16/clear.png",         // 清除
+            "16x16/advanced.png",      // 高级搜索
+            "16x16/status_missing.png",// 未拥有（Rom 面板用，同表）
+        ] {
+            assert!(
+                crate::icons::ICONS.iter().any(|(k, _)| *k == name),
+                "assets 里没有 {name} —— 图标会在运行期静默不显示"
+            );
+        }
+    }
+
+    /// 图标按钮的 enabled 状态**真的关掉了点击**，不只是少收一次点击。
+    ///
+    /// `Sense::hover()` 只是"不接收点击"，`Response.enabled` 仍是 true，
+    /// 上层`add_enabled(...)` 之类照样当它可点 —— 画成灰色却还能点是最坏的
+    /// 一种按钮（用户点了没反应，只会觉得程序卡了）。
+    ///
+    /// 顺带钉住一个egui 的既有行为：**disabled 就不响应 hover**，所以
+    /// 「清除」按钮在无搜索词时既点不动、也不出 tooltip。这里给出的是
+    /// `Sense::click()`（与 egui 的 `Button` 一致），不是自创的"灰但有 tip"。
+    #[test]
+    fn a_disabled_icon_button_really_cannot_be_clicked() {
+        let ctx = egui::Context::default();
+        // `Context::run` 的返回值（FullOutput）必须用掉，否则一条 warning
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let off = icon_button(ui, ctx, "16x16/clear.png", "tip", false);
+                assert!(!off.enabled(), "disabled 时 enabled 必须是 false");
+                let on = icon_button(ui, ctx, "16x16/clear.png", "tip", true);
+                assert!(on.enabled(), "enabled 时必须是 true");
+            });
+        });
+    }
+}
 }

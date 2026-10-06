@@ -1120,6 +1120,13 @@ mod tests {
     /// 删掉磁盘上的包而不重扫，结论不变 —— 刷新时机是 F5（重跑 `verify_all`）。
     #[test]
     fn a_sample_row_reports_whether_the_archive_is_there() {
+        // **必须抢 `samples::TEST_LOCK`** —— 本测试改的是同一份进程级全局
+        // 集合（`scan_sample_sets`），而 `samples.rs` 里的测试也改它。
+        // 跨模块也要串行，否则症状是"单跑全绿、全量跑间歇性 FAILED，
+        // 而且报错的不是真凶"（2026-06 栽过两次）。
+        let _guard = crate::core::samples::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join("mvui_rominfo_samples");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");

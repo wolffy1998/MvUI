@@ -76,6 +76,18 @@ impl MameApp {
     // filtering (origin: filterFolderChanged + filterAcceptsRow)
     // ------------------------------------------------------------------
 
+    pub fn row_matches_query(&self, g: &GameMeta, query: &str) -> bool {
+        match_in_search_cols(
+            g,
+            &query.to_lowercase(),
+            self.search_cols,
+            self.local_game_list,
+            self.lib_verified,
+        )
+    }
+
+
+
     pub fn refilter(&mut self) {
         self.needs_refilter = false;
         let Some(lib) = self.lib.clone() else {
@@ -150,16 +162,10 @@ impl MameApp {
             if !folder_ok {
                 continue;
             }
-            // search filter: name/description (wildcard)
+            // search filter: the columns the user picked in the advanced-search
+            // popup (all of them by default — same behaviour as before itexisted)
             if !query.is_empty() {
-                let hay = format!("{} {} {}", g.name, g.description, {
-                    if self.local_game_list && !g.lc_desc.is_empty() {
-                        g.lc_desc.clone()
-                    } else {
-                        String::new()
-                    }
-                });
-                if !wildcard_match(&hay.to_lowercase(), &query.to_lowercase()) {
+                if !self.row_matches_query(g, &query) {
                     continue;
                 }
             }
@@ -1665,6 +1671,87 @@ fn cell_text(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     );
 }
 
+/// 高级搜索的**纯逻辑**：这一行在用户勾选的列里能不能搜到 `query_lc`。
+///
+/// 抽成自由函数（而不是留在 `impl MameApp` 里）是为了能测：`MameApp::new`
+/// 要`eframe::CreationContext`，单测里造不出来，而"勾了 year 就只搜年份"
+/// 这种行为**必须**有测试守着。
+///
+/// `cols` 是位掩码，下标 = `COL_*`。**一列都不勾时返回 false**（什么都搜不
+/// 到）—— 与"不筛选"是两件不同的事，UI 上那个状态由弹窗负责解释。
+/// `query_lc` 必须已转小写（本项目所有搜索都大小写不敏感）。
+///
+/// **为什么逐列判而不是把所有列拼成一段再搜**：那会让 year 的 "19" 匹配到
+/// 描述里任何含 "19" 的游戏，而用户勾 year 列时想搜的显然是年份本身。
+/// 「全选」掩码：按 `COL_LAST` 生成，**不用 `u8::MAX`**。
+///
+/// `COL_LAST` 是 7，而 `u8::MAX` 有 8 位 —— 拿它当"全选"会让
+/// `count_ones()` 返回 8，比列数还多一位，看起来像还有第 8 列。
+/// 位掩码的宽度也该跟着列数走（`COL_LAST > 8` 时这个函数就错了，
+/// 真到那天再换`u16`/位集）。
+pub fn all_search_cols() -> u8 {
+    if COL_LAST >= 8 {
+        u8::MAX
+    } else {
+        ((1u16 << COL_LAST) - 1) as u8
+    }
+}
+
+fn match_in_search_cols(
+    g: &GameMeta,
+    query_lc: &str,
+    cols: u8,
+    local_game_list: bool,
+    lib_verified: bool,
+) -> bool {
+    let hit = |on: bool, text: &str| -> bool {
+        on && !text.is_empty() && wildcard_match(&text.to_lowercase(), query_lc)
+    };
+    // 描述列：本地化开启且有中文名时用中文名 —— 与表格里显示的一致，
+    // 否则用户看着 `吃豆人` 却搜不到。
+    let desc: &str = if local_game_list && !g.lc_desc.is_empty() {
+        g.lc_desc.as_str()
+    } else {
+        g.description.as_str()
+    };
+    if hit(cols & (1 << COL_DESC) != 0, desc) {
+        return true;
+    }
+    if hit(cols & (1 << COL_NAME) != 0, &g.name) {
+        return true;
+    }
+    // ROM 列在表格里是**状态色块**，没有文字。这里给状态词而不是内部等级
+    // 数字 —— 用户看得懂的是前者。没校验过时如实报"未校验"。
+    if cols & (1 << COL_ROM) != 0 {
+        let word = if !lib_verified {
+            "not verified"
+        } else if g.available == GAME_COMPLETE {
+            "owned"
+        } else {
+            "missing"
+        };
+        if wildcard_match(word, query_lc) {
+            return true;
+        }
+    }
+    if hit(cols & (1 << COL_MFTR) != 0, &g.manufacturer) {
+        return true;
+    }
+    if hit(cols & (1 << COL_SRC) != 0, &g.sourcefile) {
+        return true;
+    }
+    if cols & (1 << COL_YEAR) != 0 {
+        let y = if g.year.is_empty() { "?" } else { g.year.as_str() };
+        if wildcard_match(&y.to_lowercase(), query_lc) {
+            return true;
+        }
+    }
+    if hit(cols & (1 << COL_CLONEOF) != 0, &g.cloneof) {
+        return true;
+    }
+    false
+}
+
 fn wildcard_match(hay: &str, pattern: &str) -> bool {
     if !pattern.contains('*') {
         return hay.contains(pattern);
@@ -1757,5 +1844,113 @@ mod tests {
         assert_eq!(order, [0, 1, 2, 3, 4, 5, 6]);
         shift_slot(&mut order, 0, 99);
         assert_eq!(order, [0, 1, 2, 3, 4, 5, 6]);
+    }
+
+    fn g() -> GameMeta {
+        GameMeta {
+            name: "pacman".into(),
+            description: "Munch the dots".into(),
+            lc_desc: "吃豆人".into(),
+            manufacturer: "Namco".into(),
+            sourcefile: "pacman.cpp".into(),
+            year: "1980".into(),
+            cloneof: "pz".into(),
+            available: GAME_COMPLETE,
+            ..Default::default()
+        }
+    }
+
+    /// 默认全选 —— 搜索行为与「高级搜索」出现之前**完全一样**。
+    ///
+    /// 用户要求「默认是所有列都勾选可以搜索」，所以初值必须是"全选"而不是
+    /// 某个"合理"的子集，否则一升级就发现搜不到以前能搜到的东西。
+    #[test]
+    fn every_column_is_searched_by_default() {
+        let game = g();
+        // 按列数生成掩码，**不用 `u8::MAX`** —— 那是 8 位，比 7 列多一位，
+        // 拿它当"全选"会让人以为还有第 8 列。
+        let all = all_search_cols();
+        assert_eq!(all.count_ones() as usize, COL_LAST);
+        for q in ["pacman", "dots", "namco", "1980", "pz", "pacman.cpp"] {
+            assert!(
+                match_in_search_cols(&game, q, all, false, true),
+                "全选时 {q:?} 必须能搜到"
+            );
+        }
+    }
+
+    /// 勾一列就只搜那一列 —— **别的列里的字样不算数**。
+    ///
+    /// 这条是高级搜索的全部意义所在：拼成一段搜的话，"19" 会匹配到描述里
+    /// 含 19 的游戏，而用户勾 year 时想搜的是年份本身。
+    #[test]
+    fn only_the_ticked_columns_are_searched() {
+        let game = g();
+        // 只勾 year：只有 1980 能搜到
+        let only_year = 1u8 << COL_YEAR;
+        assert!(match_in_search_cols(&game, "1980", only_year, false, true));
+        for q in ["pacman", "dots", "namco", "pz"] {
+            assert!(
+                !match_in_search_cols(&game, q, only_year, false, true),
+                "只勾 year 时不该被{q:?} 命中"
+            );
+        }
+        // 只勾厂商
+        let only_mftr = 1u8 << COL_MFTR;
+        assert!(match_in_search_cols(&game, "namco", only_mftr, false, true));
+        assert!(!match_in_search_cols(&game, "1980", only_mftr, false, true));
+    }
+
+    /// 本地化列表开启时，描述列搜的是**中文名**（表格上显示的就是它）。
+    ///
+    /// 否则用户看着 `吃豆人` 却搜不到 —— 这是"所见即所搜"的基本要求。
+    #[test]
+    fn the_localized_name_is_searched_when_the_list_is_localized() {
+        let game = g();
+        let desc = 1u8 << COL_DESC;
+        assert!(
+            match_in_search_cols(&game, "吃豆人", desc, true, true),
+            "本地化开启时应能搜到中文名"
+        );
+        assert!(
+            !match_in_search_cols(&game, "吃豆人", desc, false, true),
+            "本地化关闭时表格显示的是英文，搜中文就该搜不到"
+        );
+    }
+
+    /// ROM 列搜的是**状态词**（表格上那是色块，没有文字）。
+    #[test]
+    fn the_rom_column_is_searched_by_its_state_word() {
+        let mut game = g();
+        let rom = 1u8 << COL_ROM;
+        assert!(match_in_search_cols(&game, "owned", rom, false, true));
+        game.available = 0;
+        assert!(
+            match_in_search_cols(&game, "missing", rom, false, true),
+            "available 不是 COMPLETE 就是缺失"
+        );
+        assert!(
+            match_in_search_cols(&game, "not verified", rom, false, false),
+            "没校验过要如实报『未校验』，不能报拥有"
+        );
+    }
+
+    /// 一列都不勾 = 什么都搜不到。这与"不筛选"是两件事。
+    #[test]
+    fn no_column_ticked_matches_nothing() {
+        assert!(!match_in_search_cols(&g(), "pacman", 0, false, true));
+    }
+
+    /// 通配符：空格→`*` 的 AND 语义在按列搜索下依然成立。
+    ///
+    /// `pac*man` 只在 name 列命中（描述里没有这个词），`198*0` 只在 year。
+    #[test]
+    fn wildcards_work_per_column() {
+        let game = g();
+        let name = 1u8 << COL_NAME;
+        let year = 1u8 << COL_YEAR;
+        assert!(match_in_search_cols(&game, "pac*man", name, false, true));
+        assert!(!match_in_search_cols(&game, "pac*man", year, false, true));
+        assert!(match_in_search_cols(&game, "198*", year, false, true));
     }
 }
