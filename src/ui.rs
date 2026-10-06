@@ -957,19 +957,23 @@ impl MameApp {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // ---- 左：高级搜索（按列筛选）----
-                let cols_on = self.search_cols.count_ones();
-                let adv_label = if cols_on as usize == COL_LAST {
-                    self.tr("Advanced search").to_string()
-                } else {
-                    format!(
-                        "{} ({}/{})",
-                        self.tr("Advanced search"),
-                        cols_on,
-                        COL_LAST
-                    )
-                };
+                //
+                // **按钮上不显示 `(3/7)` 这样的分数**（用户 2026-10-06 要求）。
+                // 分数要表达的是"当前搜哪几列"，而这件事按钮本身表达不了：
+                // 它长得和平常一模一样，用户读到的是"高级搜索 (3/7)"，第一反应
+                // 是"3/7 是什么意思"。要知道搜了几列，得先知道总列数——而总列数
+                // 会随用户自己拖动列的显示/隐藏而变，这个分数在不同机器上还不
+                // 一样（COL_LAST 是编译期常量，但 `col_visible` 是用户态的）。
+                //
+                // 分数真正有用的地方是弹窗里那一排勾选框，勾选状态一眼可见。
+                // 工具栏只保留"非全选就高亮"这一个信号：按钮被按下 = 搜索范围
+                // 被收窄过，全选时不高亮。
+                let cols_on = self.search_cols.count_ones() as usize;
                 if ui
-                    .add(egui::Button::new(adv_label).selected(cols_on as usize != COL_LAST))
+                    .add(
+                        egui::Button::new(self.tr("Advanced search"))
+                            .selected(cols_on != COL_LAST),
+                    )
                     .on_hover_text(self.tr("Choose which columns the search looks at"))
                     .clicked()
                 {
@@ -1943,6 +1947,50 @@ mod toolbar_icon_tests {
                 "assets 里没有 {name} —— 图标会在运行期静默不显示"
             );
         }
+    }
+
+    /// **高级搜索按钮上不许再拼`(x/y)` 分数**（用户 2026-10-06 要求）。
+    ///
+    /// 分数回答不了用户的问题：按钮长得和平常一模一样，读到"高级搜索
+    /// (3/7)"第一反应是"3/7 是什么意思"，而要知道分母是7 又得先知道游戏
+    /// 列表有几列 —— 那个数还会随用户自己拖列而变。同样的信息在弹窗里
+    /// 是一排勾选框，一眼可见，不需要在按钮上再压缩成一个分数。
+    ///
+    /// 这条钉住"标签就是纯文案"，并且提醒：**收窄状态改用按钮高亮表达**
+    /// （`selected(cols_on != COL_LAST)`），别又把分数加回来。
+    #[test]
+    fn the_advanced_search_button_carries_no_fraction() {
+        let src = include_str!("ui.rs");
+        let body = src
+            .split("fn draw_toolbar(")
+            .nth(1)
+            .expect("找不到 draw_toolbar");
+        // 只看工具栏函数本体
+        let body: String = {
+            let mut out = String::new();
+            for (i, line) in body.lines().enumerate() {
+                if i > 0 && line == "}" {
+                    break;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            out
+        };
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("{} ({}/{})") && !code.contains("({}/{})"),
+            "高级搜索按钮不许再拼分数：\n{code}"
+        );
+        // 但"非全选要高亮"这个信号必须还在 —— 那是分数唯一的替代品
+        assert!(
+            code.contains("selected(cols_on != COL_LAST)"),
+            "收窄状态改用按钮高亮表达，别把高亮一起删了：\n{code}"
+        );
     }
 
     /// 图标按钮的 enabled 状态**真的关掉了点击**，不只是少收一次点击。

@@ -143,105 +143,267 @@ fn crc_text(crc: u32) -> String {
     }
 }
 
-/// 各列的固定宽度 —— **全局栅格，所有段共用同一套列顺序**。
+/// 各列的宽度常量 —— 栅格是**全局的，所有段共用同一套列顺序**。
 ///
 /// `ui.horizontal` + 自然宽度会让每一列的起点随上一行的内容长度飘——
 /// 文件名有长有短，于是「未拥有」这个词有的在这行第 20 个字符，有的在第
-/// 12 个，整列读起来参差不齐。定宽是唯一能对齐的办法：名称列吃掉剩余
-/// 空间，其余列按最长内容取上界。
+/// 12 个，整列读起来参差不齐。定宽是唯一能对齐的办法。
 ///
-/// **关键：栅格必须是全局的，不能每段各算各的剩余宽度。**
-/// 曾经每段自己写`(avail - 各自用到的列宽之和)`：Rom 段后面挂 5 列
-/// （state/icon/crc/region/from，402px），CHD 段只挂 3 列（186px），
-/// 于是 CHD 段的名称列比Rom 段宽 216px，状态词的起点就**差了一整段距离**——
-/// 面板上表现为"Rom 段的拥有在x=470，CHD 段的拥有在 x=686"。
-/// 现在所有段都按 `GRID` 排，名称列统一吃 `avail - GRID`，
-/// 后面的列自然全部落在同一条竖线上。
+/// **关键：栅格必须是全局的，不能每段各算各的。**
+/// 曾经每段自己写 `(avail - 各自用到的列宽之和)`：Rom 段后面挂 5 列，
+/// CHD 段只挂 3 列，于是 CHD 段的名称列比 Rom 段宽 216px，状态词的起点
+/// **差了一整段距离**。现在所有段都按同一份 [`Grid`] 排。
 mod cols {
-    /// 状态列宽。**图标在状态词【后面】**（用户 2026-06 最后定）：状态词 +
-    /// 4px + 16px 图标。
+    /// **列与列之间的间隙 —— 全表只有这一个间隙值**（用户 2026-10-06 定）。
     ///
-    /// 60px 的来历：`未拥有` 三个汉字约 40px + 间隙 4 + 图标 16 = 60。
-    /// **正着放（图标在前）会超** —— 16 + 4 + 40 = 60刚好顶到列边，
-    /// 实测「未拥有」的字形比估算宽 2~3px，于是文字压到 crc 列上
-    /// （截图里`❌ 未拥有7f7393de)` 糊成一团）。所以顺序是「词 + 图标」。
-    pub const STATE: f32 = 60.0;
-    /// CRC 列：`crc(78c15fa2)` 是定宽的等宽字体串。
-    pub const CRC: f32 = 104.0;
-    /// 区域 + tag 列（`maincpu` / `igs023:sprcol`）。
-    pub const REGION: f32 = 132.0;
-
-    /// 名称列**定宽**（2026-06 改）。曾经它吃掉全部剩余空间，于是面板一
-    /// 拉宽，"拥有"就跟着往右跑，文件名与状态之间的空档越拉越大。
+    /// 之前每一列各有各的余量：名称列定宽 300px（而这一屏的文件名只有
+    /// 10 来个字符，于是名字后面空出 200 多px），状态列 60px（而「拥有 +
+    /// 图标」只占 44px，图标后面又空 16px）。于是同一条横线上出现了三种
+    /// 宽度完全不同的空档，读起来像三套排版。
     ///
-    /// 用户要求：「应该靠左固定值，在这么宽度的面板上能显示，拉宽的话右侧
-    /// 就空出来即可。」—— 定宽正是这个意思。
-    ///
-    /// 300px 的依据（真实 MAME 0.284 全量 listxml 实测）：
-    ///
-    /// |类别 | 最长 | 字符数 |
-    /// |---|---|---|
-    /// | rom 文件名 | `m2500p-vt09-epson,20091222ver05,...` | 81（极端个例）|
-    /// | 机种名（引用设备段） | `msx_slot_disk1_wd2793_n_2_drives` | 32 |
-    /// | 机种名 P99 | — | 17 |
-    /// | 机种名 P90 | — | 11 |
-    ///
-    /// 等宽字体 12px 约 7.2px/字符 → 300px 装得下约 **41 个字符**，覆盖
-    /// 绝大多数（P99 才 17）。超长的在列内换行，不会挤到状态列。
-    pub const NAME: f32 = 300.0;
+    /// 用户原话：「拥有状态隔文件名这么远……crc 和对勾 x 等间距这么远，
+    /// 这几个间距应该一样。」所以间隙从"每列各自剩下多少"改成"**一律
+    /// 12px**"：每列的宽度由它自己的内容决定，列与列之间只隔着这一个值。
+    pub const COL_GAP: f32 = 12.0;
 
     /// 状态图标边长（1.8.2 那套 `status_*.png` 是 16×16）。
     pub const ICON_W: f32 = 16.0;
     /// 图标与状态词之间的空隙（用户要的"1 个空格"）。
     ///
     /// 4px ≈ 一个空格符。**不占独立列**：图标和词在同一格里由
-    /// [`state_with_icon`] 一次画完，所以这个间隙不受 `allocate_exact_size`
+    /// [`state_with_icon`] 一次画完，所以这个间隙不受 `allocate_space`
     /// 在 `LeftToRight` 里按 `min_rect` 重算的影响（那个坑踩过一次：
     /// 列宽 22 被收成 16，间隙 0px，图标紧贴文字）。
     pub const ICON_GAP: f32 = 4.0;
 
-    /// 名称列右侧的内边距。
-    ///
-    /// 没有它，长文件名会紧贴"拥有"（截图里 `p060-ep1  拥有` 像一个词）。
-    /// 4px 足够看出是两列，又不浪费横向空间。
-    pub const NAME_PAD: f32 = 4.0;
-
     /// 段与段之间的空行高度（约一行文字）。
     pub const SECTION_GAP: f32 = 18.0;
 
-    /// **全部列的宽度之和**（名称列现在是定宽，所以整栅格是常数）。
-    ///
-    /// 面板窄于它时，名称列收缩到下限（见 [`name_width`]），其余列保持
-    /// 绝对位置 —— 宁可在名称列里折行，也不能让状态/crc 互相压。
-    pub const GRID: f32 = NAME + STATE + CRC + REGION;
+    // ---- 各列的上下限（宽度由内容决定，这里只管夹住）----
+    //
+    // 上限的作用是**兜住极端内容**，不是"标准宽度"：
+    // - 名称列上界 300px ≈ 41 个等宽字符。真实 MAME 0.284 里最长的 rom
+    //   文件名有 81 字符（`m2500p-vt09-epson,20091222ver05,...`），不设上界
+    //   的话一台机器就能把整张表推到面板外面去。
+    // - 状态列上界按最宽的状态词（`坏 dump` / `未 dump`，三个汉字 + 空格 +
+    //   四个西文字母）再加间隙和图标。
+    pub const NAME_MIN: f32 = 60.0;
+    pub const NAME_MAX: f32 = 300.0;
+    pub const STATE_MIN: f32 = 40.0;
+    pub const STATE_MAX: f32 = 96.0;
+    pub const CRC_MIN: f32 = 40.0;
+    pub const CRC_MAX: f32 = 104.0;
+    pub const REGION_MIN: f32 = 40.0;
+    pub const REGION_MAX: f32 = 160.0;
+}
 
-    /// 名称列实际宽度：定宽，但**不许超过面板**。
-    ///
-    /// 面板比 `GRID` 宽时右侧留空（用户要求）；比它窄时收缩到 60px 下限
-    /// —— 负宽度会把后面的列往回挤（错位）或不渲染，比窄更糟。
-    pub fn name_width(avail: f32) -> f32 {
-        NAME.min((avail - (GRID - NAME)).max(60.0))
+/// 一次量出来的整幅栅格：**列宽由这次要画的内容决定**，不随面板宽度变。
+///
+/// 2026-10-06 用户报的问题正是「宽度不是由内容决定的」：名称列被钉死在
+/// 300px，而一屏文件名只有 `242-p1.p1`（10 字符 ≈ 72px），于是名字到
+/// 「拥有」之间空出 228px；而状态列里「拥有 + ✓」只占 44px，图标到 `crc`
+/// 又空 16px。同一条横线上三种空档，宽的那几个把整张表撑散了。
+///
+/// 现在的规则：
+///
+/// - **列宽 = 这一列里最长内容的实测宽度**（用真实字体量，不是估算字符数），
+///   再夹在 `*_MIN` / `*_MAX` 之间；
+/// - **列与列之间一律 [`cols::COL_GAP`]**；
+/// - 面板比整表还窄时，只压缩**名称列**（下界 `NAME_MIN`），其余列保持
+///   绝对位置 —— 宁可在名称列里折行，也不能让状态/crc 互相压。
+///
+/// 关键点：**状态列的宽度只由"这一屏真正出现过的状态"决定**，不是五种
+/// 状态里最宽的那个。第一屏全是「拥有」时它是 `24 + 4 + 16 = 44px`；
+/// 若按「未拥有」算就会留出 52px 的空档 —— 那正是用户嫌"图标离 crc 太远"
+/// 的来源。
+#[derive(Clone, Copy, Debug)]
+struct Grid {
+    /// 名称列宽。
+    name: f32,
+    /// 状态列宽（状态词 + [`cols::ICON_GAP`] + 图标）。
+    state: f32,
+    /// CRC 列宽。
+    crc: f32,
+    /// 区域列宽（`region:tag`）。
+    region: f32,
+}
+
+/// 用真实字体量一段文字的**单行宽度**。
+///
+/// 必须走 `layout_job` + `append_to`，才能把 `.monospace()` 之类样式带上
+/// ——`RichText` 的字段全是私有的，`append_to` 是唯一带样式的公开入口。
+/// `max_width` 给 `f32::MAX` 表示"不许换行"，我们要的是这一行有多宽。
+fn text_w(ui: &egui::Ui, text: egui::RichText) -> f32 {
+    let style = ui.style().clone();
+    let mut job = egui::text::LayoutJob::default();
+    text.append_to(
+        &mut job,
+        &style,
+        egui::FontSelection::default(),
+        egui::Align::Min,
+    );
+    job.wrap.max_width = f32::MAX;
+    ui.fonts(|f| f.layout_job(job)).size().x
+}
+
+/// `RomRow` 的区域文本：`region` 或 `region:tag`。
+///
+/// [`measure_grid`] 与 [`rom_line`] 必须用**同一个**函数，否则量出来的
+/// 宽度和实际画出来的不一致（列宽按短的算、实际画长的，末尾会撞下一列）。
+fn region_text(r: &RomRow) -> String {
+    match (&r.region, &r.tag) {
+        (reg, Some(tag)) => format!("{reg}:{tag}"),
+        (reg, None) => reg.clone(),
     }
+}
+
+/// `RomState` 在"这一屏出现了哪些状态"表里的下标。
+fn state_index(s: RomState) -> usize {
+    match s {
+        RomState::Good => 0,
+        RomState::BadDump => 1,
+        RomState::Missing => 2,
+        RomState::NoDump => 3,
+        RomState::Unknown => 4,
+    }
+}
+
+/// 把 `s` 的宽度并进 `max`。
+fn note(max: &mut f32, ui: &egui::Ui, s: &str) {
+    *max = (*max).max(text_w(ui, egui::RichText::new(s).monospace()));
+}
+
+/// 把一个 [`RomRow`] 的三列宽度并进累加器。
+fn note_row(
+    name: &mut f32,
+    region: &mut f32,
+    crc: &mut f32,
+    seen: &mut [bool; 5],
+    ui: &egui::Ui,
+    r: &RomRow,
+) {
+    note(name, ui, &r.name);
+    note(region, ui, &region_text(r));
+    note(crc, ui, &crc_text(r.crc));
+    seen[state_index(r.state)] = true;
+}
+
+/// 把「量出来的原始宽度」换算成最终的 [`Grid`]。
+///
+/// **从 [`measure_grid`] 里拆出来是为了能测。** 原来这段逻辑埋在
+/// `measure_grid` 末尾，而那个函数要 `&MameApp`（测试里造不出来：它要
+/// 读配置、解MAME 路径）+ 要活的 `egui::Ui`（要字体度量）。于是"名称列
+/// 到底由内容决定还是被写死"这条最要紧的性质**没法测**——试着把
+/// `NAME_MAX` 抬到极大来模拟"回到写死 300px"，全套测试照样全绿。
+///
+/// 拆出来之后它是纯函数：`f32进、Grid 出`，上面那条变异能被抓住。
+///
+/// `name_w` / `crc_w` / `region_w` 是**实测**出来的最长内容宽，
+/// `word_w` 是这一屏出现过的最宽状态词。
+fn fit_grid(name_w: f32, word_w: f32, crc_w: f32, region_w: f32, avail: f32) -> Grid {
+    use cols::{CRC_MAX, CRC_MIN, NAME_MAX, NAME_MIN, REGION_MAX, REGION_MIN, STATE_MAX, STATE_MIN};
+
+    let state = (word_w + cols::ICON_GAP + cols::ICON_W).clamp(STATE_MIN, STATE_MAX);
+    let crc = crc_w.clamp(CRC_MIN, CRC_MAX);
+    let region = region_w.clamp(REGION_MIN, REGION_MAX);
+
+    // 名称列由**内容**决定（实测宽），再夹在上界内；面板装不下时只压它，
+    // 且不许压到 NAME_MIN 以下——负宽度会把后面的列往回挤（错位）。
+    let fixed = cols::COL_GAP * 3.0 + state + crc + region;
+    let name = name_w
+        .clamp(NAME_MIN, NAME_MAX)
+        .min((avail - fixed - cols::COL_GAP).max(NAME_MIN));
+
+    Grid {
+        name,
+        state,
+        crc,
+        region,
+    }
+}
+
+/// 量出这一屏的整幅栅格。
+///
+/// **必须在 `render` 里量一次**，然后传给每一行 —— 不是每行各量一次。
+/// 每行各量的话，"这一行最长的是谁"就变了，列起点会逐行飘（这正是
+/// [`tight_horizontal`] 注释里记的那个坑的同族）。
+fn measure_grid(ui: &egui::Ui, app: &MameApp, view: &RomInfoView, avail: f32) -> Grid {
+    let mut name = 0.0_f32;
+    let mut region = 0.0_f32;
+    let mut crc = 0.0_f32;
+    // 出现过哪些状态 —— 只为状态列量宽，见 `Grid` 的注释
+    let mut seen = [false; 5];
+
+    // 名称列量的是**所有段的第一列**，因为名称列是全局的一列：Rom 段的
+    // 文件名与引用设备段的机种名共用同一个栅格起点。
+    for r in &view.roms {
+        note_row(&mut name, &mut region, &mut crc, &mut seen, ui, r);
+    }
+    for d in &view.disks {
+        note(&mut name, ui, &d.file_name);
+        note(
+            &mut crc,
+            ui,
+            &format!("sha1({})", &d.sha1[..8.min(d.sha1.len())]),
+        );
+        seen[state_index(d.state)] = true;
+    }
+    for b in &view.bios {
+        note(&mut name, ui, &b.name);
+        seen[state_index(b.state)] = true;
+        for r in &b.roms {
+            note_row(&mut name, &mut region, &mut crc, &mut seen, ui, r);
+        }
+    }
+    for d in &view.devices {
+        note(&mut name, ui, &d.name);
+        seen[state_index(d.state)] = true;
+    }
+    for r in &view.device_roms {
+        note_row(&mut name, &mut region, &mut crc, &mut seen, ui, r);
+    }
+    for s in &view.samples {
+        note(&mut name, ui, &s.name);
+        seen[state_index(s.state)] = true;
+    }
+
+    // 状态词宽度：只算**这一屏真的出现过**的状态。
+    let mut word = 0.0_f32;
+    for (i, on) in seen.iter().enumerate() {
+        if *on {
+            let st = [
+                RomState::Good,
+                RomState::BadDump,
+                RomState::Missing,
+                RomState::NoDump,
+                RomState::Unknown,
+            ][i];
+            word = word.max(text_w(ui, egui::RichText::new(app.tr(state_word(st)))));
+        }
+    }
+
+    fit_grid(name, word, crc, region, avail)
 }
 
 /// 状态词 + 图标**画在同一格里**：词在左，图标在右，中间 4px。
 ///
-/// **顺序是「词 + 图标」，不能反过来**（2026-06 用户实测定的）：
-/// `STATE` 是 60px，而 `未拥有` 三个汉字实际约 42px + 4 + 16 = 62px。
-/// 图标放前面时 `16 + 4 + 42` 正好顶满列宽、文字溢出 2~3px 压到 crc 列上
-/// （截图里 `❌未拥有7f7393de)` 糊成一团）。放后面则文字起点恒定在列首，
-/// 溢出的是图标那一侧，而图标本来就是这一格里的最后一样东西。
+/// **顺序是「词 + 图标」**（2026-06 用户定的），而**格宽由参数 `w` 给定**
+/// （`Grid::state`），不再是写死的 60px。
 ///
-/// **整格死占 [`cols::STATE`]**，所以跨段的状态起点仍落在同一条竖线上 ——
-/// 这条比图标在前还是在后重要得多。
+/// 写死 60 的坏处2026-10-06 被用户指出：那一屏全是「拥有」（约 24px），
+/// 格宽 60 就在图标后面白留 20px，看起来就是"crc 离对勾那么远"。现在
+/// `measure_grid` 按**这一屏真实出现过的状态**量宽——全是「拥有」时格宽
+/// 恰好 `24 + 4 + 16`，图标贴格尾，格尾到 crc 只隔统一的 [`cols::COL_GAP`]。
 ///
-/// 图标 16px（[`cols::ICON_W`]）画在 `词宽 + 4` 处，不占独立列。
-/// 图标**不染色**（1.8.2 那套 png 自带颜色），但**未拥有用的是新画的
+/// **整格死占 `w`**，所以跨段的状态起点仍落在同一条竖线上——这条比图标在
+/// 前还是在后重要得多。
+///
+/// 图标 16px（[`cols::ICON_W`]）画在 `词宽 + 4` 处，不占独立列。/// 图标**不染色**（1.8.2 那套 png 自带颜色），但**未拥有用的是新画的
 /// `status_missing.png`（红底白叉）** —— 原来的 `status_cross` 是**蓝底**
 /// 白叉，深色主题下容易被读成灰色 = 「未审计」，而灰色是未审计的专属。
 ///
 /// 退路：纹理未解码时在图标位置画文字符号。
-fn state_with_icon(ui: &mut egui::Ui, text: impl AsRef<str>, state: RomState) {
+fn state_with_icon(ui: &mut egui::Ui, w: f32, text: impl AsRef<str>, state: RomState) {
     let color = state_color(state);
     let style = ui.style().clone();
     // 1) 先排状态词量出宽度 —— 图标要贴在词尾，必须先知道词多宽。
@@ -257,15 +419,15 @@ fn state_with_icon(ui: &mut egui::Ui, text: impl AsRef<str>, state: RomState) {
         );
     job.wrap.max_width = f32::MAX;
     let galley = ui.fonts(|f| f.layout_job(job));
-    let text_w = galley.size().x;
-    // 2) 整格死占 STATE（列宽刚性由外部栅格保证，见 cols::GRID）
-    let (_id, rect) = ui.allocate_space(egui::vec2(cols::STATE, 16.0));
+    let word_w = galley.size().x;
+    // 2) 整格死占 w（列宽刚性由外部栅格保证，见 [`Grid`]）
+    let (_id, rect) = ui.allocate_space(egui::vec2(w, cols::ICON_W));
     ui.painter()
         .galley(rect.min, galley, ui.visuals().text_color());
     // 3) 图标贴在词尾 + 4px
     let ctx = ui.ctx().clone();
     let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.min.x + text_w + cols::ICON_GAP, rect.min.y),
+        egui::pos2(rect.min.x + word_w + cols::ICON_GAP, rect.min.y),
         egui::vec2(cols::ICON_W, cols::ICON_W),
     );
     let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
@@ -338,12 +500,21 @@ fn cell(ui: &mut egui::Ui, w: f32, text: egui::RichText) {
 /// 画一个**空占位**，宽度给定的列，用来在"这一段没有这一列"时保持栅格。
 ///
 /// egui 的 `horizontal` 是按累加推进的：少画一列，后面的列就整体前移。
-/// 所以 CHD 段（没有 region / from 列）必须用这个补上，否则它的 crc 会落在
+/// 所以 CHD 段（没有 region 列）必须用这个补上，否则它的 crc 会落在
 /// 状态列的位置上，跨段就错位了。
 fn gap(ui: &mut egui::Ui, w: f32) {
     if w > 0.0 {
         ui.add_space(w);
     }
+}
+
+/// 列与列之间的那个**统一间隙**（[`cols::COL_GAP`]）。
+///
+/// 单独一个函数而不是到处写 `gap(ui, cols::COL_GAP)`：这个值是"全表看起来
+/// 像一套排版"的唯一保证，散着写早晚有一处漏掉或者写成别的数（用户
+/// 2026-10-06 报的就是同一条横线上三种空档）。凡是要往下一列走，先过它。
+fn col_gap(ui: &mut egui::Ui) {
+    gap(ui, cols::COL_GAP);
 }
 
 /// 行内的 `horizontal` 布局：**上下贴紧**。
@@ -352,17 +523,12 @@ fn gap(ui: &mut egui::Ui, w: f32) {
 /// 行高，40 个 rom 就是 40 × 多余的十几像素 —— 面板窄的时候，一屏能看的行数
 /// 被行距吃掉一半。这里把交叉轴对齐改成 `Min`，让行高由内容（16px 图标）
 /// 决定而不是由间距决定。
-fn tight_horizontal(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui, f32)) {
-    // **宽度在进布局之前就定下来**，这是全面板对齐的关键。
-    //
-    // 之前把 `cols::name_width(ui.available_width())` 写在行内。行内是个
-    // `LeftToRight` 的子 ui，它的 `cursor()` 带着**上一行遗留的 x 偏移**
-    // （实测 `cursor=163`，且逐行递增：子 ui 的 `min_rect` 被内容撑大后，
-    // 父 ui 的游标跟着右移）。于是名称列宽度一行比一行小/大，状态词
-    // 从第 1 行的 x 斜到第 8 行的 x+390——比不改之前更离谱。
-    //
-    // 行外量一次、每行传同一个值，各段的名称列宽度就与行序无关了。
-    let row_width = ui.available_width();
+///
+/// **注意这里不再传"行宽"给闭包**（2026-10-06 起）。以前每行要自己算
+/// `cols::name_width(avail)`，而行内是个 `LeftToRight` 子 ui，它的
+/// `cursor()` 带着**上一行遗留的 x 偏移**，量出来的可用宽度逐行变化，状态词
+/// 从第1 行斜到第 8 行。现在栅格在 `render` 里量一次就定型，逐行原样传。
+fn tight_horizontal(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     let layout = egui::Layout {
         main_dir: egui::Direction::LeftToRight,
         main_wrap: false,
@@ -375,49 +541,37 @@ fn tight_horizontal(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui, 
     // `ui.max_rect()`：后者是整个面板的矩形，行高就不再由内容决定，实测
     // 所有行塌成同一条横线。
     ui.scope_builder(egui::UiBuilder::new().layout(layout), |ui| {
-        // **横向间距也必须归零。** 栅格的每一步都已经算死了（名称列吃掉
-        // 剩余空间 + 固定列宽），再叠一层 `item_spacing.x`（默认 8px）就
-        //等于每行凭空多出 6 项 × 8px = 48px 的偏移。行布局把它算进子 ui 的
+        // **横向间距也必须归零。** 栅格的每一步都已经算死了（列宽 + 统一的
+        // [`cols::COL_GAP`]），再叠一层 `item_spacing.x`（默认 8px）就等于
+        // 每行凭空多出 6 项 × 8px = 48px 的偏移。行布局把它算进子 ui 的
         // `min_rect`，父 ui 游标跟着右移，于是状态词从第 1 行斜到第 9 行
         // （实测右移约 250px）——斜率恒定正是这个的特征。
         ui.spacing_mut().item_spacing.x = 0.0;
         // 竖向同理：紧凑是这里的目的，行高由 16px 图标决定。
         ui.spacing_mut().item_spacing.y = 0.0;
-        add_contents(ui, row_width);
+        add_contents(ui);
     });
 }
 
-/// Rom 段的一行：名称 / 状态 / 图标 / CRC / 区域(带 tag)。
+/// Rom 段的一行：名称 / 状态+图标 / CRC / 区域(带 tag)。
 ///
-/// **所有列定宽且左对齐**，理由见 [`cols`] 与 [`cell`]。
+/// **所有列宽由 [`Grid`] 定死且左对齐**，理由见 [`Grid`] 与 [`cell`]。
 ///
 /// **只有状态列上色**（用户要求）：名称 / CRC / 区域一律走默认前景色。
 /// 早先把整行都染成状态色，一屏几十行全是绿字，看着像报错；而且"缺一个
 /// 文件"和"这台机器有 40 个文件全是好的"用同一种满屏绿色表达，信息量是零。
 /// 状态词 + 图标已经足够定位，颜色只服务这两列。
-fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
-    tight_horizontal(ui, |ui, _row_width| {
-        // 名称：列宽减去 `NAME_PAD` —— 内边距放在**列宽里**而不是画在右侧，
-        // 这样"名称列起点"和"状态列起点"都不受影响，栅格照样严丝合缝。
-        cell(
-            ui,
-            (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
-            egui::RichText::new(&r.name).monospace(),
-        );
+fn rom_line(ui: &mut egui::Ui, app: &MameApp, g: &Grid, r: &RomRow) {
+    tight_horizontal(ui, |ui| {
+        cell(ui, g.name, egui::RichText::new(&r.name).monospace());
+        col_gap(ui);
         // 状态词 + 图标：同一格，图标紧跟词尾（用户 2026-06 要求）
-        state_with_icon(ui, app.tr(state_word(r.state)), r.state);
-        // CRC
-        cell(
-            ui,
-            cols::CRC,
-            egui::RichText::new(crc_text(r.crc)).monospace(),
-        );
+        state_with_icon(ui, g.state, app.tr(state_word(r.state)), r.state);
+        col_gap(ui);
+        cell(ui, g.crc, egui::RichText::new(crc_text(r.crc)).monospace());
+        col_gap(ui);
         // 区域 + tag（`igs023:sprcol`）
-        let region = match (&r.region, &r.tag) {
-            (reg, Some(tag)) => format!("{reg}:{tag}"),
-            (reg, None) => reg.clone(),
-        };
-        cell(ui, cols::REGION, egui::RichText::new(region).monospace());
+        cell(ui, g.region, egui::RichText::new(region_text(r)).monospace());
         // 原来这里还有一列 `from`，显示继承来源的 `(pgm)` / `(m4acechs)`。
         // **2026-06 按用户要求删除**："最后一列括号不需要显示"。
         //
@@ -439,7 +593,7 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
 /// （游戏名 + 描述 + 说明 + "全部齐全"）——面板挂在游戏列表旁边，选中哪台
 /// 一眼就看得见，重复一遍只是噪音；缺失与否在 Rom 段里每行都写着。
 ///
-/// **行与行之间一律不缩进。** 曾经这里每行都套一层 `ui.indent("rom_rows", …)`，而 `ui.indent` 是**按 id 存状态的**：同一个 id 在循环里反复调用，缩进会逐行累加（第二行起每行往右挪一点）。更糟的是缩进会吃掉 `available_width()`，于是 `cols::name_width()` 算出来的名称列宽度逐行变小、状态词起点逐行左移 —— 用户看到的"每到下一行就额外缩进、根本没对齐"就是这个。对齐由 `cols` 栅格保证，缩进只会碍事。
+/// **行与行之间一律不缩进。** 曾经这里每行都套一层 `ui.indent("rom_rows", …)`，而 `ui.indent` 是**按 id 存状态的**：同一个 id 在循环里反复调用，缩进会逐行累加（第二行起每行往右挪一点）。更糟的是缩进会吃掉 `available_width()`，于是列宽逐行变小、状态词起点逐行左移 —— 用户看到的"每到下一行就额外缩进、根本没对齐"就是这个。对齐由 [`Grid`] 栅格保证，缩进只会碍事。
 pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
     // **顶部不要那行"数据来源于校验缓存"。**
     // 旧版写的是"数据来源"这类元信息，用户不要：面板里每一行的状态词已经
@@ -450,48 +604,54 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         return;
     }
 
+    // **栅格在这里量一次**，然后逐行原样传下去。
+    //
+    // 必须在**行外**量：行内是个 `LeftToRight` 子 ui，它的 `cursor()` 带着
+    // 上一行遗留的 x 偏移，`available_width()` 逐行不同 → 列宽逐行变 →
+    // 状态词连成一条斜线（这个坑踩过，见 `tight_horizontal` 的注释）。
+    let g = measure_grid(ui, app, view, ui.available_width());
+
     // Rom 段
     if !view.roms.is_empty() {
         section(ui, app, "Rom:");
         for r in &view.roms {
-            rom_line(ui, app, r);
+            rom_line(ui, app, &g, r);
         }
     }
 
-    // CHD 段：文件名 / 状态 / sha1。它只画到 crc 列，**剩下两列必须补空占位**，
-    // 否则这段的状态词会比Rom 段靠右，整面板的"拥有"对不齐（历史 bug）。
+    // CHD 段：文件名 / 状态 / sha1。它只画到 crc 列，**剩下区域列必须补空
+    // 占位**，否则这段的状态词会比 Rom 段靠右，整面板的"拥有"对不齐。
     if !view.disks.is_empty() {
         ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Disks:");
         for d in &view.disks {
             let color = state_color(d.state);
-            tight_horizontal(ui, |ui, _row_width| {
-                cell(
-                    ui,
-                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
-                egui::RichText::new(&d.file_name).monospace(),
-                );
-                state_with_icon(ui, app.tr(state_word(d.state)), d.state);
+            tight_horizontal(ui, |ui| {
+                cell(ui, g.name, egui::RichText::new(&d.file_name).monospace());
+                col_gap(ui);
+                state_with_icon(ui, g.state, app.tr(state_word(d.state)), d.state);
+                col_gap(ui);
                 let short = if d.sha1.len() > 8 {
-                    d.sha1[..8].to_string()
+                    &d.sha1[..8]
                 } else {
-                    d.sha1.clone()
+                    &d.sha1[..]
                 };
                 cell(
                     ui,
-                    cols::CRC,
-                egui::RichText::new(format!("sha1({short})"))
-                            .monospace()
-                            .color(color),
+                    g.crc,
+                    egui::RichText::new(format!("sha1({short})"))
+                        .monospace()
+                        .color(color),
                 );
-                // 补齐栅格后两列
-                gap(ui, cols::REGION);
+                // 补齐栅格最后一列
+                col_gap(ui);
+                gap(ui, g.region);
             });
         }
     }
 
-    // Bios 段：集名 + 描述 + 状态，**下面列这一套实际的文件**。
-    // 文件用 `rom_line`（与 Rom 段同一套列宽），所以整段的图标/ crc 也对齐。
+    // Bios 段：集名 + 状态+图标 + 描述，**下面列这一套实际的文件**。
+    // 文件用 `rom_line`（同一份 `Grid`），所以整段的 crc/ 区域也对齐。
     // 集标题行也走栅格——用 `ui.label` 自然宽度的话，集名一长就把状态词
     // 推到右边，看起来又是错位的。
     if !view.bios.is_empty() {
@@ -499,55 +659,56 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         section(ui, app, "Bios:");
         for b in &view.bios {
             let color = state_color(b.state);
-            tight_horizontal(ui, |ui, _row_width| {
+            tight_horizontal(ui, |ui| {
                 cell(
                     ui,
-                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
+                    g.name,
                     egui::RichText::new(&b.name).monospace().strong().color(color),
                 );
+                col_gap(ui);
                 // 状态词 + 图标，与 Rom 段同一套
-                state_with_icon(ui, app.tr(state_word(b.state)), b.state);
-                // 描述占 crc + region 两列的宽度（描述比 crc 长得多）。
+                state_with_icon(ui, g.state, app.tr(state_word(b.state)), b.state);
+                col_gap(ui);
+                // 描述占 crc + 间隙 + region 的总宽（描述比 crc 长得多）。
                 // 同样**不加 `.small()`** —— 字号跟其他列一致，靠灰色弱化。
                 cell(
                     ui,
-                    cols::CRC + cols::REGION,
+                    g.crc + cols::COL_GAP + g.region,
                     egui::RichText::new(&b.description)
                         .monospace()
                         .color(ui_weak_color()),
                 );
             });
             for r in &b.roms {
-                rom_line(ui, app, r);
+                rom_line(ui, app, &g, r);
             }
         }
     }
 
-    // 引用设备段：先列设备机种 + 状态 + 图标，再缩进列它们的 rom 文件。
+    // 引用设备段：先列设备机种 + 状态 + 图标，再列它们的 rom 文件。
     // rom 文件走 `rom_line`，所以设备的文件明细与 Rom 段列宽完全一致。
     if !view.devices.is_empty() || !view.device_roms.is_empty() {
         ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Referenced devices:");
         for d in &view.devices {
-            tight_horizontal(ui, |ui, _row_width| {
+            tight_horizontal(ui, |ui| {
                 // 第一列：设备机种名（`m68000` / `igs036` / `z80`）。
-                cell(
-                    ui,
-                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
-                    egui::RichText::new(&d.name).monospace(),
-                );
+                cell(ui, g.name, egui::RichText::new(&d.name).monospace());
+                col_gap(ui);
                 // 第二列：状态词 + 图标（与其他段同一套），不画描述/tag ——
                 // tag（`:maincpu`）是内部引用名，描述在这台机器的语境下是废话。
-                state_with_icon(ui, app.tr(state_word(d.state)), d.state);
-                // 后面这些列一律留空，但**必须用 gap 占住**——少一列，
+                state_with_icon(ui, g.state, app.tr(state_word(d.state)), d.state);
+                // 后面这些列一律留空，但**必须 gap 占住**——少一列，
                 // 下一行的设备 rom 就会整体前移（见 `gap` 的注释）。
-                gap(ui, cols::CRC);
-                gap(ui, cols::REGION);
+                col_gap(ui);
+                gap(ui, g.crc);
+                col_gap(ui);
+                gap(ui, g.region);
             });
             // 设备自己的 rom：按设备机种名匹配回去（`device_roms` 的
             // `from` 就是设备机种名）
             for r in view.device_roms.iter().filter(|r| r.from.as_deref() == Some(d.name.as_str())) {
-                rom_line(ui, app, r);
+                rom_line(ui, app, &g, r);
             }
         }
         // 有 rom 但设备机种不在库里（裁剪过的 dat）——仍要把文件列出来
@@ -556,7 +717,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
             .iter()
             .filter(|r| !view.devices.iter().any(|d| Some(d.name.as_str()) == r.from.as_deref()))
         {
-            rom_line(ui, app, r);
+            rom_line(ui, app, &g, r);
         }
     }
 
@@ -583,21 +744,20 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         section(ui, app, "Samples:");
         for s in &view.samples {
             let color = state_color(s.state);
-            tight_horizontal(ui, |ui, _row_width| {
+            tight_horizontal(ui, |ui| {
+                cell(ui, g.name, egui::RichText::new(&s.name).monospace());
+                col_gap(ui);
                 cell(
                     ui,
-                    (cols::name_width(_row_width) - cols::NAME_PAD).max(40.0),
-                    egui::RichText::new(&s.name).monospace(),
-                );
-                cell(
-                    ui,
-                    cols::STATE,
+                    g.state,
                     egui::RichText::new(app.tr(state_word(s.state))).color(color),
                 );
                 // 后面的列一律留空，但**必须 gap 占住**——少一列，这一段
-                // 的名称列宽度就与 Rom 段不一致（见 `cols::GRID`）。
-                gap(ui, cols::CRC);
-                gap(ui, cols::REGION);
+                // 的列起点就与 Rom 段不一致（见 [`Grid`]）。
+                col_gap(ui);
+                gap(ui, g.crc);
+                col_gap(ui);
+                gap(ui, g.region);
             });
         }
     }
@@ -701,92 +861,282 @@ mod tests {
         );
     }
 
-    /// **所有段的状态列必须落在同一条竖线上。**
+    /// **列间距全表只有一个值，且不随面板宽度变化。**
     ///
-    /// 这条钉的是一个已经真刀真枪发生过的错位：Rom 段后面挂 5 列、CHD 段只
-    /// 挂 3 列，两段各自用 `(avail - 自己用到的列宽之和)` 当名称列宽度，
-    /// 于是 CHD 段的状态词比 Rom 段右移了 216px —— 面板上两段"拥有"上下
-    /// 错开，肉眼一看就是"没对齐"。
+    /// 用户 2026-10-06 原话：「为什么拥有状态隔文件名这么远，这个间距应该
+    /// 是固定的，不随窗口扩大而扩大，crc 和对勾 x 等间距这么远，这几个间距
+    /// 应该一样。」
     ///
-    /// 现在名称列统一吃 `avail - GRID`，缺的列用 `gap()` 补占位，所以
-    /// 任何一段的状态列起点都等于 `name_width`（行不再缩进，见`render` 的注释）。
-    /// 名称列**定宽**，面板拉宽时右侧留空。
+    /// 这条钉住两件事：
     ///
-    /// 用户 2026-06 原话：「为什么拥有状态和左边文件间距会随着面板拉宽而
-    /// 间隔变大，应该是靠左固定值，在这么宽度的面板上能显示，拉宽的话右侧
-    /// 就空出来即可。」
-    ///
-    /// 原先 `name_width = avail - GRID`，名称列吃掉全部剩余空间 —— 面板
-    /// 一拉宽，"拥有"就跟着往右跑，文件名与状态之间的空档越拉越大。
-    ///
-    /// 这条钉住的是**定宽**：宽度给到额定值以上时，名称列不许再变。
+    /// 1. **间隙是常量**（[`cols::COL_GAP`]），不是"每列各自剩下多少"。
+    ///    之前名称列钉死 300px（而这一屏文件名只有 `242-p1.p1`，10 字符
+    ///    ≈ 72px → 空 228px），状态列钉死 60px（而「拥有 + ✓」只占 44px
+    ///    → 图标后面空 16px）。同一条横线上三种空档。
+    /// 2. **面板变宽时列宽不许变**：名称列不再吃剩余空间，所以右侧留白。
+    ///    这条是2026-06 就定过的（"拉宽的话右侧就空出来即可"），当时用
+    ///    定值实现，现在用"按内容定量+ 上限"实现，行为一致。
     #[test]
-    fn the_name_column_is_fixed_and_the_right_side_stays_empty() {
-        // 宽面板：名称列恒为 NAME，剩余空间全部留白
-        for avail in [900.0_f32, 1400.0, 3000.0] {
-            assert_eq!(
-                cols::name_width(avail),
-                cols::NAME,
-                "面板 {avail} 宽时名称列必须仍是定值 {}，右侧留空",
-                cols::NAME
+    fn the_column_gap_is_one_constant_and_does_not_track_the_panel_width() {
+        assert_eq!(
+            cols::COL_GAP, 12.0,
+            "间隙是全表唯一的间距来源，改它等于改整张表的排版"
+        );
+        // 一个够宽的面板 + 一堆短名字：栅格总宽必须远小于面板（右侧留白），
+        // 也就是"名字到拥有"的距离由名字本身决定，不由面板决定。
+        let g = Grid {
+            // `242-p1.p1` 十个等宽字符
+            name: 72.0,
+            // 「拥有」+ 4 + 16
+            state: 44.0,
+            // `crc(8893df89)` 十三个等宽字符
+            crc: 94.0,
+            // `cslot1:audiocpu` 十五个等宽字符
+            region: 108.0,
+        };
+        let total = g.name + g.state + g.crc + g.region + cols::COL_GAP * 3.0;
+        for panel in [400.0_f32, 900.0, 1400.0, 3000.0] {
+            assert!(
+                total < panel,
+                "面板 {panel} 宽时表只占 {total}，剩下必须留白而不是把列撑开"
             );
         }
-        // 定宽的直接推论：宽面板下总占用不随面板变宽而变
-        assert!(
-            cols::name_width(3000.0) + cols::STATE + cols::CRC + cols::REGION
-                < 3000.0,
-            "3000px 宽的面板上只用不到一半，剩下全空"
-        );
-        // 窄面板：收缩到下限，但**不许为负**（负宽度会把后面的列往回挤）
-        assert!(cols::name_width(10.0) >= 60.0, "窄面板下要有下限");
-        assert!(
-            cols::name_width(400.0) < cols::NAME,
-            "400px 面板装不下 300 + 60 + 104 + 132，名称列要收缩"
-        );
-        // 单调性：越宽的名称列不会越窄
-        let narrow = cols::name_width(500.0);
-        let wide = cols::name_width(1400.0);
-        assert!(
-            wide >= narrow,
-            "面板变宽时名称列不许变窄：{narrow} -> {wide}"
-        );
     }
 
-    /// GRID 是**四列之和**（名称列已定宽，所以整栅格是常数）。
+    /// **名称列的宽度由内容决定 —— 这条是纯逻辑，所以能测。**
+    ///
+    /// 用户 2026-10-06 报的整件事就是这条被破坏了：名称列被钉死 300px，
+    /// 而那一屏的文件名是 `242-p1.p1`（10 字符 ≈ 72px），于是名字到
+    /// 「拥有」之间空出 228px。
+    ///
+    /// 这条测试的来历值得记下来：先前只测了 `COL_GAP` 常量，把
+    /// `clamp(NAME_MIN, NAME_MAX)` 改成 `clamp(NAME_MIN, 100000.0)`
+    /// （语义上就是"退回写死 300px"）**全套测试照样全绿**。原因是这段
+    /// 逻辑埋在 `measure_grid` 里，而那个函数要 `&MameApp`（测试里造不
+    /// 出来）+ 活的 `Ui`（要字体度量），于是最要紧的性质没法测。拆出
+    /// [`fit_grid`] 之后它成了纯函数，这条才立得住。
     #[test]
-    fn the_grid_is_the_sum_of_all_four_columns() {
-        assert_eq!(
-            cols::GRID,
-            cols::NAME + cols::STATE + cols::CRC + cols::REGION,
-            "GRID 必须算上名称列 —— 它现在是定宽的一列，不是剩余空间"
+    fn the_name_column_follows_the_content_not_a_fixed_value() {
+        // 一屏短名字（实测约 72px）
+        let short = fit_grid(72.0, 24.0, 94.0, 108.0, 1400.0);
+        // 一屏长名字（实测约 290px）
+        let long = fit_grid(290.0, 24.0, 94.0, 108.0, 1400.0);
+
+        assert!(
+            short.name < 120.0,
+            "短文件名的一屏里名称列只有 72px，却占了 {} —— 又变回写死了",
+            short.name
         );
+        assert!(
+            long.name > short.name + 150.0,
+            "名字变长时名称列必须跟着变宽：{} -> {}",
+            short.name,
+            long.name
+        );
+        // 其余三列与名称列无关：名字长短不影响状态/crc/区域
+        assert_eq!(short.state, long.state);
+        assert_eq!(short.crc, long.crc);
+        assert_eq!(short.region, long.region);
     }
 
-    /// 状态列装得下「状态词 + 间隙 + 图标」，**顺序是词在前、图标在后**。
+    /// **面板变宽，列宽不许变**（右侧留白）。
     ///
-    /// 用户 2026-06 实测踩过：图标放前面时`16 + 4 + 未拥有` 正好顶满
-    /// `STATE` 的 60，文字溢出 2~3px 压到 crc 列上（截图里
-    /// `❌未拥有7f7393de)` 糊成一团）。改回词在前之后，溢出的是图标那一
-    /// 侧—— 而图标本来就是这一格里的最后一样东西。
-    ///
-    /// 「未拥有」三字的 36px 是**实测值**（默认 UI 字体 12px，约 12px/汉字），
-    /// 不是估的：三字 + 间隙 4 + 图标 16 = 56 < 60，留 4px 余量。
+    /// 用户 2026-06 原话：「拉宽的话右侧就空出来即可。」当时用"定值"
+    /// 实现，现在用"按内容定量"，行为必须一样——名字短的一屏，面板从
+    /// 1400 拉到 3000，表不许被撑开。
     #[test]
-    fn the_state_column_fits_word_then_icon() {
-        const THREE_CJK_WORDS: f32 = 36.0; // 「未拥有」，实测
+    fn widening_the_panel_does_not_stretch_the_columns() {
+        let narrow = fit_grid(72.0, 24.0, 94.0, 108.0, 1400.0);
+        for panel in [2000.0_f32, 3000.0, 5000.0] {
+            let wide = fit_grid(72.0, 24.0, 94.0, 108.0, panel);
+            assert_eq!(
+                wide.name, narrow.name,
+                "面板拉到 {panel}，名称列不许从 {} 变成 {}",
+                narrow.name, wide.name
+            );
+            assert_eq!(wide.state, narrow.state);
+            assert_eq!(wide.crc, narrow.crc);
+            assert_eq!(wide.region, narrow.region);
+        }
+    }
+
+    /// **面板装不下时，只压名称列，且压不穿下限。**
+    ///
+    /// 宁可在名称列里折行，也不能让状态/crc 互相压。负宽度会把后面的列
+    /// 往回挤（错位）或者根本不渲染，比窄更糟。
+    #[test]
+    fn a_narrow_panel_squeezes_only_the_name_column_and_never_below_the_floor() {
+        let roomy = fit_grid(72.0, 36.0, 94.0, 108.0, 1400.0);
+        // 面板只剩 260px：名称列必须缩，且不低于 NAME_MIN
+        let tight = fit_grid(72.0, 36.0, 94.0, 108.0, 260.0);
         assert!(
-            cols::STATE >= THREE_CJK_WORDS + cols::ICON_GAP + cols::ICON_W,
-            "STATE({}) 装不下 「未拥有」三字(实测 {}) + 间隙({}) + 图标({})",
-            cols::STATE,
-            THREE_CJK_WORDS,
-            cols::ICON_GAP,
-            cols::ICON_W
+            tight.name < roomy.name,
+            "面板变窄时名称列必须让位：{} -> {}",
+            roomy.name,
+            tight.name
         );
+        // 荒谬地窄：仍然不许为负 / 不许小于下限
+        for panel in [0.0_f32, 10.0, 100.0] {
+            let g = fit_grid(72.0, 36.0, 94.0, 108.0, panel);
+            assert!(
+                g.name >= cols::NAME_MIN,
+                "面板只有 {panel} 宽，名称列却只有 {} —— 负宽度会把后面的列往回挤",
+                g.name
+            );
+            // 其余三列一个都不许动
+            assert_eq!(g.state, roomy.state);
+            assert_eq!(g.crc, roomy.crc);
+            assert_eq!(g.region, roomy.region);
+        }
+    }
+
+    /// **状态列的宽度只由"这一屏出现过的状态"决定。**
+    ///
+    /// 这是 2026-10-06 那个"crc 离对勾太远"的直接修法：写死 60px 时，
+    /// 一屏全是「拥有」（24px）就在图标后面白留 20px。现在按真实出现的
+    /// 状态量宽，所以**图标永远贴着格尾**，格尾到 crc 只隔 COL_GAP。
+    ///
+    /// 关键在"这一屏出现过"，不是"所有状态里最宽的"—— 后者会让全是
+    /// 「拥有」的机种也按「未拥有」留出 52px 空档。
+    #[test]
+    fn the_state_column_width_follows_the_states_actually_present() {
+        // 「拥有」两字 + 间隙 + 图标：格子刚好装下，不留白
+        let only_good = 24.0 + cols::ICON_GAP + cols::ICON_W;
+        // 「未拥有」三字：更宽
+        let with_missing = 36.0 + cols::ICON_GAP + cols::ICON_W;
+        assert!(
+            with_missing - only_good >= 12.0,
+            "「未拥有」必须比「拥有」宽一整个汉字的量"
+        );
+        // 两者都在合法区间内
+        for w in [only_good, with_missing] {
+            assert!(
+                (cols::STATE_MIN..=cols::STATE_MAX).contains(&w),
+                "状态列宽 {w} 超出[{}, {}]",
+                cols::STATE_MIN,
+                cols::STATE_MAX
+            );
+        }
+    }
+
+    /// 状态图标与状态词之间留 1 个空格，且图标边长是 16（1.8.2 那套 png）。
+    #[test]
+    fn the_icon_sits_one_space_after_the_state_word() {
+        assert_eq!(cols::ICON_W, 16.0, "1.8.2 的 status_*.png 是 16×16");
         assert!(
             (3.0..=12.0).contains(&cols::ICON_GAP),
             "图标与状态词之间留 1 个空格（约 4px），不能是 0 也不能太大：{}",
             cols::ICON_GAP
         );
+    }
+
+    /// **每一列的宽度都不许超过自己的上限。**
+    ///
+    /// 真实 MAME 0.284 里最长的 rom 文件名有 81 字符
+    /// （`m2500p-vt09-epson,20091222ver05,...`），不夹上限的话一台机器
+    /// 就能把整张表顶出面板。超长的在列内换行（见 [`cell`]）。
+    #[test]
+    fn every_column_is_clamped_to_its_upper_bound() {
+        // name 列最坏情况：把测量结果换成天文数字也不许超过 NAME_MAX
+        assert_eq!(
+            100_000.0_f32.clamp(cols::NAME_MIN, cols::NAME_MAX),
+            cols::NAME_MAX
+        );
+        assert!(
+            cols::NAME_MAX < 400.0,
+            "名称列上界要能装下绝大多数文件名，又不许把表撑散"
+        );
+        // 下限必须为正：0 或负宽度会让后面的列往回挤（错位）或根本不渲染
+        for (name, min) in [
+            ("name", cols::NAME_MIN),
+            ("state", cols::STATE_MIN),
+            ("crc", cols::CRC_MIN),
+            ("region", cols::REGION_MIN),
+        ] {
+            assert!(min > 0.0, "{name} 列下限必须是正数：{min}");
+        }
+    }
+
+    /// **同一段内，每两列之间都必须隔一个 `col_gap`。**
+    ///
+    /// 用户 2026-10-06 报的现象是"几个间距不一样"：名字到拥有是一段，
+    /// 对勾到 crc 是另一段。根因是每一列各自留自己的余量，而不是留同一个
+    /// [`cols::COL_GAP`]。
+    ///
+    /// 这条用源码钉住：`rom_line` 里四列后面必须都跟着 `col_gap(ui)`。
+    /// 写成别的间隙值（或者干脆不写）都会让同一条横线参差不齐。
+    #[test]
+    fn every_column_is_followed_by_the_one_shared_gap() {
+        let body = fn_body("fn rom_line(");
+        // **三道**，不是四道：名称 / 状态 / crc 后面各一道，区域是最后一列、
+        // 后面没有东西了，补一道纯粹浪费横向空间。
+        assert_eq!(
+            body.matches("col_gap(ui);").count(),
+            3,
+            "名称/状态/crc 三列后面各要一个 col_gap(ui)，现在不是 3 个：\n{body}"
+        );
+        // 不许绕过 col_gap 直接写死别的间隙
+        assert!(
+            !body.contains("add_space("),
+            "列间距只能走 col_gap()，不许直接 add_space：\n{body}"
+        );
+    }
+
+    /// **栅格必须在 `render` 里量一次**，逐行原样传下去。
+    ///
+    /// 每行各量一次就完了：行内是个 `LeftToRight` 子 ui，它的 `cursor()`
+    /// 带着上一行遗留的 x 偏移，`available_width()` 逐行不同 → 列宽逐行变
+    /// → 状态词连成一条斜线（实测右移约 250px）。
+    #[test]
+    fn the_grid_is_measured_once_outside_the_row_loops() {
+        let body = fn_body("pub fn render(");
+        assert_eq!(
+            body.matches("measure_grid(").count(),
+            1,
+            "measure_grid 只能在 render 里调一次：\n{body}"
+        );
+        // `available_width()` **只允许出现在 measure_grid 那一次调用里**——
+        // 它必须被量在所有行循环之外（行内子ui 的 cursor 带上一行的偏移）。
+        // 只数**代码行**：注释里提到这个词是常事，计进去就永远不等于 1。
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            code.matches("available_width()").count(),
+            1,
+            "available_width() 只许在量栅格时出现一次，行循环里再量就是那个斜线 bug：\n{body}"
+        );
+        // 而且那一次必须与 measure_grid 同行（不是散落在别处）
+        assert!(
+            code.lines().any(|l| l.contains("measure_grid(") && l.contains("available_width()")),
+            "量栅格的那一行必须同时取 available_width：\n{body}"
+        );
+    }
+
+    /// 取出从 `marker` 起、到**第一个顶格 `}`** 为止的函数体。
+    ///
+    /// 不能用 `split("\n}\n")`：源码在 Windows 上是 CRLF，那个分隔符
+    /// 永远匹配不上，`nth(1)` 之后拿到的就是"从该函数到文件末尾"——
+    /// 测试照样跑，只是范围大到把 `render` 也吃进去，断言跟着失真
+    /// （这个坑踩过一次：两条grep 测试同时失败， looked 像逻辑错，
+    /// 其实是切分没生效）。
+    fn fn_body(marker: &str) -> String {
+        let src = include_str!("rompanel.rs");
+        let after = src
+            .split(marker)
+            .nth(1)
+            .unwrap_or_else(|| panic!("源码里找不到 {marker}"));
+        let mut out = String::new();
+        for (i, line) in after.lines().enumerate() {
+            if i > 0 && line == "}" {
+                break;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
     }
 
     /// **行与行之间不允许有缩进调用。**
@@ -810,17 +1160,12 @@ mod tests {
     /// `min_rect`，`allocate_new_ui` 再用它推进父 ui 的游标，于是
     /// **每行都比上一行右移一整个行的间距**。
     ///
-    /// 栅格已经把每一步都算死了（`cols::GRID`），再叠一层 spacing 就是
-    /// 双重计费。竖向同理，`item_spacing.y` 归零才能让行高由 16px 图标决定
-    /// 而不是由间距决定（用户要"每行间距紧凑一些"）。
+    /// 栅格已经把每一步都算死了（[`Grid`] 的列宽 + [`cols::COL_GAP`]），再
+    /// 叠一层 spacing 就是双重计费。竖向同理，`item_spacing.y` 归零才能让行高
+    /// 由 16px 图标决定而不是由间距决定（用户要"每行间距紧凑一些"）。
     #[test]
     fn rows_have_no_item_spacing_at_all() {
-        let src = include_str!("rompanel.rs");
-        let body = src
-            .split("fn tight_horizontal(")
-            .nth(1)
-            .expect("找不到 tight_horizontal");
-        let body = body.split("\n}\n").next().unwrap_or(body);
+        let body = fn_body("fn tight_horizontal(");
         assert!(
             body.contains("item_spacing.x = 0.0"),
             "行布局必须把 item_spacing.x 归零，否则每行递增右移"
@@ -832,18 +1177,9 @@ mod tests {
     }
 
     /// `render` 的函数体里出现缩进调用就失败。
-    ///
-    /// （下面这条测试自己也在 `render` 之后，所以它**不能**在注释里写出那个
-    /// 函数的完整名字 —— 会被自己 grep 到。）
     #[test]
     fn rows_are_never_indented() {
-        let src = include_str!("rompanel.rs");
-        let body = src
-            .split("pub fn render(")
-            .nth(1)
-            .expect("找不到 render");
-        // 只看 render 到下一个顶层项为止的部分
-        let body = body.split("\n}\n").next().unwrap_or(body);
+        let body = fn_body("pub fn render(");
         assert!(
             !body.contains("ui.indent("),
             "行循环里不许用 ui.indent（缩进按 id 累加，会逐行右移）：\n{}",
