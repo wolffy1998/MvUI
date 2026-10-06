@@ -35,7 +35,14 @@ pub const MAGIC: &[u8; 9] = b"MVUICACHE";
 /// bump —— 判别式从"猜 `kind == instance`"换成读标记位，而旧缓存里这个位
 /// 全是false，于是**所有** `<device>` 都会被当成引用设备（正好把上一版刚
 /// 修对的东西又弄坏），比留空更难查。
-pub const FORMAT_VERSION: u16 = 4;
+///
+/// 4 → 5：**`GameMeta::bios_sets` 现在真的有内容了**（2026-10-06）。
+/// `listxml.rs` 里 `<biosset>` 的解析门控 `is_mess || is_bios` 去掉了——
+/// 实测它只放行了全库 3655 个带 biosset 的机种中的 42 个。而 Rom 段是按
+/// `r.bios.is_empty()` 排除 BIOS 条目的，所以旧缓存里"BIOS 文件既不在 Rom
+/// 段、又没有Bios 段可渲染" —— **全库 64576 个 BIOS rom 凭空消失**，
+/// 零报错。**不 bump 这个号，热启动会永远读那份残缺缓存**，且没有任何提示。
+pub const FORMAT_VERSION: u16 = 5;
 
 /// [`save_library`] 的写缓冲大小。
 ///

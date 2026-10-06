@@ -223,14 +223,17 @@ pub struct SlotRow {
     pub options: String,
 }
 
-/// 一段样本音频（`sampleof` 指向的那个机种）。
+/// 一段样本音频（`sampleof` 指向的那个样本集包）。
+///
+/// **只判"包在不在"**（2026-10-06 用户要求），所以没有 `have` / `total`
+/// ——原先这两个字段是"包里逐个比对文件"算出来的，而面板已经不显示它们了
+/// （`18/18` 的分子是整包文件数、分母是本机需求数，两个口径并排没意义）。
+/// 留着它们只会让调用方以为还能用。
 #[derive(Debug, Clone)]
 pub struct SampleRow {
-    /// 样本机种名。
+    /// 样本集包名（`sampleof` 的值，如 `genpin`）。
     pub name: String,
-    /// 缺失的样本文件数 / 总数。
-    pub have: usize,
-    pub total: usize,
+    /// 包在 = `Good`，不在 = `Missing`，没审计 = `Unknown`。
     pub state: RomState,
 }
 
@@ -345,34 +348,44 @@ fn parent_chain<'a>(lib: &'a GameLibrary, game: &'a GameMeta) -> Vec<&'a GameMet
     out
 }
 
-/// 该机种默认使用的 BIOS 集的名字。
+/// 该机种声明的 **全部** BIOS 集的名字，**按 `default` 优先、再按声明顺序**。
 ///
-/// **BIOS 集不是独立的 machine。** 查真实的 `-listxml` 输出（`mame pgm
-/// -listxml`）：BIOS 集是同一个 `<machine name="pgm" isbios="yes">` 上的
-/// `<biosset name="v2" description="PGM BIOS V2"/>` 标签，而它的 rom **混在
-/// 同一个 `<rom>` 列表里**，用 `bios="v2"` 属性区分：
+/// **BIOS 集不是独立的 machine。** 查真实的 `-listxml` 输出（`mame kovplus
+/// -listxml`）：BIOS 集是同一个 `<machine name="kovplus">` 上的
+/// `<biosset name="v2" .../>` 标签，而它的 rom **混在同一个 `<rom>` 列表里**，
+/// 用 `bios="v2"` 属性区分：
 ///
 /// ```xml
 /// <biosset name="v2" description="PGM BIOS V2"/>
+/// <biosset name="v1" description="PGM BIOS V1"/>
 /// <rom name="pgm_p02s.u20" bios="v2" crc="78c15fa2" region="maincpu"/>
+/// <rom name="pgm_p01s.u20" bios="v1" crc="e42b166e" region="maincpu"/>
 /// ```
 ///
-/// 所以"BIOS 段"的行是从**本机种的 roms 里按 `bios` 属性筛出来的**，不是
-/// 去库里查另一条 machine 记录（`lib.get_idx("v2")` 永远是 `None`）。这个
-/// 假设错起来很安静：段位是空的，但不报错。
-fn default_bios_names(game: &GameMeta) -> Vec<String> {
+/// 所以"Bios 段"的行是从**本机种的 roms 里按 `bios` 属性筛出来的**，不是
+/// 去库里查另一条 machine 记录（`lib.get_idx("v2")` 永远是 `None`）。
+///
+/// **返回全部套，不只 `default` 那套**（2026-06 用户要求：以 `kovplus` 为例，
+/// 它就该显示 PGM BIOS V1 和 V2 两套）。原先这里在找不到 `default="yes"`
+/// 时`unwrap_or_default()` 兜底取 `first()` —— 而实测**大量biosset 根本
+/// 没写 `default` 属性**（kovplus 两套都没有），于是 V1 那套的文件
+/// （`pgm_p01s.u20`）被 Rom 段的 `bios.is_empty()` 排除、又没有任何段落
+/// 渲染它，**凭空消失**。实测全库 3655 个机种带 biosset、40435 条声明。
+///
+/// `default="yes"` 的排最前面（那是最可能在用的），其余保持 XML 里的声明
+/// 顺序——用户看到的顺序要跟 MAME 文档一致。
+fn all_bios_names(game: &GameMeta) -> Vec<String> {
     if game.bios_sets.is_empty() {
         return Vec::new();
     }
-    let def = game.bios_sets.iter().find(|b| b.is_default);
-    match def {
-        Some(b) => vec![b.name.clone()],
-        None => game
-            .bios_sets
-            .first()
-            .map(|b| vec![b.name.clone()])
-            .unwrap_or_default(),
+    let mut out: Vec<String> = Vec::new();
+    for b in game.bios_sets.iter().filter(|b| b.is_default) {
+        out.push(b.name.clone());
     }
+    for b in game.bios_sets.iter().filter(|b| !b.is_default) {
+        out.push(b.name.clone());
+    }
+    out
 }
 
 /// 把 `game.devices` 拆成"引用设备"与"可挂载槽位"两摊。
@@ -527,6 +540,27 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
     //    `own_crcs` 从**本体 rom**（`bios` 为空）起算：带 `bios=` 的条目归
     //    BIOS 段，拿它们当"已拥有"会让父集里同名的 BIOS 条目被当成继承项，
     //    在 Rom 段里冒出一行重复的 BIOS 文件。
+    //
+    //    **光靠 crc 不够，还要按name 排除**（实测 5 个机种会漏：
+    //    `a5200a` / `maclc580` / `mz80k` / `sorcererd` / `vz200`）。原因是这
+    //    些克隆机把 BIOS 条目标成 `bios="4port"` 之类，而**父集里同名的
+    //    那一条没有 `bios` 属性**——同一个文件在两处的属性不一样：
+    //
+    //    ```xml
+    //    <!-- a5200（父集） -->  <rom name="co19156.u8" crc="4248d3e3" …/>
+    //    <!-- a5200a（本机） --> <rom name="co19156.u8" bios="4port" crc="4248d3e3" …/>
+    //    ```
+    //
+    //    本体那条被 `bios.is_empty()` 排除在 `own_crcs` 之外 → 父集同名那条
+    //    的 crc 没被占用 → 当成"继承项"进了 Rom 段，用户看到同一个 BIOS
+    //    文件既在 Rom 段又在 Bios 段（实测 `vz200` 会重复两次 `vtechv20.u10`，
+    //    因为 enhanced/basic20 两套用同一个文件）。
+    let bios_names: std::collections::HashSet<&str> = g
+        .roms
+        .iter()
+        .filter(|r| !r.bios.is_empty())
+        .map(|r| r.name.as_str())
+        .collect();
     let mut own_crcs: std::collections::HashSet<u32> = g
         .roms
         .iter()
@@ -542,6 +576,11 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
             if !r.bios.is_empty() {
                 continue;
             }
+            // 本机已把它当 BIOS 渲染了（哪怕父集这条没写 `bios=`）——同一个
+            // 文件显示两遍没有意义，Bios 段里那一份才带"属于哪一套"的信息。
+            if bios_names.contains(r.name.as_str()) {
+                continue;
+            }
             if !own_crcs.insert(r.crc) {
                 continue;
             }
@@ -553,10 +592,11 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
         }
     }
 
-    // 4) BIOS。BIOS 集不是独立 machine（见 `default_bios_names` 的注释），
+    // 4) BIOS。BIOS 集不是独立 machine（见 `all_bios_names` 的注释），
     //    它的 rom 就躺在这台机种自己的 `roms` 里、用 `bios="v2"` 标着。
-    //    `bios_sets` 只提供"哪一套是默认 + 它的描述"。
-    let bios_names = default_bios_names(g);
+    //    `bios_sets` 只提供"有哪几套 + 各自的描述"。
+    //    **列全部套**，不只 default 那套（见 `all_bios_names` 的注释）。
+    let bios_names = all_bios_names(g);
     for bname in &bios_names {
         let Some(desc) = g.bios_sets.iter().find(|b| &b.name == bname) else {
             continue;
@@ -578,7 +618,10 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
         view.bios.push(BiosRow {
             name: bname.clone(),
             description: desc.description.clone(),
-            is_default: true,
+            // 取真实的 `default="yes"`，别硬编码 true —— 现在列的是**全部**
+            // 套，其中绝大多数没有 default 属性（实测 kovplus 两套都没有）。
+            // 硬编码 true 会让"这是默认套"这个信息对每一套都成立，等于没有。
+            is_default: desc.is_default,
             state,
             // 这一套实际要的文件。列出来是为了"BIOS 段和 CHD / Samples /
             // 设备一个待遇"——用户能在同一个版式里看到每一段的明细，
@@ -962,9 +1005,15 @@ mod tests {
         assert!(v.slot_decls[1].options.is_empty());
     }
 
-    /// 默认 BIOS 从 `bios_sets[].is_default` 取，缺标记时退回第一套。
+    /// BIOS 段**列全部套**，`default="yes"` 的排最前（2026-06 用户要求：
+    /// 以 kovplus 为例就该显示 PGM BIOS V1 和 V2 两套）。
+    ///
+    /// 原先只在找不到 `default` 时兜底取 `first()`，于是 kovplus 那种
+    /// **两套都没写 `default` 属性**的机种只显示 v2，v1 那套的文件
+    /// （`pgm_p01s.u20`）既不在 Rom 段（被 `bios.is_empty()` 排除）又没有
+    /// 段落渲染 —— **凭空消失**。
     #[test]
-    fn default_bios_comes_from_the_flag_else_the_first() {
+    fn every_declared_bios_set_gets_its_own_row() {
         let mut g = meta("pgm");
         g.bios_sets = vec![
             BiosSet {
@@ -980,17 +1029,39 @@ mod tests {
         ];
         let lib = lib_with(vec![g]);
         let v = view_of(&lib, "pgm", true);
-        assert_eq!(v.bios.len(), 1);
-        assert_eq!(v.bios[0].name, "v2", "认 is_default，不认列表顺序");
+        assert_eq!(v.bios.len(), 2, "两套都要列，不只default 那套");
+        assert_eq!(
+            v.bios.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["v2", "v1"],
+            "default的排前面，其余保持声明顺序"
+        );
+        assert!(v.bios[0].is_default, "v2 才是 default");
+        assert!(
+            !v.bios[1].is_default,
+            "别把 is_default 硬编码 true —— 那会让每套都自称默认"
+        );
 
-        let mut g2 = meta("pgm2");
-        g2.bios_sets = vec![BiosSet {
-            name: "only".into(),
-            description: "Only".into(),
-            is_default: false,
-        }];
+        // **没有 default 属性时也要全套列出**（kovplus 的真实形态）
+        let mut g2 = meta("kovplus");
+        g2.bios_sets = vec![
+            BiosSet {
+                name: "v2".into(),
+                description: "PGM BIOS V2".into(),
+                is_default: false,
+            },
+            BiosSet {
+                name: "v1".into(),
+                description: "PGM BIOS V1".into(),
+                is_default: false,
+            },
+        ];
         let lib2 = lib_with(vec![g2]);
-        assert_eq!(view_of(&lib2, "pgm2", true).bios[0].name, "only");
+        let v2 = view_of(&lib2, "kovplus", true);
+        assert_eq!(
+            v2.bios.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            vec!["v2", "v1"],
+            "没写 default 就按声明顺序全列，不能只留第一套"
+        );
     }
 
     /// BIOS 集**不是独立 machine**：它的 rom 就在本机种的 `roms` 里、用
@@ -1041,17 +1112,18 @@ mod tests {
         assert_eq!(v.disks[0].state, RomState::Missing);
     }
 
-    /// 样本行的 `拥有/总数` 来自「本机`<sample>` 名」vs「样本集包内条目名」。
+    /// 样本段现在**只判"包在不在"**（2026-10-06 用户要求）。
     ///
-    /// 这个测试原来假设"样本集是另一台机种，它的 `roms` 就是采样文件"——
-    /// **那个假设是错的**（MAME 从不把样本集输出成 `<machine>`，`genpin` 在
-    /// 全量 listxml 里出现 0 次）。真实数据源是 `GameMeta::samples`（本机
-    /// 要的 `<sample>` 名）比对 `{sampleof}.zip` 的包内条目，所以测试改成
-    /// 真造一个 zip 出来。`have` 的算法细节在 `core::samples` 里有更细的
-    /// 测试（含缺文件、全齐、散目录三种）。
+    /// 原先这里逐个比对包内文件算`have/total`并在面板上显示 `2/3`，现已
+    /// 删掉：样本集是共享包（`genpin` 被 1438 台游戏引用），那个分子是整包
+    /// 的文件数、分母是这台机器需要的数量，两个口径并排显示说明不了任何事。
+    ///
+    /// 判据也随之变简单：`samplepath` 下有 `{sampleof}.zip` → 拥有，没有 →
+    /// **未拥有**（红色，用户明确要求的口径，不再是灰色"未知"）。
     #[test]
-    fn sample_rows_report_have_over_total() {
-        // 真造一个样本集包：本机要 a / b / zz，包里只有 a / b
+    fn a_sample_row_reports_whether_the_archive_is_there() {
+        // 真造一个样本集包：包里只有 a / b，本机还要 zz —— 但**不重要**了，
+        // 判据只看 zip 在不在。
         let dir = std::env::temp_dir().join("mvui_rominfo_samples");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
@@ -1076,10 +1148,17 @@ mod tests {
         let v = view_of(&lib, "game", true);
         assert_eq!(v.samples.len(), 1, "有 sampleof 与 samples 才出行");
         assert_eq!(v.samples[0].name, "ssample", "显示的是样本集名，不是本机名");
-        assert_eq!(v.samples[0].have, 2, "a / b 在包里，zz 不在");
-        assert_eq!(v.samples[0].total, 3);
-        assert_eq!(v.samples[0].state, RomState::Missing);
+        assert_eq!(
+            v.samples[0].state,
+            RomState::Good,
+            "zip 在就该报拥有——不因为里面少了 zz 就报缺失"
+        );
+
+        // 包不在了 → 未拥有（红），不是灰色"未知"
         let _ = std::fs::remove_dir_all(&dir);
+        let v2 = view_of(&lib, "game", true);
+        assert_eq!(v2.samples[0].state, RomState::Missing);
+        crate::core::samples::set_sample_dirs(Vec::new());
     }
 
     /// 本地化描述优先。

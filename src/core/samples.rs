@@ -123,19 +123,19 @@ pub fn list_have(archive_or_dir: &Path) -> SampleSet {
 
 /// 审计一台机种的样本集，产出面板要显示的那一行。
 ///
-/// `total` 取**本机自己的 `<sample>` 条数**（`g.samples`），不是包内文件数——
-/// 用户关心的是"这台游戏要的齐了没有"，而 `genpin` 那个包里的文件远多于
-/// 单台游戏需要的（共享包）。实测 `rctycn` 要 18 个，`genpin.zip` 正好18个。
+/// **只判"包在不在"**（2026-10-06 用户要求）：`{samplepath}/{sampleof}.zip`
+/// 有 → `拥有`，没有 → `未拥有`。**不显示图标、不显示 `9/9` 数量。**
 ///
-/// `state` 的含义与其他段一致：
-/// - `Unknown` —— 没审计，或样本集包**根本没找到**（用户压根没下采样包）
-/// - `Good` —— 本机需要的文件全在包里
-/// - `Missing` —— 缺了至少一个
-pub fn audit_game_sample(
-    g: &GameMeta,
-    dirs: &[PathBuf],
-    audited: bool,
-) -> Option<SampleRow> {
+/// 之前这里逐个比对包内文件算出 `have/total`，面板显示 `18/18`。用户说那
+/// 些数字"没意义"——样本集是**共享包**（`genpin` 被 1438 台 pinball 游戏
+/// 引用），每台只要其中几个文件，`18/18` 那个分母是这台机器的、分子是整包的，
+/// 混在一起并不说明任何事。用户真正要回答的是"这个游戏要的采样包我下了没"。
+///
+/// **`Unknown` 只在没审计时出现**（`audited=false`）。包找不到现在报
+/// `Missing`（红）而不是 `Unknown`（灰）——用户明确说"红色，缺失"。
+/// 之前的理由是"用户可能压根没下采样包，报缺失会误导"，但既然显示的是
+/// "这个包在不在"，那不在就是不在，红色是准确的。
+pub fn audit_game_sample(g: &GameMeta, dirs: &[PathBuf], audited: bool) -> Option<SampleRow> {
     if g.sampleof.is_empty() || g.samples.is_empty() {
         return None;
     }
@@ -144,36 +144,16 @@ pub fn audit_game_sample(
     if g.sampleof.eq_ignore_ascii_case(&g.name) {
         return None;
     }
-    let total = g.samples.len();
-    let Some(pack) = find_sample_archive(dirs, &g.sampleof) else {
-        // 包都没找到：状态未知（不是"缺 18 个"——用户可能压根没下采样包，
-        // 报"缺失"会误导他去逐个文件找）。**未审计也是同一个 Unknown**，
-        // 所以这里不再按 `audited` 分支（原先两个分支写同一个值，是死代码）。
-        return Some(SampleRow {
-            name: g.sampleof.clone(),
-            have: 0,
-            total,
-            state: RomState::Unknown,
-        });
-    };
-    let have_set = list_have(&pack);
-    // **两边都必须是基名**：`list_have` 存的是 `file_stem()`（`a.wav` → `a`），
-    // 而 `g.samples` 里也是基名（`<sample name="bumper"/>` 没有扩展名）。
-    // 曾经在这里给样本名拼 `.wav` 去查Set，于是永远查不到 —— `have` 恒0，
-    // 整个 Samples 段全变"缺失"。**扩展名在 `list_have` 里已经被去掉了，
-    // 这一侧不要再拼。**
-    let have = g.samples.iter().filter(|s| have_set.contains(*s)).count();
+    let present = find_sample_archive(dirs, &g.sampleof).is_some();
     let state = if !audited {
         RomState::Unknown
-    } else if have == total {
+    } else if present {
         RomState::Good
     } else {
         RomState::Missing
     };
     Some(SampleRow {
         name: g.sampleof.clone(),
-        have,
-        total,
         state,
     })
 }
@@ -256,16 +236,18 @@ mod tests {
         );
     }
 
-    /// 样本集包找不到时状态是 Unknown 而不是 Missing ——
-    /// 用户压根没下采样包，报"缺失"会误导他去逐个文件找。
+    /// 样本集包找不到 → **未拥有（红）**，不是灰色"未知"。
+    ///
+    /// 2026-06 用户定的口径：既然这一行显示的是"这个包在不在"，那不在就是
+    /// 不在，红是准确的。此前报Unknown 的理由是"用户可能压根没下采样包，
+    /// 报缺失会误导"—— 但判据已经简化成"包在不在"，那个理由不成立了。
     #[test]
-    fn a_missing_archive_is_unknown_not_missing() {
+    fn a_missing_archive_is_reported_as_not_owned() {
         let g = meta_with("rctycn", "genpin", &["bumper", "chime1"]);
-        let row = audit_game_sample(&g, &[PathBuf::from(r"Z:\definitely\not\here")], true)
-            .expect("仍要出行，只是状态未知");
+        let row = audit_game_sample(&g, &[PathBuf::from(r"Z://definitely//not//here")], true)
+            .expect("仍要出行，只是状态是未拥有");
         assert_eq!(row.name, "genpin");
-        assert_eq!(row.total, 2);
-        assert_eq!(row.state, RomState::Unknown, "没下包 ≠ 缺文件");
+        assert_eq!(row.state, RomState::Missing, "包不在 = 未拥有");
     }
 
     /// 没审计时一律 Unknown，不能报"拥有"——那是骗人。
@@ -276,16 +258,16 @@ mod tests {
         assert_eq!(row.state, RomState::Unknown);
     }
 
-    /// 核心路径：真的在磁盘上放一个 zip，验证 18 个文件全被认出来。
-    /// 这是唯一能证明"比对逻辑真的работает"的测试 —— 纯 mock 只能证明
-    /// 代码按自己写的跑。
+    /// 核心路径：磁盘上真的有 `{sampleof}.zip` → 报拥有。
+    ///
+    /// **不再逐个比对包内文件**（2026-06 用户要求）。原先这里断言
+    /// `have=2, total=3, state=Missing`（包里缺 zz），现在包里有什么完全
+    /// 不影响结论 —— 只要 zip 在就是"拥有"。
     #[test]
-    fn a_real_zip_is_matched_against_the_games_sample_list() {
+    fn an_existing_archive_reads_as_owned() {
         let dir = std::env::temp_dir().join("mvui_samples_test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("建临时目录");
-
-        // 写一个含 3 个 wav 的 zip：a / b / c
         {
             use std::io::Write;
             let f = std::fs::File::create(dir.join("genpin.zip")).expect("建 zip");
@@ -299,18 +281,12 @@ mod tests {
             zw.finish().expect("收尾");
         }
 
-        // 本机要 a / b / c 三个 → 全齐
-        let g = meta_with("rctycn", "genpin", &["a", "b", "c"]);
+        // 本机要 a / b / zz 三个 —— zz 不在包里，但**照样报拥有**：
+        // 样本集是共享包，逐个比对算出来的分母没有意义。
+        let g = meta_with("rctycn", "genpin", &["a", "b", "zz"]);
         let row = audit_game_sample(&g, &[dir.clone()], true).expect("出行");
-        assert_eq!(row.have, 3, "三个 wav 都该被认出来");
-        assert_eq!(row.total, 3);
-        assert_eq!(row.state, RomState::Good);
-
-        // 本机要 a / b / zz 三个 → 缺 zz
-        let g2 = meta_with("rctycn", "genpin", &["a", "b", "zz"]);
-        let row2 = audit_game_sample(&g2, &[dir.clone()], true).expect("出行");
-        assert_eq!(row2.have, 2, "包里有 a / b，没有 zz");
-        assert_eq!(row2.state, RomState::Missing);
+        assert_eq!(row.name, "genpin");
+        assert_eq!(row.state, RomState::Good, "zip 在就是拥有");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -327,8 +303,8 @@ mod tests {
         }
         let g = meta_with("rctycn", "genpin", &["a", "b"]);
         let row = audit_game_sample(&g, &[base.clone()], true).expect("出行");
-        assert_eq!(row.have, 2, "散目录形态要能认出来");
-        assert_eq!(row.state, RomState::Good);
+        // 散目录形态也认（0.289 那套是纯散装，`samples/{name}/`）
+        assert_eq!(row.state, RomState::Good, "散目录形态要能认出来");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -380,16 +356,19 @@ mod tests {
 
         let g = meta_with("rctycn", "genpin", &["a", "b"]);
         set_sample_dirs(vec![dir.clone()]);
-        // 找到一个占位 zip：至少证明"目录被用上了"（坏 zip → 空 Set → Missing）
         let row = audit_game_sample(&g, &sample_dirs(), true).expect("出行");
         assert_eq!(row.name, "genpin");
-        assert_eq!(row.total, 2);
-        assert_ne!(row.state, RomState::Unknown, "包在磁盘上，不该是 Unknown");
+        assert_eq!(
+            row.state,
+            RomState::Good,
+            "包在磁盘上就该报拥有（内容不合法也不影响 —— 只判存在）"
+        );
 
-        // 把表清空 → 立刻退回 Unknown（这正是热启动漏设目录时的表现）
+        // 把表清空 → 立刻变成未拥有（这正是 2026-10-06 修的那个热启动 BUG
+        // 的表现：`finish_boot_cached` 漏设目录 → Samples 段全灰）
         set_sample_dirs(Vec::new());
         let row2 = audit_game_sample(&g, &sample_dirs(), true).expect("出行");
-        assert_eq!(row2.state, RomState::Unknown, "空表 = 找不到包 = Unknown");
+        assert_eq!(row2.state, RomState::Missing, "空表 = 找不到包 = 未拥有");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

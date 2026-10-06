@@ -17,24 +17,27 @@ use crate::icons;
 
 /// 一行里的状态配色。
 ///
-/// 用户指定的四态配色：
+/// 用户指定的四态配色（2026-10-06 修订）：
 ///
 /// | 状态 | 颜色 | 为什么 |
 /// |---|---|---|
 /// | 拥有 | 绿 | 校验通过 |
 /// | 坏 dump | 黄 | 文件在但是坏的——比"好"差，比"没有"好 |
-/// | 未拥有 | 红 | 确认缺失 |
-/// | 无 dump | 灰 | MAME 说这个文件永远不会有，等于**不用管** |
+/// | 未 dump | **黄** | MAME 说这个文件本来就不会存在，**不是缺失** |
+/// | 未拥有 | **红** | 确认缺失。**只有这一种是红色** |
 ///
-/// `nodump` 用灰而不是黄/红：它压根不是坏消息，"没找到"才是。用户看到一屏
-/// 红色会以为自己的盘有问题，而 nodump 是 dat 自己声明的例外。
-/// 未审计也用灰——同样不是缺失，是**还没查**，两者靠文字区分而不是靠颜色。
+/// **只有"未拥有"用红色。** 之前 `nodump` 走灰色，理由是"它不是坏消息"；
+/// 但灰色和"未审计"撞在一起，用户看到灰就以为是没查。改黄之后语义分开了：
+/// 黄 = 有问题但不是缺文件（坏 dump / 无 dump），红 = 确实缺，灰 = 还没查。
+///
+/// `nodump` 用黄而不是红：它是 dat 自己声明的"此文件不存在"，报红会让用户
+/// 以为自己的盘有缺口，白花时间去补一个永远不会有的文件。
 fn state_color(state: RomState) -> egui::Color32 {
     match state {
         RomState::Good => icons::GREEN,
-        RomState::BadDump => icons::YELLOW,
+        RomState::BadDump | RomState::NoDump => icons::YELLOW,
         RomState::Missing => icons::RED,
-        RomState::NoDump | RomState::Unknown => ui_weak_color(),
+        RomState::Unknown => ui_weak_color(),
     }
 }
 
@@ -49,14 +52,18 @@ fn state_color(state: RomState) -> egui::Color32 {
 /// 完全不同——一个是"文件在但是坏的，用户该去重下"，另一个是"还没查"——
 /// 共用一个图标会让用户以为 baddump 是个可以忽略的提示。
 ///
+/// **`nodump` 复用 `status_baddump.png`（黄叹号）** —— 与它同色同义：
+/// 都是"有问题、但不是缺文件"（用户要的就是这个：黄色 + 感叹号）。
+/// 原来给它 `status_preliminary`（蓝问号），可那一格的颜色是**画在图标里**
+/// 的，跟黄字并排会显得是两件事。
+///
 /// **图标不做染色**：它们已经是彩色的（绿勾 / 黄叹 / 蓝叉 / 橙叹），再乘一层
 /// 状态色会把语义搅糊。名字找不到时返回 `None`，调用方退回文字符号。
 fn state_icon(state: RomState) -> Option<&'static str> {
     Some(match state {
         RomState::Good => "16x16/status_good.png",
-        RomState::BadDump => "16x16/status_baddump.png",
+        RomState::BadDump | RomState::NoDump => "16x16/status_baddump.png",
         RomState::Missing => "16x16/status_cross.png",
-        RomState::NoDump => "16x16/status_preliminary.png",
         RomState::Unknown => "16x16/status_imperfect.png",
     })
 }
@@ -94,16 +101,18 @@ fn section(ui: &mut egui::Ui, app: &MameApp, label: &str) {
 ///
 /// 返回 key 而不是文案：文案要走 `app.tr` 现查，语言切换后立刻跟着变。
 ///
-/// 四个词与用户指定的四态一一对应：`拥有` / `坏 dump` / `未拥有` / `无 dump`
-/// （外加未审计时的 `未审计`）。旧版的"很好 / 缺失"是从 MAME 的 audit 报告
-/// 里抄的词，但用户明确要求用"拥有 / 坏 dump / 未拥有"这套——前者描述校验
-/// 结果，后者描述**用户手上有没有**，后者才是用户真正关心的问题。
+/// 四个词与用户指定的四态一一对应：`拥有` / `坏 dump` / `未拥有` /
+/// `未 dump`（外加未审计时的 `未审计`）。旧版的"很好 / 缺失"是从 MAME 的
+/// audit 报告里抄的词，但用户明确要求用"拥有 / 坏 dump / 未拥有"这套——
+/// 前者描述校验结果，后者描述**用户手上有没有**，后者才是用户真正关心的
+/// 问题。`nodump` 的词也从"无 dump"改成"**未 dump**"（与"未拥有"对齐，
+/// 都是"用户手上没有"的意思）。
 fn state_word(state: RomState) -> &'static str {
     match state {
         RomState::Good => "owned",
         RomState::BadDump => "bad dump",
         RomState::Missing => "not owned",
-        RomState::NoDump => "no dump",
+        RomState::NoDump => "not dumped",
         RomState::Unknown => "not audited",
     }
 }
@@ -116,9 +125,9 @@ fn state_word(state: RomState) -> &'static str {
 fn mark_of(state: RomState) -> &'static str {
     match state {
         RomState::Good => "\u{2713}",
-        RomState::BadDump => "!",
+        RomState::BadDump | RomState::NoDump => "!",
         RomState::Missing => "\u{2717}",
-        RomState::NoDump | RomState::Unknown => "?",
+        RomState::Unknown => "?",
     }
 }
 
@@ -158,11 +167,20 @@ mod cols {
     pub const REGION: f32 = 132.0;
     /// 继承来源标记 `(pgm)` 的宽度上限。
     pub const FROM: f32 = 84.0;
-    /// 状态图标列：16×16 的图 + 一点余量。
+    /// 状态图标列：16×16 的图 + 与后一列的小间距。
     ///
-    /// 22 = 16（图）+ 6（小间距）。**那 6px 是用户明确要的**："图标和后面的
-    /// crc 要有个小空格"——16px 图标紧贴 `crc(d42e505d)` 会让两列看成一团。
-    pub const ICON: f32 = 22.0;
+    /// **曾经写成 22 = 16(图) + 6(间距)，但那 6px 从来没出现过。**
+    /// 原因：`allocate_exact_size(vec2(22, 16))` 在 `LeftToRight` 布局里
+    /// **宽度会被重算**——它按子 ui 的 `min_rect` 走，而 16px 的图标 min_rect
+    /// 就是 16，于是分配到的 22px 被收成 16px，图标紧贴 `crc(...)`
+    /// （用户截图里就是 `✅crc(c055b993)` 粘成一团）。
+    ///
+    /// **正确做法：把间隙画成独立的 `add_space`。** `add_space` 内部就是
+    /// `advance_cursor`，它的宽度**不回看之后画了什么**，所以 6px 一定在。
+    /// 图标本身用 `allocate_space(16)` 单独占 16px。
+    pub const ICON: f32 = 16.0;
+    /// 图标与后一列之间的小空隙（用户明确要的"图标和 crc 要有个小空格"）。
+    pub const ICON_GAP: f32 = 8.0;
 
     /// 名称列右侧的内边距。
     ///
@@ -176,22 +194,12 @@ mod cols {
     /// 段与段之间的空行高度（约一行文字）。
     pub const SECTION_GAP: f32 = 18.0;
 
-    /// 合并后的设备段第 1 列：设备类型 / 槽名。
-    ///
-    /// `floppydisk`（9 字符）是这一列最长的常见值，留够 13 个字符的量。
-    pub const DEVICE_TYPE: f32 = 104.0;
-    /// 设备段第 2 列：安装路径。
-    ///
-    /// `upd765:0:525hd`（15 字符）实测是最长的一类；`centronics:printer:printer`
-    /// 更长，但那种行第二列是空的，宽度不够也不会挤到第三列（超宽会换行）。
-    pub const DEVICE_TAG: f32 = 190.0;
-
     /// 名称列之外**全部固定列的宽度之和**。
     ///
     /// 任何一段只要画到状态 / 图标，就必须用这个值来定位名称列宽度，
     /// 否则那段的状态词就会飘。少用的列留空（画个空白占位），不要缩减它——
     /// 缩减等于承认"这段例外"，而例外就是错位的来源。
-    pub const GRID: f32 = STATE + ICON + CRC + REGION + FROM;
+    pub const GRID: f32 = STATE + ICON + ICON_GAP + CRC + REGION + FROM;
 
     /// 名称列宽度：吃掉所有剩余空间，并保证不小于一个可读的下限。
     ///
@@ -203,25 +211,26 @@ mod cols {
     }
 }
 
-/// 画第三列的 16×16 状态图标，返回这次分配占的 `Response`。
+/// 画第三列的 16×16 状态图标。
 ///
-/// 抽出来是因为 Rom / CHD / 引用设备 / Samples 四段都要画，而**必须走同一套
+/// 抽出来是因为 Rom / CHD / 引用设备 / BIOS 四段都要画，而**必须走同一套
 /// 逻辑**：取不到纹理时的退路（文字符号）也要一致，否则两段在同一个面板里
 /// 会一个显示图标、一个显示方框。
 ///
-/// 列宽 `cols::ICON` 里含 6px 余量，图标本身 16px。这里**不用 `add_sized`**
-/// （它会居中，见 [`cell`]），而是先吃掉列宽的空白、再按 16px 左对齐放置，
-/// 这样图标列的起点与其他列的起点严格对齐。
+/// **间隙是独立的 `add_space`，不是"列宽减去图标宽"** —— 后者在
+/// `LeftToRight` 里会被 `min_rect` 收回去（见 [`cols::ICON`] 的注释）。
+/// `add_space` 只推进游标，8px 一定在。
 ///
-/// 返回 `Response` 是调用方忽略结果但签名需要，不是别的原因。
-fn icon_cell(ui: &mut egui::Ui, state: RomState) -> egui::Response {
+/// 顺序：**先推 8px 间隙，再在间隙之后画图标**。于是图标离前面的状态列
+/// 8px，离后面的 crc 列也是 8px（下一列的起点由栅格定）。
+fn icon_cell(ui: &mut egui::Ui, state: RomState) {
     let ctx = ui.ctx().clone();
     let font = egui::FontId::proportional(12.0);
     let color = state_color(state);
-    // 先占满整列宽，再用它自己的 layout 把 16px 图标放到列首。
-    // `ICON` 是 22 而图标是 16，所以图标**靠左**、右侧天然空 6px ——
-    // 这就是"图标与后面的 crc 之间的小空格"，不需要额外画。
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(cols::ICON, 16.0), egui::Sense::hover());
+    // 先吃掉图标与前一列之间的间隙（`add_space` 的宽度是刚性的）。
+    ui.add_space(cols::ICON_GAP);
+    // 图标本体：死占 16×16。`allocate_space` 保证后面的列从 rect.right() 起算。
+    let (_id, rect) = ui.allocate_space(egui::vec2(cols::ICON, 16.0));
     let icon_rect = egui::Rect::from_min_size(rect.min, egui::vec2(16.0, 16.0));
     let drawn = state_icon(state).is_some_and(|n| icons::put(ui, &ctx, n, icon_rect));
     if !drawn {
@@ -235,7 +244,6 @@ fn icon_cell(ui: &mut egui::Ui, state: RomState) -> egui::Response {
             color,
         );
     }
-    resp
 }
 
 /// 画一个**左对齐的定宽单元格**。
@@ -369,7 +377,7 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
             egui::RichText::new(app.tr(state_word(r.state))).color(color),
         );
         // 16×16 状态图标
-        let _ = icon_cell(ui, r.state);
+        icon_cell(ui, r.state);
         // CRC
         cell(
             ui,
@@ -383,11 +391,16 @@ fn rom_line(ui: &mut egui::Ui, app: &MameApp, r: &RomRow) {
         };
         cell(ui, cols::REGION, egui::RichText::new(region).monospace());
         // 继承来的条目标一下来源，否则用户会以为这是本机种自己的文件
+        //
+        // **不要 `.small()`** —— 用户要"面板里字体大小一样、字体一样"。
+        // 最后一列之前是 `.small().color(weak)`，于是`(pgz)` 这几个字
+        // 明显比别的列小一号，一眼就看出它不是同一套排版。弱化靠**颜色**
+        // （灰）就够了，字号必须与名称 / crc / 区域完全一致。
         let from = r.from.clone().map(|f| format!("({f})")).unwrap_or_default();
         cell(
             ui,
             cols::FROM,
-            egui::RichText::new(from).small().color(ui_weak_color()),
+            egui::RichText::new(from).monospace().color(ui_weak_color()),
         );
     });
 }
@@ -438,7 +451,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                     cols::STATE,
                 egui::RichText::new(app.tr(state_word(d.state))).color(color),
                 );
-                let _ = icon_cell(ui, d.state);
+                icon_cell(ui, d.state);
                 let short = if d.sha1.len() > 8 {
                     d.sha1[..8].to_string()
                 } else {
@@ -478,15 +491,17 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                     cols::STATE,
                     egui::RichText::new(app.tr(state_word(b.state))).color(color),
                 );
-                // 描述占 crc + region 两列的宽度（描述比 crc 长得多）
+                // 描述占 crc + region 两列的宽度（描述比 crc 长得多）。
+                // 同样**不加 `.small()`** —— 字号跟其他列一致，靠灰色弱化。
                 cell(
                     ui,
                     cols::CRC + cols::REGION,
-                egui::RichText::new(&b.description)
-                            .small()
-                            .color(ui_weak_color()),
+                    egui::RichText::new(&b.description)
+                        .monospace()
+                        .color(ui_weak_color()),
                 );
                 gap(ui, cols::ICON);
+                gap(ui, cols::ICON_GAP);
                 gap(ui, cols::FROM);
             });
             for r in &b.roms {
@@ -521,6 +536,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                 // 后面这些列一律留空，但**必须用 gap 占住**——少一列，
                 // 下一行的设备 rom 就会整体前移（见 `gap` 的注释）。
                 gap(ui, cols::ICON);
+                gap(ui, cols::ICON_GAP);
                 gap(ui, cols::CRC);
                 gap(ui, cols::REGION);
                 gap(ui, cols::FROM);
@@ -541,98 +557,24 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
         }
     }
 
-    // 设备 + 槽位**合并成一段**（用户要求）：两者回答的是同一个问题
-    // ——"这台机器能插什么、插什么文件"，拆成"设备段"和"槽位段"两段
-    // 反而让人以为它们是两回事。实测 `elwro800` 两种都有：4 个 `<device>`
-    // （floppydisk / printout / cassette…）+ 3 个 `<slot>`（其中 centronics
-    // 有 19 个 option）。
+    // 设备/ 槽位段已在 2026-10-06 **整段删除**（用户要求）。
+    // 理由：`<device>` / `<slot>` 描述的是"模拟器自带的硬件能力"，
+    // 不是"用户手上有没有这个文件"——`floppydisk` / `fdc:0` / `printer`
+    // 这些行对"这盘游戏能不能跑"没有增量信息。Rom 段与引用设备段已经
+    // 覆盖了真正影响可运行性的东西。
     //
-    // 三列：**类型 / 安装路径 / 详情**
-    //   - `<device>`：type（`floppydisk`）/ tag（`upd765:0:525hd`）/ 扩展名
-    //   - `<slot>`  ：槽名（`centronics`） / 空/ option 数 / option 清单
-    //
-    // 第2 列的 tag 是用户截图里那一列；`DeviceSlotRow::tag` 在
-    // `rominfo.rs` 填充时已去掉前导冒号（MAME 写的是 `:upd765:0:525hd`）。
-    if !view.slots.is_empty() || !view.slot_decls.is_empty() {
-        ui.add_space(cols::SECTION_GAP);
-        // 段头复用 `"Device slots:"` 这个键——它的译文本来就是"设备:"
-        // （繁"裝置:"），而 `"Devices:"` 是个没登记过的新键，`tr` 会退化成
-        // 显示英文原文。
-        section(ui, app, "Device slots:");
-        // 统一列宽：类型 / tag / 详情。第三列吃掉全部剩余空间。
-        for d in &view.slots {
-            tight_horizontal(ui, |ui, _row_width| {
-                // 与上面各段对齐：先吃掉状态列的宽度，让第1 列起点一致
-                gap(ui, cols::STATE);
-                // 第1 列：设备类型（`floppydisk` / `printout` / `cassette`）
-                cell(
-                    ui,
-                    cols::DEVICE_TYPE,
-                    egui::RichText::new(&d.kind).monospace().color(icons::GREEN),
-                );
-                // 第2 列：安装路径（`upd765:0:525hd` / `cassette`）
-                cell(
-                    ui,
-                    cols::DEVICE_TAG,
-                    egui::RichText::new(&d.tag).monospace().color(ui_weak_color()),
-                );
-                // 第3 列：可用的文件扩展名。**要留 6px 小间距**——
-                // 与图标和 crc 之间的空隙一致。
-                let exts = format!("  {}", d.extensions);
-                cell(
-                    ui,
-                    (_row_width - cols::STATE - cols::DEVICE_TYPE - cols::DEVICE_TAG).max(40.0),
-                    egui::RichText::new(exts).monospace().color(ui_weak_color()),
-                );
-            });
-        }
-        for sl in &view.slot_decls {
-            tight_horizontal(ui, |ui, _row_width| {
-                gap(ui, cols::STATE);
-                // 槽位行第1 列填**槽名**（与设备行的 type 同列，同为"这行的身份"）
-                cell(
-                    ui,
-                    cols::DEVICE_TYPE,
-                    egui::RichText::new(&sl.name).monospace().color(icons::GREEN),
-                );
-                // 第2 列：可选设备数，空槽位（`nes_slot`）显示 0而不是空白
-                // 走 i18n：简繁两套里key 相同、译文不同，硬编码"个"会让
-                // 繁体用户看到简体字。
-                cell(
-                    ui,
-                    cols::DEVICE_TAG,
-                    egui::RichText::new(app.tr("{} options").replace("{}", &sl.option_count.to_string()))
-                        .monospace()
-                        .color(ui_weak_color()),
-                );
-                // 第3 列：option 清单。19 个会折行，`cell` 已按列宽换行并
-                // 把多行高度报给行布局（见 `cell` 的注释）。
-                let text = if sl.options.is_empty() {
-                    "-".to_string()
-                } else {
-                    sl.options.clone()
-                };
-                let text = format!("  {text}");
-                cell(
-                    ui,
-                    (_row_width - cols::STATE - cols::DEVICE_TYPE - cols::DEVICE_TAG).max(40.0),
-                    egui::RichText::new(text).monospace().color(ui_weak_color()),
-                );
-            });
-        }
-    }
+    // 数据层仍在（`RomInfoView::slots` / `slot_decls`），只是不渲染了——
+    // 它们是 MAME 硬件模型的完整描述，别的功能（命令行生成）可能要用。
 
-    // Samples 段：**样本集名 + 状态 + 图标 + 拥有数/总数**。
+    // Samples 段：**只有样本集名 + 状态两列**（2026-10-06 用户要求）。
     //
-    // 只到"包"这一级，**不逐个列出 zip 里的wav**（用户要求）。理由：
-    // 样本集是共享包——`genpin` 被1438 台 pinball 游戏共用，但每台需要的
-    // 文件子集不同（rctycn 要 18 个，别的可能只要 5 个）。列出 18 行wav
-    // 会把面板撑得很长，而用户真正关心的是"这台游戏要的齐了没有"。
+    // 去掉的是：状态图标、`18/18` 数量。判据从"包里逐个比对文件"改成
+    // **"这个样本集包在不在"** —— 样本集是共享包（`genpin` 被 1438 台
+    // pinball 游戏引用），`18/18` 的分子是整包的文件数、分母是这台机器
+    // 需要的数量，两个不同口径的数并排显示并不说明任何事。
     //
-    // 数据链路：`GameMeta::samples`（本机要的 `<sample>` 名，解析时就有了）
-    // vs `samplepath` 下 `{sampleof}.zip` 的包内条目名（拼 `.wav` 后比对），
-    // 得出 `have/total`。**CRC 校验做不了** —— `<sample>` 元素只有 name，
-    // DTD 写死`<!ELEMENT sample EMPTY>`，官方没给校验值。
+    // **CRC 校验本来也做不了**：`<sample>` 是 EMPTY 元素，DTD 里只有 name，
+    // 没有 size/crc/sha1。所以"包在不在"已经是能拿到的最强结论。
     if !view.samples.is_empty() {
         ui.add_space(cols::SECTION_GAP);
         section(ui, app, "Samples:");
@@ -649,21 +591,18 @@ pub fn render(ui: &mut egui::Ui, app: &mut MameApp, view: &RomInfoView) {
                     cols::STATE,
                     egui::RichText::new(app.tr(state_word(s.state))).color(color),
                 );
-                let _ = icon_cell(ui, s.state);
-                // `9/9` —— 有了（数）/ 需要（总数）。左对齐，与Rom 段的
-                // `crc(...)` 同一列同一栅格。
-                cell(
-                    ui,
-                    cols::CRC,
-                    egui::RichText::new(format!("{}/{}", s.have, s.total)).monospace(),
-                );
-                // 补齐栅格后两列
+                // 后面的列一律留空，但**必须 gap 占住**——少一列，这一段
+                // 的名称列宽度就与 Rom 段不一致（见 `cols::GRID`）。
+                gap(ui, cols::ICON);
+                gap(ui, cols::ICON_GAP);
+                gap(ui, cols::CRC);
                 gap(ui, cols::REGION);
                 gap(ui, cols::FROM);
             });
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,50 +614,62 @@ mod tests {
         assert_eq!(crc_text(0x78c1_5fa2), "crc(78c15fa2)");
     }
 
-    /// 用户指定的四态配色必须真的不同，否则"未拥有"和"未审计"在界面上一样，
-    /// 用户会以为自己的盘空了。
+    /// 用户指定的四态配色（2026-06 修订）：绿 / 黄 / 黄 / 红。
     ///
-    /// 灰色是 `nodump` 与 `unknown` **共用**的：两者都不是坏消息，靠文字
-    /// 区分（"无 dump" / "未审计"），颜色上再分成两档只会让人以为"无 dump"
-    /// 也是要处理的问题。
+    /// **只有"未拥有"是红色。** `nodump` 从灰色改成黄色（与坏 dump 同色，
+    /// 图标也是同一个感叹号）——原先它和"未审计"共用灰色，用户看到灰就
+    /// 以为是没查。灰色现在只属于"未审计"，独占。
     #[test]
     fn the_four_user_facing_colours_are_distinct() {
-        let owned = state_color(RomState::Good);
-        let baddump = state_color(RomState::BadDump);
-        let not_owned = state_color(RomState::Missing);
-        let grey = state_color(RomState::NoDump);
-        assert_eq!(owned, icons::GREEN, "拥有=绿");
-        assert_eq!(baddump, icons::YELLOW, "坏 dump=黄");
-        assert_eq!(not_owned, icons::RED, "未拥有=红");
-        assert_ne!(owned, not_owned);
-        assert_ne!(owned, baddump);
-        assert_ne!(baddump, not_owned);
-        assert_ne!(not_owned, grey, "未拥有和 nodump 不能同色");
-        assert_eq!(
+        assert_eq!(state_color(RomState::Good), icons::GREEN, "拥有=绿");
+        assert_eq!(state_color(RomState::BadDump), icons::YELLOW, "坏 dump=黄");
+        assert_eq!(state_color(RomState::NoDump), icons::YELLOW, "未 dump=黄");
+        assert_eq!(state_color(RomState::Missing), icons::RED, "未拥有=红");
+        // 红色是"确实缺"的专属，不能被任何别的状态借用
+        assert_ne!(
             state_color(RomState::Unknown),
-            grey,
-            "未审计与 nodump 共用灰色"
+            icons::RED,
+            "未审计不能是红色 —— 那会让人以为自己的盘空了"
+        );
+        assert_ne!(
+            state_color(RomState::Unknown),
+            icons::YELLOW,
+            "未审计不能是黄色 —— 黄色已经表示有问题了"
         );
     }
 
-    /// 五种状态都必须有图标名，且**互不相同**——共用图标等于让用户分不清
-    /// 那一列到底在说什么。
+    /// 每个状态都要有图标名。
+    ///
+    /// **`nodump` 与 `baddump` 共用黄叹号是故意的**（2026-06）：用户要求
+    /// "未 dump 用黄色加个感叹号"，而这两者同色同义 —— 都是"有问题，但不是
+    /// 缺文件"。原先 `nodump` 用蓝问号（`status_preliminary`），那格图标
+    /// 自带蓝色，跟旁边的黄字并排显得是两件事。
+    ///
+    /// 真正要防的是**绿勾 / 红叉 / 黄叹 / 蓝问这四个语义图标**被两个状态
+    /// 共用：拥有/坏 dump/未拥有/未审计必须各自不同。
     #[test]
-    fn every_state_has_its_own_icon() {
-        let mut names: Vec<&str> = [
+    fn the_meaningful_icons_are_not_shared() {
+        let unique = [
             RomState::Good,
             RomState::BadDump,
             RomState::Missing,
-            RomState::NoDump,
             RomState::Unknown,
-        ]
-        .iter()
-        .map(|s| state_icon(*s).expect("每个状态都要有图标"))
-        .collect();
+        ];
+        let mut names: Vec<&str> = unique
+            .iter()
+            .map(|s| state_icon(*s).expect("每个状态都要有图标"))
+            .collect();
         names.sort_unstable();
         let before = names.len();
         names.dedup();
         assert_eq!(names.len(), before, "图标不能重复：{names:?}");
+
+        // nodump 明确跟baddump 共用那张黄叹号
+        assert_eq!(
+            state_icon(RomState::NoDump),
+            state_icon(RomState::BadDump),
+            "未 dump 与坏 dump 同为黄色感叹号"
+        );
     }
 
     /// **所有段的状态列必须落在同一条竖线上。**
@@ -748,7 +699,18 @@ mod tests {
             );
         }
         // GRID 必须是五列之和（曾经漏算一列，导致列宽对不上）
-        assert_eq!(cols::GRID, cols::STATE + cols::ICON + cols::CRC + cols::REGION + cols::FROM);
+        assert_eq!(
+            cols::GRID,
+            cols::STATE + cols::ICON + cols::ICON_GAP + cols::CRC + cols::REGION + cols::FROM,
+            "GRID 必须算上图标与后一列之间的间隙，否则名称列宽对不上"
+        );
+        // 间隙必须是真的正数：曾经把它折进 ICON 列宽（22 = 16 + 6），
+        // 而 allocate_exact_size 在 LeftToRight 里会把宽度收回去 → 0px。
+        assert!(
+            cols::ICON_GAP >= 4.0,
+            "图标与小间隙必须分开两笔，不能指望列宽相减：{}",
+            cols::ICON_GAP
+        );
         // 面板拉窄时名称列不许变负——负宽度会把后面的列往回挤，比窄更糟
         assert!(cols::name_width(10.0) >= 60.0, "窄面板下要有下限");
     }

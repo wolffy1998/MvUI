@@ -10,10 +10,38 @@ fn main() {
         .nth(1)
         .expect("gamelist.cache path");
     let game = std::env::args().nth(2).unwrap_or_else(|| "rctycn".into());
-    let data = mvui::core::cache::load(std::path::Path::new(&cache), "MAME v0.285 (unknown)")
-        .expect("load library");
-    let lib = data.library;
-    println!("audited={} games={}", data.audited, lib.games.len());
+    // 2026-10-06：FORMAT_VERSION 升到 5，老缓存（format 4）会被拒绝。
+    // 探针改为直接吃 ，这样验证新解析不必先重建 40 秒缓存。
+    let audited_flag;
+    let lib = if std::path::Path::new(&cache).extension().is_some() {
+        match mvui::core::cache::load(std::path::Path::new(&cache), "MAME v0.285 (unknown)") {
+            Ok(d) => {
+                println!("（读的是缓存，audited={}）", d.audited);
+                audited_flag = d.audited;
+                d.library
+            }
+            Err(e) => {
+                println!("缓存不可用（{e}），改读 listxml");
+                audited_flag = true;
+                let f = std::fs::File::open(&cache).expect("open xml");
+                let mut sink = |_d: usize| {};
+                mvui::core::listxml::parse_from_reader(
+                    std::io::BufReader::new(f),
+                    false,
+                    &mut sink,
+                )
+                .expect("parse")
+            }
+        }
+    } else {
+        let f = std::fs::File::open(&cache).expect("open xml");
+        let mut sink = |_d: usize| {};
+        println!("（读的是 listxml）");
+        audited_flag = true;
+        mvui::core::listxml::parse_from_reader(std::io::BufReader::new(f), false, &mut sink)
+            .expect("parse")
+    };
+    println!("audited={} games={}", audited_flag, lib.games.len());
 
     // 真实样本目录（D://Game//MAME//MAME-0.284//samples）
     let sp = r"D://Game//MAME//MAME-0.284//samples";
@@ -54,13 +82,13 @@ fn main() {
         }
     }
 
-    let v = mvui::core::rominfo::view_of(&lib, &game, data.audited);
+    let v = mvui::core::rominfo::view_of(&lib, &game, audited_flag);
     println!("\n== view_of({game}) ==");
     println!("  roms={} disks={} bios={} devices={} slots={} slot_decls={} samples={}",
         v.roms.len(), v.disks.len(), v.bios.len(), v.devices.len(),
         v.slots.len(), v.slot_decls.len(), v.samples.len());
     for s in &v.samples {
-        println!("    sample {} {}/{} {:?}", s.name, s.have, s.total, s.state);
+        println!("    sample {} {:?}", s.name, s.state);
     }
 
     // 全库统计：有多少机种有 sampleof非空 / 有 samples / 能命中
@@ -91,7 +119,7 @@ fn main() {
     for x in lib.games.iter() {
         if x.sampleof.is_empty() || x.samples.is_empty() { continue; }
         if mvui::core::samples::find_sample_archive(&dirs, &x.sampleof).is_none() { continue; }
-        let v = mvui::core::rominfo::view_of(&lib, &x.name, data.audited);
+        let v = mvui::core::rominfo::view_of(&lib, &x.name, audited_flag);
         if v.slots.is_empty() && v.slot_decls.is_empty() { continue; }
         println!("  {:<16} sampleof={:<14} samples={} devices={} slots={} slot_decls={}",
             x.name, x.sampleof, v.samples.len(), v.devices.len(), v.slots.len(), v.slot_decls.len());

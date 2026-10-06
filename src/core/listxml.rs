@@ -91,9 +91,17 @@ fn count_tags(hay: &[u8], carry_len: usize) -> usize {
     n
 }
 
+/// `is_mess` **已不再使用**（2026-10-06），保留参数是为了不改动全部调用点。
+///
+/// 它当年只有一个用处：门控 `<biosset>` 的解析（`is_mess || is_bios`，
+/// 抄 1.8.2 的 `prototype.cpp:204`）。那道门在真实 MAME 0.284 上几乎全关
+/// —— `<biosset>` 分布在 3655 个 machine 上，而 `isbios="yes"` 只有 79 处、
+/// `isbios="no"` 零处，于是只解析出 42 个机种的 BIOS 声明。参数就此失去用途。
+///
+/// 将来若有 MESS 专属的解析分支，再把它用起来。
 pub fn parse_from_reader<R: BufRead>(
     mut r: R,
-    is_mess: bool,
+    _is_mess: bool,
     progress: ProgressFn,
 ) -> Result<GameLibrary, String> {
     let mut reader = Reader::from_reader(&mut r);
@@ -237,22 +245,37 @@ pub fn parse_from_reader<R: BufRead>(
                     }
                 }
                 b"biosset" => {
-                    // original: only parsed when isMESS || isBios
-                    let keep = is_mess || cur.as_ref().map(|m| m.is_bios).unwrap_or(false);
-                    if keep {
-                        if let Some(m) = cur.as_mut() {
-                            let mut b = BiosSet::default();
-                            for a in e.attributes() {
-                                let a = a.map_err(|er| er.to_string())?;
-                                match a.key.as_ref() {
-                                    b"name" => b.name = attr_str(&a.value),
-                                    b"description" => b.description = attr_str(&a.value),
-                                    b"default" => b.is_default = a.value.as_ref() == b"yes",
-                                    _ => {}
-                                }
+                    // **门控已去掉（2026-10-06）。** 原来是
+                    // `is_mess || is_bios`（照抄 1.8.2 的 `prototype.cpp:204`
+                    // `"else if ((isMESS || gameInfo->isBios) && qName == "biosset")"`），
+                    // 但实测 MAME 0.284 全量 listxml（320MB）：
+                    //   - `<biosset>` 出现 40435 次，分布在 **3655 个 machine**
+                    //   - `isbios="yes"` 只有 **79 处**，`isbios="no"` **0 处**
+                    //     （绝大多数 machine 干脆不写这个属性 → 默认 false）
+                    // 于是这道门只放行了极少数：**3655 个机种只解析出 42 个**，
+                    // 丢 99.9%。
+                    //
+                    // 后果不是"少显示点东西"，而是**BIOS 文件凭空消失**：
+                    // Rom 段按 `r.bios.is_empty()` 把带 `bios=` 的条目排除掉，
+                    // 而 Bios 段因为拿不到 `bios_sets` 也一行都渲染不出来。
+                    // 用户看到的现象正是"BIOS 文件没从 Rom 里独立显示"——
+                    // 它既不在 Rom 段，也不在 Bios 段（实测 64576 个 rom 如此）。
+                    //
+                    // `<biosset>` 只是个描述性的标签元素，多解析它不会引入错误
+                    // 数据；真正判定用哪一套的是 `default` 属性与 `view_of`
+                    // 的筛选逻辑。
+                    if let Some(m) = cur.as_mut() {
+                        let mut b = BiosSet::default();
+                        for a in e.attributes() {
+                            let a = a.map_err(|er| er.to_string())?;
+                            match a.key.as_ref() {
+                                b"name" => b.name = attr_str(&a.value),
+                                b"description" => b.description = attr_str(&a.value),
+                                b"default" => b.is_default = a.value.as_ref() == b"yes",
+                                _ => {}
                             }
-                            m.bios_sets.push(b);
                         }
+                        m.bios_sets.push(b);
                     }
                 }
                 b"sample" => {
@@ -765,6 +788,76 @@ mod tests {
         let lib = parse_from_reader(&buf[..], false, &mut |_| {}).unwrap();
         assert_eq!(total, 4);
         assert_eq!(lib.len(), 4);
+    }
+
+    /// **`<biosset>` 必须无条件解析**——不能被 `is_mess || is_bios` 门控。
+    ///
+    /// 这条测试是2026-10-06 那个BIOS「整段消失」BUG 的回归钉子。它看起来
+    /// 琐碎，但那个门控是**照抄旧版 1.8.2**（`prototype.cpp:204`）的，而旧版
+    /// 在真实 MAME 上也是错的：
+    ///
+    /// - `<biosset>` 分布在全库 **3655 个 machine** 上（实测 MAME 0.284）
+    /// - 而 `isbios="yes"` 只有 **79 处**，`isbios="no"` **0 处**
+    ///   （绝大多数 machine 干脆不写这个属性 → `is_bios` 默认 false）
+    ///
+    /// 于是门控只放行了 42 个机种，**丢 99.9%**。后果不是"少显示"，而是
+    /// Rom 段按 `bios.is_empty()` 排除掉64576 个 BIOS rom、Bios 段又没数据
+    /// 可渲染 → **文件凭空消失，零报错**。
+    ///
+    /// 下面的xml刻意**不带** `isbios` 属性（`kovplus` 的真实形态），且两套
+    /// BIOS 都没写 `default="yes"`（实测大量机种如此）——正是当年被门控
+    /// 挡掉的那一类。
+    #[test]
+    fn biosset_is_parsed_even_without_the_isbios_attribute() {
+        let xml = br#"<mame build="0.1">
+<machine name="kovplus" sourcefile="igs/pgm.cpp" romof="pgm">
+  <description>Kovplus</description>
+  <biosset name="v2" description="PGM BIOS V2"/>
+  <biosset name="v1" description="PGM BIOS V1"/>
+  <rom name="pgm_p0603_v119.u1" size="4194304" crc="e4b0875d" region="maincpu"/>
+  <rom name="pgm_p02s.u20" bios="v2" size="131072" crc="78c15fa2" region="maincpu"/>
+  <rom name="pgm_p01s.u20" bios="v1" size="131072" crc="e42b166e" region="maincpu"/>
+</machine>
+</mame>"#;
+        let lib = parse_from_reader(&xml[..], false, &mut |_| {}).unwrap();
+        let g = lib.get("kovplus").expect("kovplus 在库里");
+        assert_eq!(
+            g.bios_sets.len(),
+            2,
+            "没有 isbios 属性、也没写 default 的机种，biosset 照样要解析出来"
+        );
+        assert_eq!(g.bios_sets[0].name, "v2");
+        assert_eq!(g.bios_sets[0].description, "PGM BIOS V2");
+        assert_eq!(g.bios_sets[1].name, "v1");
+        assert!(
+            g.bios_sets.iter().all(|b| !b.is_default),
+            "这两套本来就没有 default 属性，别凭空造一个"
+        );
+        // 带bios= 的 rom 本身也要在（Rom 段排除它们是靠这个字段）
+        let tagged: Vec<&str> = g
+            .roms
+            .iter()
+            .filter(|r| !r.bios.is_empty())
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(tagged, vec!["pgm_p02s.u20", "pgm_p01s.u20"]);
+    }
+
+    /// `<biosset>` 的 `default="yes"` 必须如实记录，且**不能**因为解析放开
+    /// 就给所有机种都塞一个默认值。
+    #[test]
+    fn biosset_default_flag_is_read_from_the_attribute() {
+        let xml = br#"<mame build="0.1">
+<machine name="pgm" isbios="yes">
+  <biosset name="v1" description="V1"/>
+  <biosset name="v2" description="V2" default="yes"/>
+</machine>
+</mame>"#;
+        let lib = parse_from_reader(&xml[..], false, &mut |_| {}).unwrap();
+        let g = lib.get("pgm").expect("pgm 在库里");
+        assert_eq!(g.bios_sets.len(), 2);
+        assert!(!g.bios_sets[0].is_default, "v1 没写 default");
+        assert!(g.bios_sets[1].is_default, "v2 写了 default=yes");
     }
 
     #[test]
