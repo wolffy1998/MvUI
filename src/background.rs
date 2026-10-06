@@ -218,6 +218,35 @@ fn parse_listxml(
     Ok(library)
 }
 
+/// 从已加载的选项链里取 `samplepath`，写进 `core::samples` 的全局目录表。
+///
+/// **热启动和冷启动都必须调它。** 这正是本轮修的那个 BUG：`set_sample_dirs`
+/// 原先只写在 `finish_boot`（冷启动/补审计）里，而 `finish_boot_cached`
+/// （缓存命中且 `audited=true`——**绝大多数正常启动都走这条**）完全没有这一段。
+/// 于是热启动时全局目录表恒为空，`find_sample_archive` 一律返回 `None`，
+/// Samples 段对**所有**游戏恒为灰色"未知"，永远不显示 `拥有 18/18`。
+/// 单独跑 `examples/samples_probe` 却能验出 `genpin 18/18 Good`——因为探针
+/// 自己调了 `set_sample_dirs`，绕过了引导。这就是"探针绿、程序灰"的原因。
+fn publish_sample_dirs(opts: &SharedOpts) {
+    let dirs: Vec<PathBuf> = {
+        let guard = opts.lock().unwrap();
+        match guard.opts.get("samplepath") {
+            Some(o) if !o.currvalue.trim().is_empty() => guard.resolve_dir_list(&o.currvalue),
+            // mame.ini 没这一项（或留空）时用 MAME 官方默认（相对 MAME 目录）
+            _ => guard.resolve_dir_list(crate::core::samples::DEFAULT_SAMPLEPATH),
+        }
+    };
+    crate::core::samples::set_sample_dirs(dirs.clone());
+    dlog!(
+        "引导: 样本目录 {} 个: {}",
+        dirs.len(),
+        dirs.iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+}
+
 /// warm start: publish options + library as-is (audit state comes from cache)
 fn finish_boot_cached(
     library: GameLibrary,
@@ -240,7 +269,11 @@ fn finish_boot_cached(
     for w in &core.warnings {
         let _ = tx.send(AppEvent::Log(w.clone()));
     }
-    let _ = tx.send(AppEvent::OptionsReady(Ok(Arc::new(Mutex::new(core)))));
+    let opts: SharedOpts = Arc::new(Mutex::new(core));
+    let _ = tx.send(AppEvent::OptionsReady(Ok(Arc::clone(&opts))));
+    // 样本目录：热启动同样要发布（见 `publish_sample_dirs` 的注释——漏了它
+    // 面板上的 Samples 段会恒为灰色"未知"）。
+    publish_sample_dirs(&opts);
     dlog!(
         "引导: 热启动选项就绪（{} 个选项），耗时 {:?}",
         library.len(),
@@ -315,20 +348,7 @@ fn finish_boot(
     // 是独立包（`samples/{name}.zip`），不跟 rom 放一起，而且它不进审计
     // 单元——只用来算面板上那一行 `拥有 9/9`。
     // 没有这一段时样本行全是"未审计"（灰），而不是错的"缺失"。
-    let sample_dirs: Vec<PathBuf> = {
-        let guard = opts.lock().unwrap();
-        match guard.opts.get("samplepath") {
-            Some(o) if !o.currvalue.trim().is_empty() => guard.resolve_dir_list(&o.currvalue),
-            // mame.ini 没这一项时用 MAME 官方默认（相对 MAME 目录）
-            _ => guard.resolve_dir_list(crate::core::samples::DEFAULT_SAMPLEPATH),
-        }
-    };
-    crate::core::samples::set_sample_dirs(sample_dirs.clone());
-    dlog!(
-        "引导: 样本目录 {} 个: {}",
-        sample_dirs.len(),
-        sample_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
-    );
+    publish_sample_dirs(&opts);
     let _ = tx.send(AppEvent::Log(format!("audit: {} rom dirs", rom_paths.len())));
 
     // Persist the parsed library *before* auditing. The audit is the slow part

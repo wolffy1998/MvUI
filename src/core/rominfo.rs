@@ -664,9 +664,11 @@ pub fn view_of(lib: &GameLibrary, game: &str, audited: bool) -> RomInfoView {
     // 出现 0 次），所以 1574/1898 恒None，Samples 段对绝大多数游戏永远空。
     // 现在改用 `core::samples`：拿本机`<sample>` 名去 `samplepath` 的
     // `{sampleof}.zip` 里比对条目名。
-    if let Some(row) =
-        crate::core::samples::audit_game_sample(g, crate::core::samples::sample_dirs(), audited)
-    {
+    //
+    // `sample_dirs()` 返回 `Vec`（内部是 `RwLock`，不能借出 `&'static`），
+    // 先绑到局部再借引用，别把临时值的引用传下去。
+    let sdirs = crate::core::samples::sample_dirs();
+    if let Some(row) = crate::core::samples::audit_game_sample(g, &sdirs, audited) {
         view.samples.push(row);
     }
 

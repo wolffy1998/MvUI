@@ -147,12 +147,13 @@ pub fn audit_game_sample(
     let total = g.samples.len();
     let Some(pack) = find_sample_archive(dirs, &g.sampleof) else {
         // 包都没找到：状态未知（不是"缺 18 个"——用户可能压根没下采样包，
-        // 报"缺失"会误导他去逐个文件找）。
+        // 报"缺失"会误导他去逐个文件找）。**未审计也是同一个 Unknown**，
+        // 所以这里不再按 `audited` 分支（原先两个分支写同一个值，是死代码）。
         return Some(SampleRow {
             name: g.sampleof.clone(),
             have: 0,
             total,
-            state: if audited { RomState::Unknown } else { RomState::Unknown },
+            state: RomState::Unknown,
         });
     };
     let have_set = list_have(&pack);
@@ -187,21 +188,32 @@ pub const DEFAULT_SAMPLEPATH: &str = "samples";
 /// 目录与 Rom 目录不同——它**只有一个**（MAME 的 `samplepath` 是单值，
 /// 不是 `;` 分隔的列表），全局存一份就够。
 ///
-/// 用 `OnceLock` 而不是 `Mutex`：读多写极少（只在引导时写一次），且
-/// `view_of` 是纯函数、不该有锁。
-static SAMPLE_DIRS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+/// 用 `RwLock` 而不是 `OnceLock`：**必须允许覆盖**。`OnceLock::set` 第二次调用
+/// 返回 `Err` 且**不生效**（返回值极易被 `let _ =` 吞掉，于是"刷新目录"变成
+/// 静默无操作）；而且引导有热/冷两条路径都会设目录，第二次设是常态不是异常。
+/// 读多写极少（只在引导时写），`RwLock` 的读开销可以忽略。
+static SAMPLE_DIRS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
 
-/// 引导时设置样本目录。**没调过就用空列表**（于是所有样本行都是
+/// 引导时设置样本目录。**没调过就是空列表**（于是所有样本行都是
 /// [`RomState::Unknown`]，而不是错误的"缺失"）。
 ///
-/// 刻意允许覆盖：单元测试要指向临时目录，mame.ini 变了也要能刷新。
+/// 可重复调用，后一次覆盖前一次——`finish_boot` 与 `finish_boot_cached`
+/// 都会调（**两条路径都必须调**，见下）。
 pub fn set_sample_dirs(dirs: Vec<PathBuf>) {
-    let _ = SAMPLE_DIRS.set(dirs);
+    match SAMPLE_DIRS.write() {
+        Ok(mut g) => *g = dirs,
+        // 锁 poisoned：上一次写的时候 panic 了。样本目录只是"有没有样本包"的
+        // 提示信息，宁可继续用旧值也不要在这里 panic 把整个引导带崩。
+        Err(p) => *p.into_inner() = dirs,
+    }
 }
 
 /// 当前生效的样本目录。
-pub fn sample_dirs() -> &'static [PathBuf] {
-    SAMPLE_DIRS.get().map(|v| v.as_slice()).unwrap_or(&[])
+pub fn sample_dirs() -> Vec<PathBuf> {
+    match SAMPLE_DIRS.read() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +347,51 @@ mod tests {
             "7z 形态要认"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `set_sample_dirs` **必须能覆盖**。
+    ///
+    /// 回归测试：它原先是 `OnceLock`，`set` 第二次返回 `Err` 且**不生效**，
+    /// 而返回值被 `let _ =` 吞掉 → "刷新目录"静默变成无操作。引导的热/冷两条
+    /// 路径都要设目录，第二次设是常态。
+    #[test]
+    fn the_sample_dir_table_can_be_replaced() {
+        set_sample_dirs(vec![PathBuf::from("Z:\\first")]);
+        assert_eq!(sample_dirs(), vec![PathBuf::from("Z:\\first")]);
+        set_sample_dirs(vec![PathBuf::from("Y:\\second"), PathBuf::from("Y:\\third")]);
+        assert_eq!(
+            sample_dirs(),
+            vec![PathBuf::from("Y:\\second"), PathBuf::from("Y:\\third")],
+            "第二次 set 必须真的替换掉第一次的值"
+        );
+        // 复位，免得污染同进程里其他测试的全局状态
+        set_sample_dirs(Vec::new());
+    }
+
+    /// 全局目录表驱动的审计：设进去就能查到，查不到就是空表。
+    /// 这条正是"热启动 Samples 段恒灰"的形状——`sample_dirs()` 返回空表时，
+    /// 有样本的游戏也只能是 Unknown。
+    #[test]
+    fn the_global_table_drives_the_audit() {
+        let dir = std::env::temp_dir().join("mvui_samples_global");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        std::fs::write(dir.join("genpin.zip"), b"not a real zip").expect("写占位");
+
+        let g = meta_with("rctycn", "genpin", &["a", "b"]);
+        set_sample_dirs(vec![dir.clone()]);
+        // 找到一个占位 zip：至少证明"目录被用上了"（坏 zip → 空 Set → Missing）
+        let row = audit_game_sample(&g, &sample_dirs(), true).expect("出行");
+        assert_eq!(row.name, "genpin");
+        assert_eq!(row.total, 2);
+        assert_ne!(row.state, RomState::Unknown, "包在磁盘上，不该是 Unknown");
+
+        // 把表清空 → 立刻退回 Unknown（这正是热启动漏设目录时的表现）
+        set_sample_dirs(Vec::new());
+        let row2 = audit_game_sample(&g, &sample_dirs(), true).expect("出行");
+        assert_eq!(row2.state, RomState::Unknown, "空表 = 找不到包 = Unknown");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `_sample` 前缀是 MAME 自己给"内部使用样本"的文件名约定，
